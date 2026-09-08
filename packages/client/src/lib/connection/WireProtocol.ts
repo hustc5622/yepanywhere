@@ -1,3 +1,4 @@
+import type { SessionDisplaySubscriptionOptions } from "@yep-anywhere/shared";
 import type {
   ClientPing,
   DeviceServerMessage,
@@ -486,6 +487,7 @@ export class WireProtocol {
     handlers: StreamHandlers,
     lastEventId?: string,
     lastMessageId?: string,
+    display?: SessionDisplaySubscriptionOptions,
   ): Subscription {
     const subscriptionId = generateId();
 
@@ -501,6 +503,7 @@ export class WireProtocol {
           sessionId,
           lastEventId,
           lastMessageId,
+          ...(display ? { display } : {}),
         };
         this.transport.sendMessage(msg);
       })

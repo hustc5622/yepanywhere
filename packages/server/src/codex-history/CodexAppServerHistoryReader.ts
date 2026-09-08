@@ -1,5 +1,6 @@
 import type {
   SessionBranchState,
+  SessionDisplayTurnStatus,
   UrlProjectId,
   ZCodeStoredMessage,
 } from "@yep-anywhere/shared";
@@ -83,6 +84,10 @@ export type CodexAppServerSemanticPageResult =
       summary: SessionSummary;
       provider: "codex" | "codex-oss";
       revision: string;
+      /** Native lifecycle keyed by Codex turn id for display reconciliation. */
+      turnStatuses?: Readonly<Record<string, SessionDisplayTurnStatus>>;
+      /** Detached history has no terminal timing for this newest turn. */
+      inferredLatestTurnId?: string;
       nextCursor?: string;
     }
   | {
@@ -95,6 +100,8 @@ export interface CodexAppServerSemanticPageOptions {
   limit: number;
   itemsView: "summary" | "full";
   expectedRevision?: string;
+  /** Live runtime evidence for the newest turn; never applied to older pages. */
+  toolsMayBeActive?: boolean;
 }
 
 export interface CodexForkBranchCandidate {
@@ -255,8 +262,23 @@ export class CodexAppServerHistoryReader {
             sessionId,
             turn.id,
           );
+          // This read-only app-server does not own the executing thread.
+          // Codex normalizes its unfinished turns to "interrupted" when the
+          // thread is not loaded locally. Only reopen the newest turn when
+          // Yep still observes live work and no native completion timing was
+          // recorded; actual interruptions and older turns stay terminal.
+          const status =
+            options.toolsMayBeActive === true &&
+            !options.cursor &&
+            turn.id === newestTurn?.id &&
+            turn.status === "interrupted" &&
+            turn.completedAt == null &&
+            turn.durationMs == null
+              ? ("inProgress" as const)
+              : turn.status;
           return {
             ...turn,
+            status,
             items:
               options.itemsView === "full"
                 ? items
@@ -313,10 +335,22 @@ export class CodexAppServerHistoryReader {
           projectId,
           provider,
           messages.length,
-          newestTurn,
+          pageTurns[0],
         ),
         provider,
         revision,
+        turnStatuses: Object.fromEntries(
+          pageTurns.map((turn) => [
+            turn.id,
+            projectCodexTurnStatus(turn.status),
+          ]),
+        ),
+        ...(!options.cursor &&
+        newestTurn?.status === "interrupted" &&
+        newestTurn.completedAt == null &&
+        newestTurn.durationMs == null
+          ? { inferredLatestTurnId: newestTurn.id }
+          : {}),
         ...(turnsPage.nextCursor ? { nextCursor: turnsPage.nextCursor } : {}),
       };
     } catch (error) {
@@ -338,7 +372,7 @@ export class CodexAppServerHistoryReader {
     sessionId: string,
     projectPath: string,
     turnId: string,
-    expectedRevision: string,
+    expectedRevision?: string,
   ): Promise<CodexAppServerSemanticTurnResult> {
     if (this.mode === "rollout") {
       return { kind: "fallback", reason: "disabled" };
@@ -364,7 +398,8 @@ export class CodexAppServerHistoryReader {
       thread.id,
       thread.updatedAt,
     );
-    if (revision !== expectedRevision) throw staleCursorError();
+    if (expectedRevision && revision !== expectedRevision)
+      throw staleCursorError();
 
     try {
       const items = await readAllTurnItems(
@@ -925,6 +960,12 @@ function sourceName(source: unknown): string | undefined {
     if ("subAgent" in source) return "subAgent";
   }
   return undefined;
+}
+
+function projectCodexTurnStatus(
+  status: Turn["status"],
+): SessionDisplayTurnStatus {
+  return status === "inProgress" ? "running" : status;
 }
 
 function threadSummary(

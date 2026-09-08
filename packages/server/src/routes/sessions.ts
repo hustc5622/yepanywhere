@@ -50,6 +50,7 @@ import type {
 } from "../codex-history/CodexAppServerHistoryReader.js";
 import type { CodexSessionCatalog } from "../codex-history/CodexSessionCatalog.js";
 import type { CodexHistoryFallbackReason } from "../codex-history/types.js";
+import type { SessionDisplayService } from "../display/SessionDisplayService.js";
 import type { ISessionIndexService } from "../indexes/types.js";
 import {
   type SessionInputResponseBody,
@@ -159,6 +160,7 @@ const CODEX_CANONICAL_MAX_ROLLOUT_BYTES = (() => {
 })();
 
 export interface SessionsDeps {
+  sessionDisplayService?: SessionDisplayService;
   runtimeController?: RuntimeController;
   /** Shared pending-input authority used by HTTP and channel adapters. */
   sessionInteractionService?: SessionInteractionService;
@@ -937,6 +939,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     );
   };
   registerSessionDisplayRoutes(routes, {
+    displayService: deps.sessionDisplayService,
     scanner: deps.scanner,
     providerResolution: toProviderResolutionDeps(deps),
     codexAppServerHistoryReader: deps.codexAppServerHistoryReader,
@@ -960,6 +963,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         (bridgeView !== null && isActiveBridgeSessionView(bridgeView));
       return {
         provider: process?.provider ?? bridgeView?.session.provider,
+        projectId: process?.projectId ?? bridgeView?.session.projectId,
         toolsMayBeActive:
           process?.state === "in-turn" ||
           process?.state === "waiting-input" ||

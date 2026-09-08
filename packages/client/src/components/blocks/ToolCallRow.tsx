@@ -18,6 +18,8 @@ interface Props {
   sessionProvider?: string;
   /** Live streaming output preview while the tool is still running. */
   partialOutput?: string;
+  /** Render only the full body when another row already owns disclosure. */
+  detailOnly?: boolean;
 }
 
 type ToolCallStatus = Props["status"];
@@ -30,6 +32,7 @@ const ToolCallRowContent = memo(function ToolCallRowContent({
   status,
   sessionProvider,
   partialOutput,
+  detailOnly,
 }: Props) {
   // Create a minimal render context for tool renderers
   const renderContext: RenderContext = useMemo(
@@ -126,6 +129,36 @@ const ToolCallRowContent = memo(function ToolCallRowContent({
       setExpanded(!expanded);
     }
   };
+
+  if (detailOnly) {
+    return (
+      <div className="tool-row-detail-only">
+        {hasInlineRenderer ? (
+          toolRegistry.renderInline(
+            toolName,
+            toolInput,
+            structuredResult,
+            toolResult?.isError ?? false,
+            status,
+            renderContext,
+          )
+        ) : status === "pending" || status === "aborted" ? (
+          <ToolUseExpanded
+            toolName={toolName}
+            toolInput={toolInput}
+            context={renderContext}
+          />
+        ) : (
+          <ToolResultExpanded
+            toolName={toolName}
+            toolInput={toolInput}
+            toolResult={toolResult}
+            context={renderContext}
+          />
+        )}
+      </div>
+    );
+  }
 
   // Inline renderers bypass the entire tool-row structure
   if (hasInlineRenderer) {

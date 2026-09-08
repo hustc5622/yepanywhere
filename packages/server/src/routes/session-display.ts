@@ -16,6 +16,11 @@ import {
 import type { Context, Hono } from "hono";
 import { renderMarkdownToHtml } from "../augments/markdown-augments.js";
 import type { CodexAppServerHistoryReader } from "../codex-history/CodexAppServerHistoryReader.js";
+import type {
+  DisplaySelection,
+  SessionDisplayService,
+  SessionDisplaySource,
+} from "../display/SessionDisplayService.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import {
   buildSessionDisplayProjection,
@@ -31,8 +36,10 @@ import {
   type ProviderResolutionDeps,
   type SessionSource,
   findSessionSummaryAcrossProviders,
+  resolveSessionSources,
 } from "../sessions/provider-resolution.js";
 import type { GetSessionOptions, LoadedSession } from "../sessions/types.js";
+import { isUserPromptMessage } from "../sessions/user-prompt-message.js";
 import { compactQuestionText } from "../sessions/user-questions.js";
 import type {
   Message,
@@ -62,12 +69,14 @@ interface SessionDisplayCursor {
 }
 
 export interface SessionDisplayRuntimeState {
+  projectId?: string;
   provider?: ProviderName;
   toolsMayBeActive: boolean;
   pendingInputRequest?: InputRequest | null;
 }
 
 export interface SessionDisplayRoutesDeps {
+  displayService?: SessionDisplayService;
   scanner: Pick<ProjectScanner, "getOrCreateProject">;
   providerResolution: ProviderResolutionDeps;
   codexAppServerHistoryReader?: Pick<
@@ -107,6 +116,65 @@ export function registerSessionDisplayRoutes(
   routes: Hono,
   deps: SessionDisplayRoutesDeps,
 ): void {
+  if (deps.displayService) {
+    const service = deps.displayService;
+    service.configureSource(createSessionDisplaySource(deps));
+    const selection = (c: Context): DisplaySelection => ({
+      projectId: c.req.param("projectId") ?? "",
+      sessionId: c.req.param("sessionId") ?? "",
+      ...(c.req.query("branchId") ? { branchId: c.req.query("branchId") } : {}),
+    });
+    routes.get(
+      "/projects/:projectId/sessions/:sessionId/display/view",
+      async (c) => {
+        try {
+          const cursor = c.req.query("cursor");
+          return c.json(
+            cursor
+              ? await service.older(selection(c), cursor)
+              : await service.snapshot(
+                  selection(c),
+                  c.req.query("reset") === "true",
+                ),
+          );
+        } catch (error) {
+          return displayErrorResponse(c, error);
+        }
+      },
+    );
+    routes.get(
+      "/projects/:projectId/sessions/:sessionId/display/groups/:groupId",
+      async (c) => {
+        try {
+          return c.json(
+            await service.group(
+              selection(c),
+              c.req.param("groupId"),
+              c.req.query("cursor"),
+            ),
+          );
+        } catch (error) {
+          return displayErrorResponse(c, error);
+        }
+      },
+    );
+    routes.get(
+      "/projects/:projectId/sessions/:sessionId/display/tools/:toolId",
+      async (c) => {
+        try {
+          return c.json(
+            await service.detail(
+              selection(c),
+              c.req.param("toolId"),
+              c.req.query("cursor"),
+            ),
+          );
+        } catch (error) {
+          return displayErrorResponse(c, error);
+        }
+      },
+    );
+  }
   routes.get("/projects/:projectId/sessions/:sessionId/display", async (c) => {
     try {
       const resolved = await resolveDisplaySession(
@@ -226,6 +294,26 @@ export function registerSessionDisplayRoutes(
           );
         }
         const branchId = c.req.query("branchId") || undefined;
+        if (
+          deps.displayService &&
+          c.req.param("detailRef").startsWith("thinking:")
+        ) {
+          const detailRef = c.req.param("detailRef");
+          const content = await deps.displayService.reasoning(
+            {
+              projectId: resolved.project.id,
+              sessionId: resolved.sessionId,
+              branchId,
+            },
+            detailRef,
+          );
+          return c.json({
+            sessionId: resolved.sessionId,
+            revision,
+            detailRef,
+            content,
+          });
+        }
         const detail = await readThinkingDetail(
           deps,
           resolved,
@@ -241,11 +329,301 @@ export function registerSessionDisplayRoutes(
   );
 }
 
+/** Provider reads stay server-side; the view service owns identity and replay. */
+export function createSessionDisplaySource(
+  deps: SessionDisplayRoutesDeps,
+): SessionDisplaySource {
+  const resolvedCache = new Map<string, ResolvedDisplaySession>();
+  const resolve = async (selection: DisplaySelection) => {
+    const key = JSON.stringify([selection.projectId, selection.sessionId]);
+    let resolved = resolvedCache.get(key);
+    if (!resolved) {
+      resolved = await resolveDisplaySession(
+        deps,
+        selection.projectId,
+        selection.sessionId,
+        true,
+        true,
+      );
+      if (resolvedCache.size >= 32) {
+        const first = resolvedCache.keys().next().value;
+        if (first) resolvedCache.delete(first);
+      }
+      resolvedCache.set(key, resolved);
+    }
+    return {
+      ...resolved,
+      runtime:
+        (await deps.getRuntimeState?.(resolved.sessionId)) ?? resolved.runtime,
+    };
+  };
+  const stamp = async (selection: DisplaySelection) => {
+    const resolved = await resolve(selection);
+    let stats = await resolved.source.reader.getSessionFileStats?.(
+      resolved.sessionId,
+    );
+    if (!stats) {
+      const file = await resolved.source.reader.getSessionFilePath?.(
+        resolved.sessionId,
+      );
+      if (file) {
+        try {
+          const fileStat = await stat(file);
+          stats = { mtime: fileStat.mtimeMs, size: fileStat.size };
+        } catch {}
+      }
+    }
+    const summary = stats
+      ? resolved.summary
+      : ((await resolved.source.reader.getSessionSummary(
+          resolved.sessionId,
+          resolved.project.id,
+        )) ?? resolved.summary);
+    return JSON.stringify([
+      stats?.mtime ?? summary.updatedAt,
+      stats?.size,
+      resolved.runtime.toolsMayBeActive,
+      resolved.runtime.pendingInputRequest?.id,
+    ]);
+  };
+  const activity = (
+    resolved: ResolvedDisplaySession,
+    lastTurnStatus?: string,
+  ) =>
+    resolved.runtime.pendingInputRequest
+      ? ("waiting-input" as const)
+      : resolved.runtime.toolsMayBeActive
+        ? ("running" as const)
+        : lastTurnStatus === "completed" ||
+            lastTurnStatus === "failed" ||
+            lastTurnStatus === "interrupted"
+          ? lastTurnStatus
+          : ("unknown" as const);
+  const encode = (source: "native" | "reader", cursor: string) =>
+    Buffer.from(JSON.stringify({ source, cursor })).toString("base64url");
+  const decode = (
+    value?: string,
+  ): { source: "native" | "reader"; cursor: string } | undefined => {
+    if (!value) return undefined;
+    try {
+      const obj = JSON.parse(Buffer.from(value, "base64url").toString("utf8"));
+      if (
+        (obj.source === "native" || obj.source === "reader") &&
+        typeof obj.cursor === "string"
+      )
+        return obj;
+    } catch {}
+    throw staleDisplayError();
+  };
+  return {
+    stamp,
+    read: async (selection, opaqueCursor) => {
+      const resolved = await resolve(selection);
+      const sourceStamp = await stamp(selection);
+      const cursor = decode(opaqueCursor);
+      const codex =
+        resolved.source.provider === "codex" ||
+        resolved.source.provider === "codex-oss";
+      if (
+        codex &&
+        deps.codexAppServerHistoryReader &&
+        (!cursor || cursor.source === "native")
+      ) {
+        const native =
+          await deps.codexAppServerHistoryReader.getSemanticTurnsPage(
+            resolved.sessionId,
+            resolved.project.id,
+            resolved.project.path,
+            {
+              limit: SESSION_DISPLAY_INITIAL_TURN_LIMIT,
+              itemsView: "full",
+              cursor: cursor?.cursor,
+              toolsMayBeActive: !cursor && resolved.runtime.toolsMayBeActive,
+            },
+          );
+        if (native.kind === "loaded") {
+          const turnStatuses = { ...native.turnStatuses };
+          if (native.inferredLatestTurnId)
+            delete turnStatuses[native.inferredLatestTurnId];
+          const branch = await deps.getBranchState?.(
+            resolved.project,
+            resolved.sessionId,
+            native.summary,
+            selection.branchId,
+          );
+          return {
+            provider: native.provider,
+            messages: branch
+              ? annotateBranchMessages(native.messages, branch, {
+                  includeCodexAlias: true,
+                })
+              : native.messages,
+            turnStatuses,
+            activity: activity(
+              resolved,
+              native.inferredLatestTurnId
+                ? undefined
+                : native.summary.lastTurnStatus,
+            ),
+            stamp: sourceStamp,
+            ...(native.nextCursor
+              ? { cursor: encode("native", native.nextCursor) }
+              : {}),
+          };
+        }
+      }
+      const loaded = await resolved.source.reader.getSession(
+        resolved.sessionId,
+        resolved.project.id,
+        undefined,
+        {
+          branchId: selection.branchId,
+          maxMessages: 5_000,
+          beforeMessageId:
+            cursor?.source === "reader" ? cursor.cursor : undefined,
+          includeOrphans: false,
+          deferMedia: true,
+          deferThinking: true,
+        },
+      );
+      if (!loaded && resolved.runtime.toolsMayBeActive && !cursor)
+        return {
+          provider: resolved.source.provider,
+          messages: [],
+          activity: activity(resolved),
+          stamp: sourceStamp,
+        };
+      if (!loaded) throw sessionNotFoundError();
+      const session = normalizeSession(loaded, {
+        deferMedia: true,
+        deferThinking: true,
+      });
+      // Some provider readers return their entire native tree. Apply semantic
+      // paging here too, with an append-stable question anchor rather than a
+      // whole-file revision or an arbitrary tool-message cutoff.
+      let end = session.messages.length;
+      if (cursor?.source === "reader" && !loaded.paginationApplied) {
+        const found = session.messages.findIndex(
+          (message) => (message.uuid ?? message.id) === cursor.cursor,
+        );
+        if (found < 0) throw staleDisplayError();
+        end = found;
+      }
+      const prompts = session.messages
+        .slice(0, end)
+        .flatMap((message, index) =>
+          isUserPromptMessage(message) ? [index] : [],
+        );
+      const start =
+        prompts.length > SESSION_DISPLAY_INITIAL_TURN_LIMIT
+          ? (prompts[prompts.length - SESSION_DISPLAY_INITIAL_TURN_LIMIT] ?? 0)
+          : 0;
+      const selectedMessages = session.messages.slice(start, end);
+      const firstQuestion = selectedMessages.find(isUserPromptMessage);
+      const next =
+        start > 0
+          ? (firstQuestion?.uuid ?? firstQuestion?.id)
+          : loaded.pagination?.hasOlderMessages
+            ? loaded.pagination.truncatedBeforeMessageId
+            : undefined;
+      const statuses = loaded.summary.lastTurnStatus;
+      return {
+        provider: resolved.source.provider,
+        messages: selectedMessages,
+        ...(!resolved.runtime.toolsMayBeActive &&
+        (statuses === "completed" ||
+          statuses === "failed" ||
+          statuses === "interrupted")
+          ? { turnStatuses: { session: statuses } }
+          : {}),
+        activity: activity(resolved, statuses),
+        stamp: sourceStamp,
+        ...(typeof next === "string" && next
+          ? { cursor: encode("reader", next) }
+          : {}),
+      };
+    },
+    reasoning: async (selection, id) => {
+      const resolved = await resolve(selection);
+      const separator = id.lastIndexOf(":");
+      const messageId = id.slice("thinking:".length, separator);
+      const blockIndex = Number(id.slice(separator + 1));
+      if (
+        !id.startsWith("thinking:") ||
+        !Number.isSafeInteger(blockIndex) ||
+        blockIndex < 0
+      )
+        throw staleDisplayError();
+      const loaded = await resolved.source.reader.getSession(
+        resolved.sessionId,
+        resolved.project.id,
+        undefined,
+        {
+          branchId: selection.branchId,
+          deferMedia: true,
+          deferThinking: false,
+          maxMessages: DETAIL_AROUND_MESSAGE_LIMIT,
+        },
+      );
+      if (!loaded) throw sessionNotFoundError();
+      const message = normalizeSession(loaded, {
+        deferMedia: true,
+        deferThinking: false,
+      }).messages.find((m) => (m.uuid ?? m.id) === messageId);
+      const content = message?.message?.content ?? message?.content;
+      const block = Array.isArray(content) ? content[blockIndex] : undefined;
+      if (block?.type !== "thinking" || typeof block.thinking !== "string")
+        throw staleDisplayError();
+      return block.thinking;
+    },
+    detail: async (selection, runId, rawId) => {
+      const resolved = await resolve(selection);
+      let messages: Message[] | undefined;
+      if (
+        (resolved.source.provider === "codex" ||
+          resolved.source.provider === "codex-oss") &&
+        deps.codexAppServerHistoryReader &&
+        runId !== "session"
+      ) {
+        const native = await deps.codexAppServerHistoryReader.getSemanticTurn(
+          resolved.sessionId,
+          resolved.project.path,
+          runId,
+        );
+        if (native.kind === "loaded") messages = native.messages;
+      }
+      if (!messages) {
+        const loaded = await resolved.source.reader.getSession(
+          resolved.sessionId,
+          resolved.project.id,
+          undefined,
+          {
+            branchId: selection.branchId,
+            deferMedia: true,
+            deferThinking: true,
+            includeOrphans: false,
+            maxMessages: DETAIL_AROUND_MESSAGE_LIMIT,
+          },
+        );
+        if (!loaded) throw sessionNotFoundError();
+        messages = normalizeSession(loaded, {
+          deferMedia: true,
+          deferThinking: true,
+        }).messages;
+      }
+      return rawId
+        ? selectSessionDisplayToolMessages(messages, [rawId])
+        : messages;
+    },
+  };
+}
+
 async function resolveDisplaySession(
   deps: SessionDisplayRoutesDeps,
   projectId: string,
   requestedSessionId: string,
   includeRuntime = true,
+  allowUnpersisted = false,
 ): Promise<ResolvedDisplaySession> {
   if (!isUrlProjectId(projectId)) {
     throw new SessionDisplayRouteError(
@@ -271,13 +649,39 @@ async function resolveDisplaySession(
     : { toolsMayBeActive: false };
   const preferredProvider =
     runtime.provider ?? deps.getPersistedProvider?.(sessionId);
-  const resolved = await findSessionSummaryAcrossProviders(
+  let resolved = await findSessionSummaryAcrossProviders(
     project,
     sessionId,
     project.id,
     deps.providerResolution,
     preferredProvider,
   );
+  if (
+    !resolved &&
+    allowUnpersisted &&
+    runtime.toolsMayBeActive &&
+    runtime.projectId === project.id &&
+    runtime.provider
+  ) {
+    const source = resolveSessionSources(project, deps.providerResolution).find(
+      (s) => s.provider === runtime.provider,
+    );
+    if (source)
+      resolved = {
+        source,
+        summary: {
+          id: sessionId,
+          projectId: project.id,
+          title: null,
+          fullTitle: null,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          messageCount: 0,
+          ownership: { owner: "none" },
+          provider: runtime.provider,
+        },
+      };
+  }
   if (!resolved) {
     throw new SessionDisplayRouteError(
       404,
@@ -315,6 +719,7 @@ async function readDisplayPage(
         limit,
         itemsView: "full",
         expectedRevision: cursor?.revision,
+        toolsMayBeActive: !cursor && resolved.runtime.toolsMayBeActive,
       },
     );
     if (native.kind === "loaded") {
@@ -333,6 +738,7 @@ async function readDisplayPage(
             })
           : native.messages,
         questionCoverage: native.nextCursor ? "partial" : "complete",
+        ...(native.turnStatuses ? { turnStatuses: native.turnStatuses } : {}),
         ...(!cursor && resolved.runtime.pendingInputRequest
           ? { pendingInputRequest: resolved.runtime.pendingInputRequest }
           : {}),

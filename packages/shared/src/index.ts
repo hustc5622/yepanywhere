@@ -377,6 +377,7 @@ export {
   SessionDisplayThinkingSegmentSchema,
   SessionDisplayToolGroupSegmentSchema,
   SessionDisplayTurnSchema,
+  SessionDisplayTurnStatusSchema,
   SessionDisplayUserContentSchema,
   SessionDisplayUserMediaBlockSchema,
   SessionDisplayUserTextBlockSchema,
@@ -388,6 +389,7 @@ export type {
   SessionDisplayQuestion,
   SessionDisplaySegment,
   SessionDisplayTurn,
+  SessionDisplayTurnStatus,
   SessionDisplayUserContent,
   SessionQuestionPage,
   SessionQuestionPageItem,
@@ -777,3 +779,28 @@ export {
   decompressBytes,
   compressJsonIfBeneficial,
 } from "./compression.js";
+
+export {
+  SessionDisplayToolStepSchema,
+  SessionDisplaySnapshotSchema,
+  SessionDisplayPatchSchema,
+  SessionDisplayNodeSchema,
+  SessionDisplayViewSchema,
+  SessionDisplayActivitySchema,
+  SESSION_DISPLAY_LIVE_STEP_LIMIT,
+  SESSION_DISPLAY_STEP_PREVIEW_LIMIT,
+  applySessionDisplayPatch,
+  sameSessionDisplayView,
+  sessionDisplaySnapshotPage,
+} from "./session-display.js";
+export type {
+  SessionDisplayToolStep,
+  SessionDisplayNode,
+  SessionDisplayView,
+  SessionDisplayActivity,
+  SessionDisplaySnapshot,
+  SessionDisplayPatch,
+  SessionDisplaySubscriptionOptions,
+  SessionDisplayGroupPage,
+  SessionDisplayToolDetail,
+} from "./session-display.js";

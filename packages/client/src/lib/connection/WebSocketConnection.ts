@@ -1,3 +1,4 @@
+import type { SessionDisplaySubscriptionOptions } from "@yep-anywhere/shared";
 import type {
   DeviceServerMessage,
   RemoteClientMessage,
@@ -214,12 +215,14 @@ export class WebSocketConnection implements Connection {
     handlers: StreamHandlers,
     lastEventId?: string,
     lastMessageId?: string,
+    display?: SessionDisplaySubscriptionOptions,
   ): Subscription {
     return this.protocol.subscribeSession(
       sessionId,
       handlers,
       lastEventId,
       lastMessageId,
+      display,
     );
   }
 

@@ -252,6 +252,7 @@ export function createRuntimeControlApp(
       },
       {
         replayAfterMessageId: c.req.query("lastMessageId"),
+        displayProjection: c.req.query("displayProjection") === "true",
         afterSeq: c.req.query("afterSeq")
           ? Number.parseInt(c.req.query("afterSeq") as string, 10)
           : undefined,

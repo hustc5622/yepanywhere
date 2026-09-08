@@ -28,6 +28,7 @@ import {
 } from "@yep-anywhere/shared";
 import type { Hono } from "hono";
 import type { DeviceBridgeService } from "../device/DeviceBridgeService.js";
+import type { SessionDisplayService } from "../display/SessionDisplayService.js";
 import { getLogger } from "../logging/logger.js";
 import { WS_INTERNAL_AUTHENTICATED } from "../middleware/internal-auth.js";
 import type { RuntimeController } from "../runtime/types.js";
@@ -111,6 +112,7 @@ export type SendFn = (msg: YepMessage) => void;
  * Dependencies for the WebSocket handlers.
  */
 export interface WsHandlerDeps {
+  sessionDisplayService?: SessionDisplayService;
   /** The main Hono app to route requests through */
   app: Hono<{ Bindings: HttpBindings }>;
   /** Base URL for internal requests (e.g., "http://localhost:3400") */
@@ -313,6 +315,7 @@ export function handleSessionSubscribe(
   msg: WireSubscribe,
   send: SendFn,
   runtimeController: RuntimeController,
+  displayService?: SessionDisplayService,
 ): Promise<void> {
   const { subscriptionId, sessionId } = msg;
 
@@ -341,35 +344,45 @@ export function handleSessionSubscribe(
   const pendingCleanup = () => pendingController.abort();
   subscriptions.set(subscriptionId, pendingCleanup);
 
-  return runtimeController
-    .subscribeSession(sessionId, sendEvent, {
-      replayAfterMessageId: msg.lastMessageId,
-      signal: pendingController.signal,
-      onError: (err) => {
-        console.error("[WS] Error in session subscription:", err);
-      },
-    })
-    .then((subscription) => {
-      if (subscriptions.get(subscriptionId) !== pendingCleanup) {
-        subscription?.cleanup();
-        return;
-      }
-      if (!subscription) {
-        subscriptions.delete(subscriptionId);
-        send({
-          type: "response",
-          id: subscriptionId,
-          status: 404,
-          body: { error: "No active process for session" },
-        });
-        return;
-      }
+  const subscribe =
+    msg.display && displayService
+      ? displayService.subscribe(
+          {
+            sessionId,
+            projectId: msg.display.projectId,
+            branchId: msg.display.branchId,
+          },
+          sendEvent,
+          pendingController.signal,
+        )
+      : msg.display
+        ? Promise.reject(new Error("Session display protocol is unavailable"))
+        : runtimeController.subscribeSession(sessionId, sendEvent, {
+            replayAfterMessageId: msg.lastMessageId,
+            signal: pendingController.signal,
+            onError: (err) => {
+              console.error("[WS] Error in session subscription:", err);
+            },
+          });
+  return subscribe.then((subscription) => {
+    if (subscriptions.get(subscriptionId) !== pendingCleanup) {
+      subscription?.cleanup();
+      return;
+    }
+    if (!subscription) {
+      subscriptions.delete(subscriptionId);
+      send({
+        type: "response",
+        id: subscriptionId,
+        status: 404,
+        body: { error: "No active process for session" },
+      });
+      return;
+    }
 
-      subscriptions.set(subscriptionId, () => subscription.cleanup());
-      console.log(
-        `[WS] Subscribed to session ${sessionId} (${subscriptionId})`,
-      );
-    });
+    subscriptions.set(subscriptionId, () => subscription.cleanup());
+    console.log(`[WS] Subscribed to session ${sessionId} (${subscriptionId})`);
+  });
 }
 
 /**
@@ -513,6 +526,7 @@ export function handleSubscribe(
   focusedSessionWatchManager?: FocusedSessionWatchManager,
   connectedBrowsers?: ConnectedBrowsersService,
   browserProfileService?: BrowserProfileService,
+  displayService?: SessionDisplayService,
 ): Promise<void> | void {
   const { subscriptionId, channel } = msg;
 
@@ -533,6 +547,7 @@ export function handleSubscribe(
         msg,
         send,
         runtimeController,
+        displayService,
       );
 
     case "activity":
@@ -905,6 +920,7 @@ export async function handleMessage(
           deps.focusedSessionWatchManager,
           deps.connectedBrowsers,
           deps.browserProfileService,
+          deps.sessionDisplayService,
         ),
       onUnsubscribe: async (unsubscribeMsg) =>
         handleUnsubscribe(subscriptions, unsubscribeMsg),

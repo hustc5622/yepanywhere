@@ -3,6 +3,7 @@ import type { Context, Hono } from "hono";
 import type { WSEvents } from "hono/ws";
 import type { WebSocket as RawWebSocket } from "ws";
 import type { DeviceBridgeService } from "../device/DeviceBridgeService.js";
+import type { SessionDisplayService } from "../display/SessionDisplayService.js";
 import { isAllowedOrigin } from "../middleware/allowed-hosts.js";
 import type { RuntimeController } from "../runtime/types.js";
 import type {
@@ -31,6 +32,7 @@ import {
 type UpgradeWebSocketFn = (createEvents: (c: Context) => WSEvents) => any;
 
 export interface WsRoutesDeps {
+  sessionDisplayService?: SessionDisplayService;
   upgradeWebSocket: UpgradeWebSocketFn;
   /** The main Hono app to route requests through */
   app: Hono<{ Bindings: HttpBindings }>;
@@ -89,6 +91,7 @@ export function createWsRoutes(
 
   // Build handler dependencies
   const handlerDeps: WsHandlerDeps = {
+    sessionDisplayService: deps.sessionDisplayService,
     app,
     baseUrl,
     basePath: deps.basePath,

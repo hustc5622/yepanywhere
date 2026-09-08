@@ -23,6 +23,7 @@ import { getCodexHistoryClient } from "./codex-history/CodexHistoryClient.js";
 import { CodexSessionCatalog } from "./codex-history/CodexSessionCatalog.js";
 import type { SessionTitleGenerationConfig } from "./config.js";
 import type { DeviceBridgeService } from "./device/DeviceBridgeService.js";
+import { SessionDisplayService } from "./display/SessionDisplayService.js";
 import type { FrontendProxy } from "./frontend/index.js";
 import type {
   SessionContentIndexService,
@@ -276,6 +277,7 @@ export interface AppOptions {
 }
 
 export interface AppResult {
+  sessionDisplayService: SessionDisplayService;
   app: Hono<{ Bindings: HttpBindings }>;
   /** Supervisor instance for debug API access */
   supervisor: Supervisor;
@@ -1244,6 +1246,10 @@ export function createApp(options: AppOptions): AppResult {
         })
       : []);
 
+  const sessionDisplayService = new SessionDisplayService({
+    runtime: runtimeController,
+  });
+
   // Mount API routes
   app.route(
     "/api/projects",
@@ -1278,6 +1284,7 @@ export function createApp(options: AppOptions): AppResult {
   app.route(
     "/api",
     createSessionsRoutes({
+      sessionDisplayService,
       runtimeController,
       supervisor,
       scanner,
@@ -1692,6 +1699,7 @@ export function createApp(options: AppOptions): AppResult {
 
   return {
     app,
+    sessionDisplayService,
     supervisor,
     runtimeController,
     sessionInteractionService,

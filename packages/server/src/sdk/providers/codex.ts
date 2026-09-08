@@ -4574,6 +4574,7 @@ export class CodexProvider implements AgentProvider {
           subtype: "turn_complete",
           session_id: sessionId,
           turnId,
+          ...(turnId ? { codexTurnId: turnId } : {}),
           turnStatus,
           usage: usage
             ? {

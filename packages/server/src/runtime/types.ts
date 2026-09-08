@@ -101,6 +101,8 @@ export type RuntimeSessionEventEmitter = (
 ) => void;
 
 export interface RuntimeSessionSubscriptionOptions {
+  /** Server display consumer: raw events plus plain streaming catch-up, without renderer augments. */
+  displayProjection?: boolean;
   replayAfterMessageId?: string;
   afterSeq?: number;
   onError?: (error: unknown) => void;

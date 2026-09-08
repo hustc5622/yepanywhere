@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { generateUUID } from "../lib/uuid";
 import type { Message } from "../types";
 
@@ -114,17 +114,47 @@ export function usePendingMessages(
   messages: Message[],
 ): UsePendingMessagesResult {
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
+  const messagesRef = useRef(messages);
+  messagesRef.current = messages;
+  const visibleAtSubmission = useRef(new Map<string, Set<string>>());
 
   useEffect(() => {
-    setPendingMessages((prev) =>
-      reconcilePendingMessagesWithConfirmedMessages(prev, messages),
-    );
+    setPendingMessages((prev) => {
+      const next = prev.filter((pending) => {
+        const baseline = visibleAtSubmission.current.get(pending.tempId);
+        const eligible = baseline
+          ? messages.filter((message) => {
+              const id = message.uuid ?? message.id;
+              return (
+                message.tempId === pending.tempId ||
+                typeof id !== "string" ||
+                !baseline.has(id)
+              );
+            })
+          : messages;
+        const confirmed =
+          reconcilePendingMessagesWithConfirmedMessages([pending], eligible)
+            .length === 0;
+        if (confirmed) visibleAtSubmission.current.delete(pending.tempId);
+        return !confirmed;
+      });
+      return next.length === prev.length ? prev : next;
+    });
   }, [messages]);
 
   // Add a message to the pending queue.
   // Generates a tempId that will be sent to the server and echoed back in stream.
   const addPendingMessage = useCallback((content: string): string => {
     const tempId = `temp-${generateUUID()}`;
+    visibleAtSubmission.current.set(
+      tempId,
+      new Set(
+        messagesRef.current.flatMap((message) => {
+          const id = message.uuid ?? message.id;
+          return typeof id === "string" ? [id] : [];
+        }),
+      ),
+    );
     setPendingMessages((prev) => [
       ...prev,
       { tempId, content, timestamp: new Date().toISOString() },
@@ -133,6 +163,7 @@ export function usePendingMessages(
   }, []);
 
   const removePendingMessage = useCallback((tempId: string) => {
+    visibleAtSubmission.current.delete(tempId);
     setPendingMessages((prev) => prev.filter((p) => p.tempId !== tempId));
   }, []);
 

@@ -30,6 +30,7 @@ type ReplayHistoryMessage = Record<string, unknown> & {
 };
 
 export interface SubscriptionOptions {
+  displayProjection?: boolean;
   /** Called when an internal error occurs (e.g. augmentation failure). */
   onError?: (err: unknown) => void;
   /** Optional label for debug logs (e.g., subscription id). */
@@ -183,6 +184,10 @@ export function createSessionSubscription(
           }
         : rawMessage,
     );
+    if (options?.displayProjection) {
+      emit("message", markSubagent(message));
+      return;
+    }
     const aug = await getAugmenter();
     await aug.processMessage(message, { mode });
     if (completed) return;
@@ -331,6 +336,10 @@ export function createSessionSubscription(
   if (streamingContent) {
     void enqueue(async () => {
       if (completed) return;
+      if (options?.displayProjection) {
+        emit("display-text-catchup", streamingContent);
+        return;
+      }
       const aug = await getAugmenter();
       await aug.processCatchUp(
         streamingContent.text,

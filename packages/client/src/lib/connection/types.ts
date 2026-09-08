@@ -1,3 +1,4 @@
+import type { SessionDisplaySubscriptionOptions } from "@yep-anywhere/shared";
 import type {
   DeviceServerMessage,
   RemoteClientMessage,
@@ -155,6 +156,7 @@ export interface Connection {
     handlers: StreamHandlers,
     lastEventId?: string,
     lastMessageId?: string,
+    display?: SessionDisplaySubscriptionOptions,
   ): Subscription;
 
   /**

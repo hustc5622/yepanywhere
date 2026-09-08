@@ -187,6 +187,7 @@ let sessionInteractionServiceForShutdown: SessionInteractionService | null =
   null;
 let interactionBrokerForShutdown: InteractionBroker | null = null;
 let isShuttingDown = false;
+let disposeSessionDisplays: (() => void) | undefined;
 
 /**
  * Graceful shutdown handler.
@@ -201,6 +202,7 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
   isShuttingDown = true;
 
   console.log(`[Shutdown] Received ${signal}, cleaning up...`);
+  disposeSessionDisplays?.();
 
   if (feishuChannelRuntimeForShutdown) {
     try {
@@ -884,6 +886,7 @@ async function startServer() {
 
   const {
     app,
+    sessionDisplayService,
     supervisor,
     runtimeController,
     sessionInteractionService,
@@ -1036,6 +1039,7 @@ async function startServer() {
   });
 
   // Set service references for graceful shutdown
+  disposeSessionDisplays = () => sessionDisplayService.dispose();
   runtimeControllerForShutdown = runtimeController;
   sessionInteractionServiceForShutdown = sessionInteractionService;
   deviceBridgeForShutdown = deviceBridgeService ?? null;
@@ -1101,6 +1105,7 @@ async function startServer() {
   const terminalService = new TerminalService();
   terminalServiceForShutdown = terminalService;
   const wsHandler = createWsRoutes({
+    sessionDisplayService,
     upgradeWebSocket,
     app,
     baseUrl,

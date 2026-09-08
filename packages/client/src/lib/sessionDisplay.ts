@@ -116,6 +116,7 @@ export function buildSessionDisplayRenderItems(
             type: "text",
             id: segment.id,
             text: segment.content,
+            ...(segment.streaming ? { isStreaming: true } : {}),
             ...(segment.renderedHtml
               ? { augmentHtml: segment.renderedHtml }
               : {}),

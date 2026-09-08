@@ -113,6 +113,24 @@ describe("ToolCallRow", () => {
     expect(container.querySelector(".expand-chevron")).not.toBeNull();
   });
 
+  it("renders a detail body without a second disclosure header", () => {
+    const { container } = renderWithToolProviders(
+      <ToolCallRow
+        id="projected-detail"
+        toolName="Bash"
+        toolInput={{ command: "pnpm test" }}
+        toolResult={{ content: "Tests passed", isError: false }}
+        status="complete"
+        sessionProvider="codex"
+        detailOnly
+      />,
+    );
+
+    expect(container.querySelector(".tool-row-detail-only")).not.toBeNull();
+    expect(container.querySelector(".tool-result-expanded")).not.toBeNull();
+    expect(container.querySelector(".tool-row-header")).toBeNull();
+  });
+
   it("shows the command and readable output for Codex code-mode exec rows", () => {
     const command =
       'rg -n "deploymentDevServerDescription" packages/client/src/i18n/zh-CN.json';

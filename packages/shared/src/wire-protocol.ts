@@ -16,6 +16,7 @@ import type {
   DeviceWebRTCAnswer,
   DeviceWebRTCOffer,
 } from "./devices.js";
+import type { SessionDisplaySubscriptionOptions } from "./session-display.js";
 import type {
   TerminalClose,
   TerminalError,
@@ -90,6 +91,8 @@ export interface WireSubscribe {
   lastEventId?: string;
   /** Last replayable session message ID received by the client */
   lastMessageId?: string;
+  /** v2 display snapshot + patches; raw transcript bodies are not subscribed. */
+  display?: SessionDisplaySubscriptionOptions;
   /** Browser profile identifier for connection tracking (stored in localStorage, shared across tabs) */
   browserProfileId?: string;
   /** Origin metadata for connection tracking */

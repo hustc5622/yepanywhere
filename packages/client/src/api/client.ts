@@ -1,4 +1,9 @@
 import type {
+  SessionDisplayGroupPage,
+  SessionDisplaySnapshot,
+  SessionDisplayToolDetail,
+} from "@yep-anywhere/shared";
+import type {
   AgentActivity,
   AgentMapping,
   BrowserProfilesResponse,
@@ -1009,6 +1014,48 @@ export const api = {
     const query = params.toString();
     return fetchJSON<SessionDisplayPage>(
       `/projects/${projectId}/sessions/${sessionId}/display${query ? `?${query}` : ""}`,
+    );
+  },
+
+  getSessionDisplayView: (
+    projectId: string,
+    sessionId: string,
+    options?: { branchId?: string; cursor?: string; reset?: boolean },
+  ) => {
+    const params = new URLSearchParams();
+    if (options?.branchId) params.set("branchId", options.branchId);
+    if (options?.cursor) params.set("cursor", options.cursor);
+    if (options?.reset) params.set("reset", "true");
+    return fetchJSON<SessionDisplaySnapshot>(
+      `/projects/${projectId}/sessions/${sessionId}/display/view?${params}`,
+    );
+  },
+  getSessionDisplayGroup: (
+    projectId: string,
+    sessionId: string,
+    groupId: string,
+    options?: { branchId?: string; cursor?: string; signal?: AbortSignal },
+  ) => {
+    const params = new URLSearchParams();
+    if (options?.branchId) params.set("branchId", options.branchId);
+    if (options?.cursor) params.set("cursor", options.cursor);
+    return fetchJSON<SessionDisplayGroupPage>(
+      `/projects/${projectId}/sessions/${sessionId}/display/groups/${encodeURIComponent(groupId)}?${params}`,
+      { signal: options?.signal },
+    );
+  },
+  getSessionDisplayTool: (
+    projectId: string,
+    sessionId: string,
+    toolId: string,
+    options?: { branchId?: string; cursor?: string; signal?: AbortSignal },
+  ) => {
+    const params = new URLSearchParams();
+    if (options?.branchId) params.set("branchId", options.branchId);
+    if (options?.cursor) params.set("cursor", options.cursor);
+    return fetchJSON<SessionDisplayToolDetail<Message>>(
+      `/projects/${projectId}/sessions/${sessionId}/display/tools/${encodeURIComponent(toolId)}?${params}`,
+      { signal: options?.signal },
     );
   },
 

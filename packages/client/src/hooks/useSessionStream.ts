@@ -1,3 +1,4 @@
+import type { SessionDisplaySubscriptionOptions } from "@yep-anywhere/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type Subscription,
@@ -8,6 +9,7 @@ import {
 import { isMobileShellDocument } from "../lib/nativePushBridge";
 
 interface UseSessionStreamOptions {
+  display?: SessionDisplaySubscriptionOptions;
   onMessage: (data: { eventType: string; [key: string]: unknown }) => void;
   onError?: (error: Event) => void;
   onOpen?: () => void;
@@ -50,6 +52,9 @@ export function useSessionStream(
   const cursorSessionIdRef = useRef<string | null>(null);
   const optionsRef = useRef(options);
   optionsRef.current = options;
+  const displayKey = options.display
+    ? `${options.display.projectId}:${options.display.branchId ?? "active"}`
+    : "legacy";
   // Track connected sessionId to skip StrictMode double-mount (not reset in cleanup)
   const mountedSessionIdRef = useRef<string | null>(null);
   // True during intentional cleanup — suppresses reconnect in onClose handler
@@ -75,8 +80,9 @@ export function useSessionStream(
       return;
     }
 
-    if (cursorSessionIdRef.current !== sessionId) {
-      cursorSessionIdRef.current = sessionId;
+    const subscriptionKey = `${sessionId}:${displayKey}`;
+    if (cursorSessionIdRef.current !== subscriptionKey) {
+      cursorSessionIdRef.current = subscriptionKey;
       lastEventIdRef.current = null;
       lastMessageIdRef.current = null;
     }
@@ -85,11 +91,11 @@ export function useSessionStream(
     if (wsSubscriptionRef.current) return;
 
     // Skip StrictMode double-mount (same sessionId, already connected once)
-    if (mountedSessionIdRef.current === sessionId) return;
-    mountedSessionIdRef.current = sessionId;
+    if (mountedSessionIdRef.current === subscriptionKey) return;
+    mountedSessionIdRef.current = subscriptionKey;
 
     connectWithConnection(sessionId, getWebSocketConnection());
-  }, [sessionId]);
+  }, [sessionId, displayKey]);
 
   /**
    * Connect using the local WebSocket connection.
@@ -112,6 +118,7 @@ export function useSessionStream(
           },
           lastEventId?: string,
           lastMessageId?: string,
+          display?: SessionDisplaySubscriptionOptions,
         ) => Subscription;
       },
     ) => {
@@ -137,6 +144,7 @@ export function useSessionStream(
           eventId: string | undefined,
           data: unknown,
         ) => {
+          if (isStale()) return;
           connectionManager.recordEvent();
           if (eventType === "heartbeat") {
             connectionManager.recordHeartbeat();
@@ -194,6 +202,7 @@ export function useSessionStream(
         handlers,
         lastEventIdRef.current ?? undefined,
         lastMessageIdRef.current ?? undefined,
+        optionsRef.current.display,
       );
       wsSubscriptionRef.current = sub;
     },

@@ -12,6 +12,22 @@ function userMessage(content: string, tempId?: string): Message {
 }
 
 describe("usePendingMessages", () => {
+  it("does not confirm a repeated prompt from a question already visible before submission", () => {
+    const old = { ...userMessage("again"), uuid: "old-question" };
+    const { result, rerender } = renderHook(
+      ({ messages }) => usePendingMessages(messages),
+      { initialProps: { messages: [old] } },
+    );
+    act(() => {
+      result.current.addPendingMessage("again");
+    });
+    rerender({ messages: [{ ...old }] });
+    expect(result.current.pendingMessages).toHaveLength(1);
+    rerender({
+      messages: [old, { ...userMessage("again"), uuid: "new-question" }],
+    });
+    expect(result.current.pendingMessages).toHaveLength(0);
+  });
   it("adds a pending message and returns its tempId", () => {
     const { result } = renderHook(() => usePendingMessages([]));
 

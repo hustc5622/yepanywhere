@@ -9,6 +9,7 @@ import {
   SessionDisplayPageSchema,
   type SessionDisplayQuestion,
   type SessionDisplaySegment,
+  type SessionDisplayTurnStatus,
   type SessionDisplayUserContent,
   type SessionQuestionPage,
   SessionQuestionPageSchema,
@@ -68,6 +69,7 @@ interface ToolProjectionItem {
 
 interface TurnBuilder {
   id: string;
+  status?: SessionDisplayTurnStatus;
   question: SessionDisplayQuestion | null;
   segments: SessionDisplaySegment[];
 }
@@ -114,6 +116,8 @@ export interface BuildSessionDisplayProjectionParams {
   pendingInputRequest?: InputRequest | null;
   /** Suppress stale orphan classification while a provider turn may be active. */
   toolsMayBeActive?: boolean;
+  /** Provider-native lifecycle keyed by the provider's native turn id. */
+  turnStatuses?: Readonly<Record<string, SessionDisplayTurnStatus>>;
   /**
    * Session provider, used to enable provider-specific rows.
    *
@@ -345,8 +349,14 @@ export function buildSessionDisplayProjection(
       seenQuestionIds.add(messageId);
       for (const key of identityKeys) seenQuestionIdentityKeys.add(key);
       flushToolGroup();
+      const turnId = getTurnId(message, messageId);
+      const nativeTurnId = nonEmptyString(message.codexTurnId);
+      const turnStatus = nativeTurnId
+        ? params.turnStatuses?.[nativeTurnId]
+        : undefined;
       currentTurn = {
-        id: getTurnId(message, messageId),
+        id: turnId,
+        ...(turnStatus ? { status: turnStatus } : {}),
         question: {
           messageId,
           ...userIdentity,
@@ -977,7 +987,7 @@ function isPlanProgressTool(tool: ToolProjectionItem): boolean {
   );
 }
 
-function extractToolPaths(input: unknown): string[] {
+export function extractToolPaths(input: unknown): string[] {
   if (!isRecord(input)) return [];
   const values: unknown[] = [
     input.file_path,
@@ -1001,7 +1011,7 @@ function extractToolPaths(input: unknown): string[] {
   );
 }
 
-function isCheckTool(input: unknown): boolean {
+export function isCheckTool(input: unknown): boolean {
   if (!isRecord(input)) return false;
   const command = [input.command, input.cmd, input.script].find(
     (value): value is string =>

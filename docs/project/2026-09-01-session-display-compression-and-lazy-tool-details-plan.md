@@ -5,6 +5,8 @@
 > 范围：Yep Anywhere 的 session 读取与展示链路<br>
 > 前置文档：[已废弃的 Session Outline、语义化加载与行为验证开发计划](./2026-08-31-session-outline-semantic-loading-development-plan.md)
 
+> 2026-09-07 审计补充：活跃阶段、刷新/重连和正文订阅的完整生命周期正在重新设计，见 [Session 展示生命周期审计与重构方案](./2026-09-07-session-display-lifecycle-redesign.md)。本文保留已实施历史；新版默认展示路径已接入，已替换 §6.3 的 raw live tail 交接；实现范围与验证见新文档 §15。
+
 ## 0. 决策摘要
 
 本方案只解决一个问题：长 session 在 Yep 中首次打开、浏览历史和查看问题目录时，当前 raw-message

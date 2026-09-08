@@ -8,6 +8,7 @@ import {
 } from "../../src/codex-history/CodexAppServerHistoryReader.js";
 import { CodexHistoryClientError } from "../../src/codex-history/types.js";
 import type { Thread } from "../../src/sdk/providers/codex-protocol/generated/v2/Thread.js";
+import type { Turn } from "../../src/sdk/providers/codex-protocol/generated/v2/Turn.js";
 import { publicCodexThreadItem } from "../../src/sdk/providers/codex.js";
 
 function thread(historyMode: "legacy" | "paginated" = "paginated"): Thread {
@@ -215,6 +216,9 @@ describe("CodexAppServerHistoryReader", () => {
     if (result.kind !== "loaded") return;
     expect(result.nextCursor).toBe("older-turns");
     expect(result.revision).toBe(`cas1.${thread().updatedAt}.${thread().id}`);
+    expect(result.turnStatuses).toEqual({
+      "turn-semantic": "completed",
+    });
     expect(result.messages.map((message) => message.uuid)).toEqual([
       "summary-user-turn-semantic",
       "semantic-command-turn-semantic",
@@ -242,6 +246,111 @@ describe("CodexAppServerHistoryReader", () => {
       expect(exact.messages).toHaveLength(4);
     }
   });
+
+  it.each([
+    {
+      active: true,
+      status: "interrupted",
+      completedAt: null,
+      durationMs: null,
+      cursor: undefined,
+      expected: "running",
+    },
+    {
+      active: false,
+      status: "interrupted",
+      completedAt: null,
+      durationMs: null,
+      cursor: undefined,
+      expected: "interrupted",
+    },
+    {
+      active: true,
+      status: "interrupted",
+      completedAt: 1_777_000_020,
+      durationMs: null,
+      cursor: undefined,
+      expected: "interrupted",
+    },
+    {
+      active: true,
+      status: "interrupted",
+      completedAt: null,
+      durationMs: 10_000,
+      cursor: undefined,
+      expected: "interrupted",
+    },
+    {
+      active: true,
+      status: "interrupted",
+      completedAt: null,
+      durationMs: null,
+      cursor: "older-turns",
+      expected: "interrupted",
+    },
+    {
+      active: true,
+      status: "completed",
+      completedAt: null,
+      durationMs: null,
+      cursor: undefined,
+      expected: "completed",
+    },
+    {
+      active: true,
+      status: "failed",
+      completedAt: null,
+      durationMs: null,
+      cursor: undefined,
+      expected: "failed",
+    },
+  ] as const)(
+    "reconciles detached history status with runtime activity: %j",
+    async ({ active, status, completedAt, durationMs, cursor, expected }) => {
+      const latestTurn: Turn = {
+        id: "turn-live",
+        items: [],
+        itemsView: "summary",
+        status,
+        error: null,
+        startedAt: 1_777_000_010,
+        completedAt,
+        durationMs,
+      };
+      const fake = client({
+        listTurns: vi.fn(async () => ({
+          data: [
+            latestTurn,
+            { ...latestTurn, id: "turn-older", status: "interrupted" },
+          ],
+          nextCursor: null,
+          backwardsCursor: null,
+        })),
+        listItems: vi.fn(async () => ({
+          data: [],
+          nextCursor: null,
+          backwardsCursor: null,
+        })),
+      });
+      const reader = new CodexAppServerHistoryReader({ client: fake });
+      const result = await reader.getSemanticTurnsPage(
+        thread().id,
+        "project" as UrlProjectId,
+        "/tmp/project",
+        { limit: 20, itemsView: "full", cursor, toolsMayBeActive: active },
+      );
+
+      expect(result.kind).toBe("loaded");
+      if (result.kind !== "loaded") return;
+      expect(result.turnStatuses).toEqual({
+        "turn-live": expected,
+        "turn-older": "interrupted",
+      });
+      expect(result.summary.lastTurnStatus).toBe(
+        expected === "running" ? undefined : expected,
+      );
+    },
+  );
 
   it("completes hosted web search items that carry no structured results", async () => {
     const webSearchTurn = {

@@ -449,6 +449,7 @@ export class HttpRuntimeController implements RuntimeController {
     if (options?.replayAfterMessageId) {
       query.set("lastMessageId", options.replayAfterMessageId);
     }
+    if (options?.displayProjection) query.set("displayProjection", "true");
     if (options?.afterSeq !== undefined) {
       query.set("afterSeq", String(options.afterSeq));
     }

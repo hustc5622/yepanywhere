@@ -19,7 +19,6 @@ export type RenderItem =
   | SessionSetupItem
   | SystemItem
   | DisplayToolGroupItem
-  | AssistantOutputToolGroupItem
   | CodexNativeItem;
 
 /** Base fields shared by all render items */
@@ -123,17 +122,6 @@ export interface DisplayToolGroupItem extends RenderItemBase {
   sessionId: string;
   revision: string;
   branchId?: string;
-}
-
-/**
- * In-memory tool batch closed by a later user-readable assistant message.
- * Unlike display_tool_group, all details are already present from the live
- * stream/legacy compatibility path and expansion never performs a request.
- */
-export interface AssistantOutputToolGroupItem extends RenderItemBase {
-  type: "assistant_output_tool_group";
-  id: string;
-  tools: ToolCallItem[];
 }
 
 /**

@@ -30,6 +30,7 @@ import { SessionSearchBar } from "../components/SessionSearchBar";
 import { SessionTitleGenerationStatus } from "../components/SessionTitleGenerationStatus";
 import { SessionMessagesSkeleton } from "../components/Skeleton";
 import { ToolApprovalPanel } from "../components/ToolApprovalPanel";
+import { ProjectedToolStepRow } from "../components/blocks/ProjectedToolGroupRow";
 import { AgentContentProvider } from "../contexts/AgentContentContext";
 import { SessionMetadataProvider } from "../contexts/SessionMetadataContext";
 import {
@@ -67,7 +68,6 @@ import {
   resolveCodexSkillInputs,
 } from "../lib/codexInputCommands";
 import { normalizeExternalHttpUrl } from "../lib/externalUrl";
-import { groupToolsBeforeAssistantOutput } from "../lib/liveToolGrouping";
 import { getMessageId } from "../lib/mergeMessages";
 import { isStalePendingInputError } from "../lib/pendingInputError";
 import { preprocessMessages } from "../lib/preprocessMessages";
@@ -109,7 +109,7 @@ export function SessionPage() {
   return (
     <StreamingMarkdownProvider>
       <SessionPageContent
-        key={sessionId}
+        key={`${projectId}:${sessionId}`}
         projectId={projectId}
         sessionId={sessionId}
       />
@@ -297,6 +297,7 @@ function SessionPageContent({
     displayQuestions,
     displayQuestionCoverage,
     hydratedLiveTailDetailRef,
+    displayActivity,
     agentContent,
     setAgentContent,
     toolUseToAgent,
@@ -1899,9 +1900,7 @@ function SessionPageContent({
     );
     preprocessCacheRef.current = result.cache;
     const combined = [...displayItems, ...result.renderItems];
-    return displayHistoryEnabled
-      ? groupToolsBeforeAssistantOutput(combined)
-      : combined;
+    return combined;
   }, [
     displayPage,
     hydratedLiveTailDetailRef,
@@ -1913,7 +1912,6 @@ function SessionPageContent({
     session?.branchState,
     session?.codexBranchState,
     t,
-    displayHistoryEnabled,
   ]);
 
   // Detect if session has pending tool calls without results
@@ -1921,19 +1919,21 @@ function SessionPageContent({
   // that is waiting for user input (tool approval, question answer)
   const hasPendingToolCalls = useMemo(() => {
     if (status.owner !== "none") return false;
+    if (displayHistoryEnabled)
+      return displayActivity?.state === "waiting-input";
     return renderItems.some(
       (item) =>
         (item.type === "tool_call" &&
           item.status === "pending" &&
           item.toolResult === undefined) ||
-        (item.type === "assistant_output_tool_group" &&
-          item.tools.some(
-            (tool) =>
-              tool.status === "pending" && tool.toolResult === undefined,
-          )) ||
         (item.type === "display_tool_group" && item.group.status === "running"),
     );
-  }, [renderItems, status.owner]);
+  }, [
+    renderItems,
+    status.owner,
+    displayHistoryEnabled,
+    displayActivity?.state,
+  ]);
 
   // Compute display title - priority:
   // 1. Local custom title (user renamed in this session)
@@ -2503,49 +2503,84 @@ function SessionPageContent({
                 projectId={projectId}
                 sessionId={sessionId}
               >
-                <MessageList
-                  messages={messages}
-                  preprocessedItems={renderItems}
-                  provider={session?.provider}
-                  isProcessing={
-                    status.owner === "self" && processState === "in-turn"
-                  }
-                  lastActivityAt={lastStreamActivityAt}
-                  isCompacting={isCompacting}
-                  scrollTrigger={scrollTrigger + activeWindowTrimRevision}
-                  pendingMessages={pendingMessages}
-                  deferredMessages={deferredMessages}
-                  onCancelDeferred={(tempId) =>
-                    api.cancelDeferredMessage(sessionId, tempId)
-                  }
-                  markdownAugments={markdownAugments}
-                  activeToolApproval={activeToolApproval}
-                  hasOlderMessages={
-                    displayPage
-                      ? Boolean(displayPage.nextCursor)
-                      : pagination?.hasOlderMessages
-                  }
-                  hasNewerMessages={pagination?.hasNewerMessages}
-                  loadingOlder={loadingOlder}
-                  loadingNewer={loadingNewer}
-                  loadingTargetMessage={loadingTargetMessage}
-                  onLoadOlderMessages={loadOlderMessages}
-                  onLoadNewerMessages={loadNewerMessages}
-                  onLoadTargetMessage={loadTargetMessageWindow}
-                  onFollowingBottomChange={updateActiveWindowFollowingBottom}
-                  onEditUserPrompt={
-                    !isViewingHistoricalBranch &&
-                    supportsHistoricalMessageEditing(session?.provider)
-                      ? handleEditUserPrompt
-                      : undefined
-                  }
-                  onSelectBranch={handleSelectBranch}
-                  focusBranchId={pendingBranchFocusId}
-                  onBranchFocused={handleBranchFocused}
-                  targetMessageId={targetMessageId}
-                  onTargetFocused={handleTargetFocused}
-                  transcriptKey={`${sessionId}:${selectedBranchId ?? ""}`}
-                />
+                <>
+                  <MessageList
+                    messages={messages}
+                    preprocessedItems={renderItems}
+                    provider={session?.provider}
+                    isProcessing={
+                      status.owner === "self" && processState === "in-turn"
+                    }
+                    lastActivityAt={lastStreamActivityAt}
+                    isCompacting={isCompacting}
+                    scrollTrigger={scrollTrigger + activeWindowTrimRevision}
+                    pendingMessages={pendingMessages}
+                    deferredMessages={deferredMessages}
+                    onCancelDeferred={(tempId) =>
+                      api.cancelDeferredMessage(sessionId, tempId)
+                    }
+                    markdownAugments={markdownAugments}
+                    activeToolApproval={activeToolApproval}
+                    hasOlderMessages={
+                      displayPage
+                        ? Boolean(displayPage.nextCursor)
+                        : pagination?.hasOlderMessages
+                    }
+                    hasNewerMessages={pagination?.hasNewerMessages}
+                    loadingOlder={loadingOlder}
+                    loadingNewer={loadingNewer}
+                    loadingTargetMessage={loadingTargetMessage}
+                    onLoadOlderMessages={loadOlderMessages}
+                    onLoadNewerMessages={loadNewerMessages}
+                    onLoadTargetMessage={loadTargetMessageWindow}
+                    onFollowingBottomChange={updateActiveWindowFollowingBottom}
+                    onEditUserPrompt={
+                      !isViewingHistoricalBranch &&
+                      supportsHistoricalMessageEditing(session?.provider)
+                        ? handleEditUserPrompt
+                        : undefined
+                    }
+                    onSelectBranch={handleSelectBranch}
+                    focusBranchId={pendingBranchFocusId}
+                    onBranchFocused={handleBranchFocused}
+                    targetMessageId={targetMessageId}
+                    onTargetFocused={handleTargetFocused}
+                    transcriptKey={`${sessionId}:${selectedBranchId ?? ""}`}
+                  />
+                  {displayActivity && (
+                    <div className="display-tool-group-state" role="status">
+                      {!sessionUpdatesConnected
+                        ? t("sessionDisplaySyncing")
+                        : displayActivity.state === "finishing"
+                          ? t("sessionDisplayFinishing")
+                          : displayActivity.state === "interrupted"
+                            ? t("sessionDisplayInterrupted")
+                            : displayActivity.state === "failed"
+                              ? t("sessionDisplayFailed")
+                              : displayActivity.state === "unknown" &&
+                                  displayActivity.runningCount > 0
+                                ? t("sessionDisplayUnknown")
+                                : null}
+                    </div>
+                  )}
+                  {displayActivity && displayActivity.tools.length > 0 && (
+                    <div className="display-current-activity">
+                      <div className="display-tool-group-state">
+                        {t("sessionDisplayPreviousTools")}
+                      </div>
+                      {displayActivity.tools.map((step) => (
+                        <ProjectedToolStepRow
+                          key={`${displayPage?.revision}:${step.id}`}
+                          step={step}
+                          projectId={projectId}
+                          sessionId={sessionId}
+                          branchId={selectedBranchId}
+                          sessionProvider={session?.provider}
+                        />
+                      ))}
+                    </div>
+                  )}
+                </>
               </AgentContentProvider>
             </SessionMetadataProvider>
           )}

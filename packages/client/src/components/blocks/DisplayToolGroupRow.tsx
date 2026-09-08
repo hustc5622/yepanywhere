@@ -4,6 +4,7 @@ import { useI18n } from "../../i18n";
 import { preprocessMessages } from "../../lib/preprocessMessages";
 import type { Message } from "../../types";
 import type { DisplayToolGroupItem } from "../../types/renderItems";
+import { ProjectedToolGroupRow } from "./ProjectedToolGroupRow";
 import { ToolCallRow } from "./ToolCallRow";
 
 export function DisplayToolGroupRow({
@@ -13,6 +14,21 @@ export function DisplayToolGroupRow({
   item: DisplayToolGroupItem;
   sessionProvider?: string;
 }) {
+  return item.group.type === "tool_group" && item.group.displayMode ? (
+    <ProjectedToolGroupRow
+      key={`${item.projectId}:${item.sessionId}:${item.branchId ?? "active"}:${item.revision}:${item.id}`}
+      item={item}
+      sessionProvider={sessionProvider}
+    />
+  ) : (
+    <LegacyDisplayToolGroupRow item={item} sessionProvider={sessionProvider} />
+  );
+}
+
+function LegacyDisplayToolGroupRow({
+  item,
+  sessionProvider,
+}: { item: DisplayToolGroupItem; sessionProvider?: string }) {
   const { t } = useI18n();
   const isLiveTail =
     item.group.type === "tool_group" && item.group.liveTail === true;

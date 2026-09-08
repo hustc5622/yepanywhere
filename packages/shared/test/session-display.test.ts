@@ -17,6 +17,7 @@ describe("session display contract", () => {
       turns: [
         {
           id: "turn-1",
+          status: "interrupted",
           question: {
             messageId: "message-1",
             content: [
@@ -60,6 +61,7 @@ describe("session display contract", () => {
       failedCount: 1,
       liveTail: true,
     });
+    expect(page.turns[0]?.status).toBe("interrupted");
     expect(page.turns[0]?.segments[0]).toMatchObject({
       type: "assistant_text",
       renderedHtml: "<p>I will inspect it.</p>",

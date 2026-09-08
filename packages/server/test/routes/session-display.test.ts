@@ -2,9 +2,13 @@ import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { SessionBranchState } from "@yep-anywhere/shared";
+import type {
+  SessionBranchState,
+  SessionDisplayPage,
+} from "@yep-anywhere/shared";
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { CodexAppServerHistoryReader } from "../../src/codex-history/CodexAppServerHistoryReader.js";
 import { encodeProjectId } from "../../src/projects/paths.js";
 import {
   type SessionDisplayRuntimeState,
@@ -263,6 +267,11 @@ describe("session display routes", () => {
       summary,
       provider: "codex" as const,
       revision: "cas1.1.session",
+      turnStatuses: {
+        "turn-a": "completed" as const,
+        "turn-b2": "interrupted" as const,
+        "turn-d": "completed" as const,
+      },
     }));
     const app = new Hono();
     registerSessionDisplayRoutes(app, {
@@ -291,6 +300,7 @@ describe("session display routes", () => {
     const page = (await response.json()) as {
       revision: string;
       turns: Array<{
+        status?: string;
         question: {
           messageId: string;
           branch?: {
@@ -309,6 +319,11 @@ describe("session display routes", () => {
     };
     expect(page.revision).toBe("cas1.1.session");
     expect(page.turns).toHaveLength(3);
+    expect(page.turns.map((turn) => turn.status)).toEqual([
+      "completed",
+      "interrupted",
+      "completed",
+    ]);
     expect(page.turns[1]?.question).toMatchObject({
       messageId: "user-b2-turn-b2",
       branch: {
@@ -509,6 +524,123 @@ describe("session display routes", () => {
       code: "SESSION_DISPLAY_STALE",
     });
   });
+
+  it.each([true, false])(
+    "reconciles a detached Codex history turn with live runtime activity (%s)",
+    async (active) => {
+      const summary: SessionSummary = {
+        id: SESSION_ID,
+        projectId: PROJECT_ID,
+        title: "Live Codex",
+        fullTitle: "Live Codex",
+        createdAt: "2026-09-01T00:00:00.000Z",
+        updatedAt: "2026-09-01T00:01:00.000Z",
+        messageCount: 3,
+        ownership: { owner: "self" },
+        provider: "codex",
+      };
+      const items = [
+        {
+          type: "userMessage",
+          id: "user",
+          clientId: null,
+          content: [{ type: "text", text: "Run", text_elements: [] }],
+        },
+        {
+          type: "agentMessage",
+          id: "progress",
+          text: "First step done, continuing.",
+          phase: "commentary",
+          memoryCitation: null,
+        },
+        {
+          type: "commandExecution",
+          id: "next-tool",
+          command: "pnpm test",
+          cwd: PROJECT_PATH,
+          status: "inProgress",
+          commandActions: [],
+          aggregatedOutput: null,
+          exitCode: null,
+          durationMs: null,
+        },
+      ];
+      const history = new CodexAppServerHistoryReader({
+        client: {
+          readThread: vi.fn(async () => ({
+            thread: {
+              id: SESSION_ID,
+              cwd: PROJECT_PATH,
+              historyMode: "paginated",
+              modelProvider: "openai",
+              preview: "Run",
+              status: { type: "notLoaded" },
+              createdAt: 1_777_000_000,
+              updatedAt: 1_777_000_100,
+            },
+          })),
+          listTurns: vi.fn(async () => ({
+            data: [
+              {
+                id: "turn-live",
+                items: [],
+                itemsView: "summary",
+                status: "interrupted",
+                error: null,
+                startedAt: 1_777_000_010,
+                completedAt: null,
+                durationMs: null,
+              },
+            ],
+            nextCursor: null,
+          })),
+          listItems: vi.fn(async () => ({
+            data: items.map((item) => ({ turnId: "turn-live", item })),
+            nextCursor: null,
+          })),
+          getCapability: vi.fn(),
+        } as never,
+      });
+      const reader = { getSessionSummary: vi.fn(async () => summary) };
+      const app = new Hono();
+      registerSessionDisplayRoutes(app, {
+        scanner: {
+          getOrCreateProject: vi.fn(async () => ({
+            ...project(),
+            provider: "codex" as const,
+          })),
+        },
+        providerResolution: {
+          readerFactory: () => reader as never,
+          codexSessionsDir: "/tmp/codex-sessions",
+          codexReaderFactory: () => reader as never,
+        },
+        codexAppServerHistoryReader: history,
+        getRuntimeState: vi.fn(async () => ({
+          provider: "codex",
+          toolsMayBeActive: active,
+        })),
+      });
+
+      const response = await app.request(
+        `/projects/${PROJECT_ID}/sessions/${SESSION_ID}/display`,
+      );
+      expect(response.status).toBe(200);
+      const page = (await response.json()) as SessionDisplayPage;
+      expect(page.turns[0]).toMatchObject({
+        id: "turn:turn-live",
+        status: active ? "running" : "interrupted",
+        segments: [
+          { type: "assistant_text", phase: "progress" },
+          { type: "tool_group", count: 1, status: "running" },
+        ],
+      });
+      const tail = page.turns[0]?.segments.at(-1);
+      expect(tail?.type === "tool_group" && tail.liveTail).toBe(
+        active ? true : undefined,
+      );
+    },
+  );
 
   it("marks the active live tail without including its raw body", async () => {
     const { app, getSession } = createRoutes(
