@@ -210,6 +210,32 @@ describe("EmbeddedRuntimeController", () => {
     );
   });
 
+  it("forwards interrupt-and-send admission to the supervisor", async () => {
+    const queueMessageToSession = vi.fn(async () => ({
+      success: false as const,
+      error: "interrupt_send_failed",
+    }));
+    const controller = new EmbeddedRuntimeController({
+      queueMessageToSession,
+    } as unknown as Supervisor);
+    await expect(
+      controller.queueMessage({
+        sessionId: "session-1",
+        projectPath: "/test",
+        message: { text: "Correction" },
+        interruptBeforeSend: true,
+      }),
+    ).resolves.toEqual({ success: false, error: "interrupt_send_failed" });
+    expect(queueMessageToSession).toHaveBeenCalledWith(
+      "session-1",
+      "/test",
+      { text: "Correction" },
+      undefined,
+      undefined,
+      { interruptBeforeSend: true },
+    );
+  });
+
   it("forwards live session controls through structured methods", async () => {
     const controller = createController();
     const started = await controller.startSession({

@@ -230,6 +230,7 @@ describe("Codex structured input API", () => {
       undefined,
       undefined,
       [skillInput],
+      true,
     );
     await api.queueMessage(
       "session-1",
@@ -257,6 +258,7 @@ describe("Codex structured input API", () => {
       }),
       expect.objectContaining({
         message: "queue",
+        interruptBeforeSend: true,
         codexInputs: [skillInput],
       }),
       expect.objectContaining({
@@ -265,6 +267,7 @@ describe("Codex structured input API", () => {
         codexInputs: [skillInput],
       }),
     ]);
+    expect(bodies[3]).not.toHaveProperty("interruptBeforeSend");
   });
 });
 

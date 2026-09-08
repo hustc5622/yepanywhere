@@ -1359,6 +1359,7 @@ function SessionPageContent({
           session?.reasoningEffort,
           false,
           codexInputs,
+          effectiveProvider === "codex",
         );
         // If process was restarted due to thinking mode change, reconnect stream
         if (result.restarted && result.processId) {
@@ -1444,9 +1445,27 @@ function SessionPageContent({
         draftControlsRef.current?.clearDraft();
         setAttachments([]);
       }
-      setProcessState("idle");
-      const errorMsg = err instanceof Error ? err.message : String(err);
-      showToast(t("sessionSendFailed", { message: errorMsg }), "error");
+      const errorCode = (err as { code?: string })?.code;
+      if (
+        errorCode === "interrupt_send_failed" ||
+        errorCode === "interrupt_not_supported" ||
+        errorCode === "interrupt_send_in_progress"
+      ) {
+        // Preserve the state received from the stream: a failed interrupt
+        // may leave the old turn running, while a timeout may follow its end.
+        showToast(
+          t(
+            errorCode === "interrupt_send_in_progress"
+              ? "sessionInterruptSendInProgress"
+              : "sessionInterruptSendFailed",
+          ),
+          "error",
+        );
+      } else {
+        setProcessState("idle");
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        showToast(t("sessionSendFailed", { message: errorMsg }), "error");
+      }
     }
   };
 

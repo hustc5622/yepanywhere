@@ -1100,7 +1100,11 @@ export class Supervisor {
     message: UserMessage,
     permissionMode?: PermissionMode,
     modelSettings?: ModelSettings,
-    admission?: { requireImmediate?: boolean; allowSteer?: boolean },
+    admission?: {
+      requireImmediate?: boolean;
+      allowSteer?: boolean;
+      interruptBeforeSend?: boolean;
+    },
   ): Promise<
     | { success: true; process: Process; restarted: boolean }
     | { success: false; error: string }
@@ -1209,6 +1213,7 @@ export class Supervisor {
 
     const result = await process.queueMessage(message, {
       allowSteer: admission?.allowSteer,
+      interruptBeforeSend: admission?.interruptBeforeSend,
     });
     if (result.success) {
       return { success: true, process, restarted: false };

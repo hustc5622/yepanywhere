@@ -713,6 +713,73 @@ describe("SessionCommandService runtime boundary", () => {
     }
   });
 
+  it("forwards interrupt-and-send without interrupting deferred submissions", async () => {
+    const queueMessage = vi.fn(async () => ({
+      success: true as const,
+      restarted: false,
+      process: { id: "process-1" },
+    }));
+    const deferMessage = vi.fn(async () => ({ queued: true }));
+    const service = createService({
+      getProcessSnapshotForSession: vi.fn(async () => processSnapshot()),
+      queueMessage,
+      deferMessage,
+    });
+    await expect(
+      service.queue({
+        sessionId: "session-1",
+        body: { message: "Correction", interruptBeforeSend: true },
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(queueMessage).toHaveBeenCalledWith(
+      expect.objectContaining({ interruptBeforeSend: true }),
+    );
+    await expect(
+      service.queue({
+        sessionId: "session-1",
+        body: { message: "Later", deferred: true },
+      }),
+    ).resolves.toMatchObject({ ok: true });
+    expect(queueMessage).toHaveBeenCalledTimes(1);
+    expect(deferMessage).toHaveBeenCalledTimes(1);
+  });
+
+  it("rejects conflicting send modes before contacting the runtime", async () => {
+    const getProcessSnapshotForSession = vi.fn();
+    const service = createService({ getProcessSnapshotForSession });
+    await expect(
+      service.queue({
+        sessionId: "session-1",
+        body: {
+          message: "Correction",
+          deferred: true,
+          interruptBeforeSend: true,
+        },
+      }),
+    ).resolves.toMatchObject({ ok: false, status: 400 });
+    expect(getProcessSnapshotForSession).not.toHaveBeenCalled();
+  });
+
+  it("reports interruption failure as an unsent message rather than a dead process", async () => {
+    const service = createService({
+      getProcessSnapshotForSession: vi.fn(async () => processSnapshot()),
+      queueMessage: vi.fn(async () => ({
+        success: false,
+        error: "interrupt_send_failed",
+      })),
+    });
+    await expect(
+      service.queue({
+        sessionId: "session-1",
+        body: { message: "Correction", interruptBeforeSend: true },
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      status: 409,
+      body: { code: "interrupt_send_failed" },
+    });
+  });
+
   it("interrupts the active turn and closes interaction aliases", async () => {
     const terminateInteractionOperations = vi.fn(async () => []);
     const interactions = interactionService({

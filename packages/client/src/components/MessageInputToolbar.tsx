@@ -106,6 +106,13 @@ export function MessageInputToolbar({
   const { thinkingMode, cycleThinkingMode, thinkingLevel } = useModelSettings();
   const [isContextModalOpen, setIsContextModalOpen] = useState(false);
   const showStop = isRunning && onStop && isThinking;
+  const interruptOnSend = provider === "codex" && isRunning;
+  const activeSendLabel = t(
+    interruptOnSend ? "toolbarInterruptLabel" : "toolbarInsertLabel",
+  );
+  const activeSendTitle = t(
+    interruptOnSend ? "toolbarInterruptTitle" : "toolbarInsertTitle",
+  );
   const visibleCommandButtons =
     commandButtons?.filter((button) => button.showButton) ??
     (showCommandButton
@@ -302,13 +309,13 @@ export function MessageInputToolbar({
             onClick={onSend}
             disabled={disabled || !canSend}
             className={`send-button${onQueue ? " message-submit-choice" : ""}`}
-            title={onQueue ? t("toolbarInsertTitle") : undefined}
-            aria-label={onQueue ? t("toolbarInsertLabel") : t("toolbarSend")}
+            title={onQueue ? activeSendTitle : undefined}
+            aria-label={onQueue ? activeSendLabel : t("toolbarSend")}
           >
             <span className="send-icon" aria-hidden="true">
               ↑
             </span>
-            {onQueue && <span>{t("toolbarInsertLabel")}</span>}
+            {onQueue && <span>{activeSendLabel}</span>}
           </button>
         )}
         {showStop && (onQueue || !canSend) && (

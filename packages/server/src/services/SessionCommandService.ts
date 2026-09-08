@@ -241,6 +241,7 @@ export interface CreateSessionBody {
 
 export interface QueueSessionMessageBody extends StartSessionBody {
   deferred?: boolean;
+  interruptBeforeSend?: boolean;
 }
 
 export interface ExecuteCodexControlCommandInput {
@@ -1447,6 +1448,18 @@ export class SessionCommandService {
     input: QueueSessionMessageCommandInput,
   ): Promise<SessionCommandResult<Record<string, unknown>>> {
     const { sessionId, body } = input;
+    if (
+      body.interruptBeforeSend !== undefined &&
+      typeof body.interruptBeforeSend !== "boolean"
+    ) {
+      return commandFailure("Invalid interruptBeforeSend flag", 400);
+    }
+    if (body.deferred && body.interruptBeforeSend) {
+      return commandFailure(
+        "Deferred messages cannot interrupt the active turn",
+        400,
+      );
+    }
     const process =
       await this.deps.runtimeController.getProcessSnapshotForSession(sessionId);
     if (!process) {
@@ -1540,6 +1553,7 @@ export class SessionCommandService {
       permissionMode: effectivePermissionMode,
       requireImmediate: input.requireImmediate,
       allowSteer: input.allowSteer,
+      interruptBeforeSend: body.interruptBeforeSend,
       modelSettings: {
         model,
         thinking,
@@ -1576,6 +1590,19 @@ export class SessionCommandService {
       },
     });
     if (!result.success) {
+      if (
+        result.error === "interrupt_send_failed" ||
+        result.error === "interrupt_not_supported" ||
+        result.error === "interrupt_send_in_progress"
+      ) {
+        return commandFailure(
+          "Could not interrupt the active turn; message was not sent",
+          409,
+          {
+            code: result.error,
+          },
+        );
+      }
       if (result.error === "immediate_start_unavailable") {
         return commandFailure("Session could not restart immediately", 503, {
           code: result.error,

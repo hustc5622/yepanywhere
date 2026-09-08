@@ -1314,6 +1314,7 @@ export const api = {
     reasoningEffort?: string,
     deferred?: boolean,
     codexInputs?: CodexStructuredUserInput[],
+    interruptBeforeSend?: boolean,
   ) =>
     fetchJSON<{
       queued: boolean;
@@ -1331,6 +1332,7 @@ export const api = {
         reasoningEffort,
         deferred,
         codexInputs,
+        interruptBeforeSend,
       }),
     }),
 

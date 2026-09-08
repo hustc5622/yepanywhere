@@ -72,12 +72,29 @@ function immediateAdmissionArgs(
 function queueAdmissionArgs(input: {
   requireImmediate?: boolean;
   allowSteer?: boolean;
-}): [] | [{ requireImmediate?: true; allowSteer?: false }] {
-  if (!input.requireImmediate && input.allowSteer !== false) return [];
+  interruptBeforeSend?: boolean;
+}):
+  | []
+  | [
+      {
+        requireImmediate?: true;
+        allowSteer?: false;
+        interruptBeforeSend?: true;
+      },
+    ] {
+  if (
+    !input.requireImmediate &&
+    input.allowSteer !== false &&
+    !input.interruptBeforeSend
+  )
+    return [];
   return [
     {
       ...(input.requireImmediate ? { requireImmediate: true as const } : {}),
       ...(input.allowSteer === false ? { allowSteer: false as const } : {}),
+      ...(input.interruptBeforeSend
+        ? { interruptBeforeSend: true as const }
+        : {}),
     },
   ];
 }

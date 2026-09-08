@@ -173,6 +173,8 @@ export interface QueueRuntimeMessageRequest {
   requireImmediate?: boolean;
   /** False queues behind an active turn instead of using provider steering. */
   allowSteer?: boolean;
+  /** Interrupt the active turn, then send this input before deferred messages. */
+  interruptBeforeSend?: boolean;
 }
 
 export interface RuntimeInputResponseRequest {

@@ -162,6 +162,30 @@ describe("MessageInput", () => {
     expect(screen.queryByRole("button", { name: "Insert now" })).toBeNull();
   });
 
+  it.each(["en", "zh-CN"])(
+    "offers interrupt-and-send for an owned Codex turn in %s",
+    async (locale) => {
+      localStorage.setItem("yep-anywhere-locale", locale);
+      const onQueue = vi.fn();
+      const onStop = vi.fn();
+      const { textarea, onSend } = renderMessageInput({
+        provider: "codex",
+        isRunning: true,
+        isThinking: true,
+        onQueue,
+        onStop,
+      });
+      const name = locale === "en" ? "Interrupt & send" : "打断并发送";
+      const button = await screen.findByRole("button", { name });
+      typeInTextarea(textarea, "New instructions");
+      fireEvent.click(button);
+      expect(onSend).toHaveBeenCalledWith("New instructions");
+      // One request owns interrupt-and-send; the UI must not race a separate stop.
+      expect(onStop).not.toHaveBeenCalled();
+      expect(onQueue).not.toHaveBeenCalled();
+    },
+  );
+
   it("offers both send choices with visible Chinese labels", async () => {
     localStorage.setItem("yep-anywhere-locale", "zh-CN");
     renderMessageInput({ isRunning: true, isThinking: true, onQueue: vi.fn() });
