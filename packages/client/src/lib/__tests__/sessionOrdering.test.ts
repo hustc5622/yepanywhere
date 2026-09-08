@@ -1,5 +1,8 @@
 import { describe, expect, it } from "vitest";
-import { compareSessionsByPinAndUpdatedAt } from "../sessionOrdering";
+import {
+  compareSessionsByPinAndUpdatedAt,
+  isSessionVisibleInAgeWindow,
+} from "../sessionOrdering";
 
 describe("compareSessionsByPinAndUpdatedAt", () => {
   it("keeps pins first and sorts both groups by recency", () => {
@@ -44,5 +47,25 @@ describe("compareSessionsByPinAndUpdatedAt", () => {
         .sort(compareSessionsByPinAndUpdatedAt)
         .map((session) => session.id),
     ).toEqual(["session-a", "session-b"]);
+  });
+
+  it("keeps old pins visible while applying the age window to ordinary sessions", () => {
+    const now = new Date("2026-09-07T01:03:00.000Z").getTime();
+    const oldUpdatedAt = "2026-08-30T03:59:29.000Z";
+
+    expect(
+      isSessionVisibleInAgeWindow(
+        { updatedAt: oldUpdatedAt, isStarred: true },
+        7,
+        now,
+      ),
+    ).toBe(true);
+    expect(
+      isSessionVisibleInAgeWindow(
+        { updatedAt: oldUpdatedAt, isStarred: false },
+        7,
+        now,
+      ),
+    ).toBe(false);
   });
 });

@@ -10,6 +10,21 @@ afterEach(() => {
 });
 
 describe("Codex service tier badge", () => {
+  it("keeps the provider identity on mobile when no config label exists", () => {
+    const { container, rerender } = render(<ProviderBadge provider="codex" />);
+    const providerBadge = container.querySelector(".provider-badge");
+
+    expect(providerBadge?.classList).not.toContain(
+      "provider-badge--mobile-config-only",
+    );
+    expect(screen.getByText("Codex")).toBeTruthy();
+
+    rerender(<ProviderBadge provider="codex" model="gpt-6-astra" />);
+    expect(container.querySelector(".provider-badge")?.classList).toContain(
+      "provider-badge--mobile-config-only",
+    );
+  });
+
   it.each([
     ["en", "Fast (priority)"],
     ["zh-CN", "Fast（优先）"],

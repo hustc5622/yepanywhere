@@ -9728,7 +9728,9 @@ button.context-usage-indicator--button:focus-visible {
   margin-right: 2px;
 }
 
-/* On mobile, hide provider name and dot - show only model */
+/* On mobile, prefer the shorter model/config label when one exists. If the
+   session has no model/config metadata, retain the provider identity instead
+   of leaving behind an empty bordered badge. */
 @media (max-width: 600px) {
   .new-session-defaults-bar {
     flex-direction: column;
@@ -9753,14 +9755,14 @@ button.context-usage-indicator--button:focus-visible {
     width: 100%;
   }
 
-  .provider-badge-label,
-  .provider-badge-dot-inline {
+  .provider-badge--mobile-config-only .provider-badge-label,
+  .provider-badge--mobile-config-only .provider-badge-dot-inline {
     display: none;
   }
-  .provider-badge-model::before {
+  .provider-badge--mobile-config-only .provider-badge-model::before {
     display: none;
   }
-  .provider-badge-model {
+  .provider-badge--mobile-config-only .provider-badge-model {
     margin-left: 0;
     opacity: 1;
   }

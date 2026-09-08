@@ -137,7 +137,7 @@ export function ProviderBadge({
 
   return (
     <span
-      className={`provider-badge ${className}`}
+      className={`provider-badge${configLabel ? " provider-badge--mobile-config-only" : ""} ${className}`}
       style={{ borderColor: color, color }}
     >
       <span className={dotClass} style={dotStyle} />

@@ -25,7 +25,10 @@ import { useHideSplashOnReady } from "../hooks/useHideSplashOnReady";
 import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
 import { useI18n } from "../i18n";
 import { useNavigationLayout } from "../layouts";
-import { compareSessionsByPinAndUpdatedAt } from "../lib/sessionOrdering";
+import {
+  compareSessionsByPinAndUpdatedAt,
+  isSessionVisibleInAgeWindow,
+} from "../lib/sessionOrdering";
 import { toUrlProjectId } from "../utils";
 
 // Long-press threshold for entering selection mode on mobile
@@ -282,8 +285,7 @@ export function GlobalSessionsPage() {
       // Age filtering (only show sessions updated within the last N days)
       if (ageFilter) {
         const days = Number(ageFilter);
-        const cutoff = Date.now() - days * 24 * 60 * 60 * 1000;
-        if (new Date(session.updatedAt).getTime() < cutoff) {
+        if (!isSessionVisibleInAgeWindow(session, days)) {
           return false;
         }
       }
