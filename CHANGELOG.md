@@ -56,6 +56,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Speed up Pi session opens by reusing parsed JSONL snapshots, avoiding redundant reads and branch scans, deriving summary and messages together, and deferring inline media on the client fast path.
 
 ### Fixed
+- 修复 Codex Bridge 把自动标题等 structured-output 辅助线程显示成第二个 `Untitled session` 的问题：Bridge 现在遵循 app-server 的 `thread.ephemeral` 标记，不再发布或持久化临时线程，并在 `thread/unsubscribe` 成功后解除连接归属；升级时会丢弃缺少 ephemeral 分类的旧版 Bridge 投影缓存，真实 Codex session 数据不受影响。
 - 修复 Android APK 无法下载会话生成文件的问题：文件查看器不再通过 WebView 不支持的弹窗发起下载，原生壳接管同一文档中的 HTTP(S) 下载，携带当前登录 Cookie 并保存到系统“下载”目录；Android 9 及以下按需申请旧版存储权限。
 - 修复 Yep 与飞书对 Codex 审批选项的语义不一致：`acceptForSession`、命令策略 amendment 和网络策略 amendment 现在共用同一判定，Yep 不再把“应用命令策略”误标为“本会话允许”并回传成可能退化为单次允许的 `approve_for_session`；飞书对 session grant 改用精确的 `approve_for_session`，策略 amendment 继续使用 `approve_always`。飞书审批卡同时补上“告诉 Codex 应该改做什么”表单，提交后通过中央 InteractionBroker 原子回传 `deny + feedback`，空反馈不会关闭审批；不具备后续消息队列的外部 bridge 请求不展示该入口。
 - 修复桌面端右侧文件详情面板的源码内容不会随面板宽度自动换行的问题；高亮源码和纯文本 fallback 现在都会在面板内软换行，拖动分隔线会触发内容重新排版，不再只是改变固定宽代码块的可视区域，独立文件页仍保留传统横向滚动。

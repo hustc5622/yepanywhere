@@ -715,6 +715,109 @@ describe("CodexBridgeService", () => {
     }
   });
 
+  it("keeps ephemeral structured-output threads out of session projections", async () => {
+    const client = await connect(`ws://127.0.0.1:${bridgePort}`);
+    try {
+      const startResponse = waitForJson(client);
+      client.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: "temporary-structured-start",
+          method: "thread/start",
+          params: {
+            cwd: "/tmp/project-ephemeral",
+            ephemeral: true,
+          },
+        }),
+      );
+      await waitFor(() => upstreamMessages.length === 1);
+      upstreamSocket?.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: "temporary-structured-start",
+          result: {
+            model: "gpt-5.6-luna",
+            cwd: "/tmp/project-ephemeral",
+            thread: {
+              id: "ephemeral-title-helper",
+              preview: "Generate a concise title",
+              ephemeral: true,
+              createdAt: 1_780_000_000,
+              updatedAt: 1_780_000_001,
+              cwd: "/tmp/project-ephemeral",
+              status: { type: "idle" },
+              turns: [],
+            },
+          },
+        }),
+      );
+      await startResponse;
+
+      const started = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "thread/started",
+          params: {
+            thread: {
+              id: "ephemeral-title-helper",
+              cwd: "/tmp/project-ephemeral",
+              ephemeral: true,
+              status: { type: "idle" },
+              turns: [],
+            },
+          },
+        }),
+      );
+      await started;
+
+      const turnStarted = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "turn/started",
+          params: {
+            threadId: "ephemeral-title-helper",
+            turn: { id: "ephemeral-title-turn" },
+          },
+        }),
+      );
+      await turnStarted;
+
+      const turnCompleted = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "turn/completed",
+          params: {
+            threadId: "ephemeral-title-helper",
+            turn: {
+              id: "ephemeral-title-turn",
+              status: "completed",
+              items: [],
+            },
+          },
+        }),
+      );
+      await turnCompleted;
+      await delay(20);
+
+      expect(bridge.listSessions()).toEqual([]);
+      expect(bridge.listSessionViews()).toEqual([]);
+      expect(bridge.getSessionView("ephemeral-title-helper")).toBeNull();
+      expect(bridge.isSessionActive("ephemeral-title-helper")).toBe(false);
+      expect(bridge.getStatus().sessionCount).toBe(0);
+      expect(
+        emittedEvents.some(
+          (event) =>
+            (event as { session?: { id?: string } }).session?.id ===
+              "ephemeral-title-helper" ||
+            (event as { sessionId?: string }).sessionId ===
+              "ephemeral-title-helper",
+        ),
+      ).toBe(false);
+    } finally {
+      client.close();
+    }
+  });
+
   it("persists requests, responses, notifications, and approvals before forwarding or projecting", async () => {
     const client = await connect(`ws://127.0.0.1:${bridgePort}`);
     try {
@@ -1906,6 +2009,73 @@ describe("CodexBridgeService", () => {
           messageCount: 1,
           ownership: { owner: "none" },
         },
+        activity: "idle",
+      });
+    } finally {
+      client.close();
+    }
+  });
+
+  it("detaches a thread after a successful thread/unsubscribe response", async () => {
+    const client = await connect(`ws://127.0.0.1:${bridgePort}`);
+    try {
+      client.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          method: "thread/read",
+          params: { threadId: "thread-unsubscribe" },
+        }),
+      );
+      await waitFor(() => upstreamMessages.length === 1);
+      upstreamSocket?.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 1,
+          result: {
+            model: "gpt-5.3-codex",
+            cwd: "/tmp/project-unsubscribe",
+            thread: {
+              id: "thread-unsubscribe",
+              preview: "Completed helper",
+              ephemeral: false,
+              createdAt: 1_780_000_000,
+              updatedAt: 1_780_000_001,
+              cwd: "/tmp/project-unsubscribe",
+              status: { type: "idle" },
+              turns: [{}],
+            },
+          },
+        }),
+      );
+      await waitFor(() => bridge.isSessionActive("thread-unsubscribe"));
+
+      const unsubscribeResponse = waitForJson(client);
+      client.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 2,
+          method: "thread/unsubscribe",
+          params: { threadId: "thread-unsubscribe" },
+        }),
+      );
+      await waitFor(() => upstreamMessages.length === 2);
+      upstreamSocket?.send(
+        JSON.stringify({
+          jsonrpc: "2.0",
+          id: 2,
+          result: { status: "unsubscribed" },
+        }),
+      );
+      await unsubscribeResponse;
+      await waitFor(() => !bridge.isSessionActive("thread-unsubscribe"));
+
+      expect(bridge.getSessionView("thread-unsubscribe")).toMatchObject({
+        session: {
+          id: "thread-unsubscribe",
+          ownership: { owner: "none" },
+        },
+        active: false,
         activity: "idle",
       });
     } finally {
@@ -3213,6 +3383,16 @@ describe("CodexBridgeService", () => {
     }
     await first.shutdown();
 
+    expect(JSON.parse(readFileSync(statePath, "utf8"))).toMatchObject({
+      version: 2,
+      sessions: [
+        {
+          id: "thread-persist",
+          ephemeral: false,
+        },
+      ],
+    });
+
     const portB = await findAvailablePort();
     const second = new CodexBridgeService({
       enabled: true,
@@ -3240,6 +3420,53 @@ describe("CodexBridgeService", () => {
       });
     } finally {
       await second.shutdown();
+    }
+  });
+
+  it("drops legacy bridge session projections without ephemeral metadata", async () => {
+    const directory = mkdtempSync(join(tmpdir(), "codex-bridge-v1-state-"));
+    const statePath = join(directory, "sessions.json");
+    writeFileSync(
+      statePath,
+      JSON.stringify({
+        version: 1,
+        sessions: [
+          {
+            id: "legacy-unclassified-helper",
+            isSubagent: false,
+            threadMetadataKnown: true,
+            projectPath: "/tmp/project-legacy-helper",
+            projectPathKnown: true,
+            title: null,
+            fullTitle: null,
+            createdAt: "2026-09-07T02:47:06.000Z",
+            updatedAt: "2026-09-07T02:47:11.523Z",
+            messageCount: 1,
+            model: "gpt-5.6-luna",
+            completedTurnIds: ["legacy-helper-turn"],
+            emitted: true,
+          },
+        ],
+      }),
+    );
+
+    const migrated = new CodexBridgeService({
+      enabled: true,
+      host: "127.0.0.1",
+      port: await findAvailablePort(),
+      upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
+      statePath,
+    });
+    try {
+      await migrated.start();
+      expect(migrated.listSessions()).toEqual([]);
+      expect(JSON.parse(readFileSync(statePath, "utf8"))).toEqual({
+        version: 2,
+        sessions: [],
+      });
+    } finally {
+      await migrated.shutdown();
+      rmSync(directory, { recursive: true, force: true });
     }
   });
   it("replays the derived durable bridge journal and deduplicates lifecycle events after reconnect", async () => {

@@ -129,6 +129,10 @@ export interface CodexBridgeServiceOptions {
 interface ClientRequestRecord {
   method: string;
   sessionId: string;
+  /** Thread targeted by lifecycle requests such as thread/unsubscribe. */
+  threadId?: string;
+  /** thread/start hint for older app-server responses without Thread.ephemeral. */
+  ephemeral?: boolean;
   eventScope?: CodexBridgeClientRequestScope;
   mcpStartupCompatibilityServerIds?: string[];
 }
@@ -195,6 +199,12 @@ interface PendingServerRequest {
 
 interface SessionRecord {
   id: string;
+  /**
+   * Whether Codex declared this thread ephemeral. Undefined is reserved for
+   * incomplete metadata and legacy persisted bridge state; neither is safe to
+   * expose as a user session until fresh thread metadata classifies it.
+   */
+  ephemeral?: boolean;
   isSubagent: boolean;
   threadMetadataKnown: boolean;
   parentThreadId?: string;
@@ -237,6 +247,8 @@ interface SessionRecord {
 /** JSON-serializable subset of SessionRecord persisted across bridge restarts. */
 interface PersistedSessionRecord {
   id: string;
+  /** Missing from version 1 state. Ephemeral records are never persisted. */
+  ephemeral?: boolean;
   isSubagent: boolean;
   threadMetadataKnown: boolean;
   parentThreadId?: string;
@@ -269,6 +281,7 @@ const MAX_COMPLETED_TURN_IDS = 256;
 const CODEX_USAGE_CACHE_TTL_MS = 30_000;
 const INTERNAL_REQUEST_TIMEOUT_MS = 10_000;
 const JOURNAL_SHUTDOWN_FLUSH_TIMEOUT_MS = 2_000;
+const PERSISTED_SESSION_STATE_VERSION = 2;
 
 function isMcpThreadLifecycleMethod(
   method: string | undefined,
@@ -1492,6 +1505,8 @@ export class CodexBridgeService implements CodexBridgeController {
       const message = profiledMessage.message;
       if (message !== originalMessage) modified = true;
       if (message.method && message.id !== undefined) {
+        const params = asRecord(message.params);
+        const threadId = getString(params?.threadId);
         const sessionId = this.resolveLightweightSessionId(
           connection,
           message.params,
@@ -1502,6 +1517,10 @@ export class CodexBridgeService implements CodexBridgeController {
         connection.pendingClientRequests.set(idKey(message.id), {
           method: message.method,
           sessionId: eventScope?.sessionId ?? sessionId,
+          ...(threadId ? { threadId } : {}),
+          ...(message.method === "thread/start"
+            ? { ephemeral: params?.ephemeral === true }
+            : {}),
           ...(eventScope ? { eventScope } : {}),
           ...(profiledMessage.mcpStartupCompatibilityServerIds?.length
             ? {
@@ -2021,6 +2040,19 @@ export class CodexBridgeService implements CodexBridgeController {
     request: ClientRequestRecord,
     response: JsonRpcMessage,
   ): JsonRpcMessage[] {
+    if (request.method === "thread/unsubscribe") {
+      const status = getString(asRecord(response.result)?.status);
+      if (
+        request.threadId &&
+        (status === "unsubscribed" ||
+          status === "notSubscribed" ||
+          status === "notLoaded")
+      ) {
+        this.detachThreadConnection(connection, request.threadId);
+      }
+      return [];
+    }
+
     if (
       request.method !== "thread/start" &&
       request.method !== "thread/resume" &&
@@ -2040,6 +2072,10 @@ export class CodexBridgeService implements CodexBridgeController {
       model: getString(result.model),
       reasoningEffort: getString(result.reasoningEffort),
       serviceTier: getString(result.serviceTier),
+      ephemeral:
+        typeof thread.ephemeral === "boolean"
+          ? thread.ephemeral
+          : (request.ephemeral ?? false),
     });
 
     const threadId = getString(thread.id);
@@ -2082,6 +2118,10 @@ export class CodexBridgeService implements CodexBridgeController {
           this.upsertThread(connection, thread, {
             cwd: getString(thread.cwd),
             model: getString(thread.model),
+            // Missing means a compatible older app-server, whose default was
+            // a durable thread.
+            ephemeral:
+              typeof thread.ephemeral === "boolean" ? thread.ephemeral : false,
           });
         }
         break;
@@ -2695,6 +2735,7 @@ export class CodexBridgeService implements CodexBridgeController {
       model?: string;
       reasoningEffort?: string;
       serviceTier?: string;
+      ephemeral?: boolean;
     },
   ): void {
     const id = getString(thread.id);
@@ -2704,6 +2745,10 @@ export class CodexBridgeService implements CodexBridgeController {
     const subagent = getCodexSubagentMetadata(thread);
     const record = this.ensureSessionRecord(id, {
       cwd,
+      ephemeral:
+        typeof thread.ephemeral === "boolean"
+          ? thread.ephemeral
+          : (extra.ephemeral ?? false),
       isSubagent: subagent.isSubagent,
       parentThreadId: subagent.parentThreadId,
       agentPath: subagent.agentPath,
@@ -2753,6 +2798,7 @@ export class CodexBridgeService implements CodexBridgeController {
     threadId: string,
     values: {
       cwd?: string;
+      ephemeral?: boolean;
       isSubagent?: boolean;
       threadMetadataKnown?: boolean;
       parentThreadId?: string;
@@ -2773,6 +2819,7 @@ export class CodexBridgeService implements CodexBridgeController {
     const projectPath = values.cwd ?? existing?.projectPath ?? process.cwd();
     const record: SessionRecord = existing ?? {
       id: threadId,
+      ephemeral: values.ephemeral,
       isSubagent: values.isSubagent ?? false,
       threadMetadataKnown:
         values.threadMetadataKnown ?? values.isSubagent !== undefined,
@@ -2802,6 +2849,14 @@ export class CodexBridgeService implements CodexBridgeController {
     }
     if (values.cwd) {
       record.projectPathKnown = true;
+    }
+    // Classification is monotonic. A later partial payload must never expose
+    // an ephemeral helper thread as a durable user session.
+    if (values.ephemeral === true) {
+      record.ephemeral = true;
+      this.emittedSessionIds.delete(threadId);
+    } else if (values.ephemeral === false && record.ephemeral === undefined) {
+      record.ephemeral = false;
     }
     // Classification is monotonic: once Codex identifies a child thread, a
     // later partial notification must not promote it back to a root session.
@@ -2846,6 +2901,28 @@ export class CodexBridgeService implements CodexBridgeController {
     record.connectionIds.add(connection.id);
   }
 
+  private detachThreadConnection(
+    connection: BridgeConnection,
+    threadId: string,
+  ): void {
+    connection.threadIds.delete(threadId);
+    const record = this.sessions.get(threadId);
+    if (!record) return;
+
+    record.connectionIds.delete(connection.id);
+    record.updatedAt = new Date().toISOString();
+    if (record.connectionIds.size === 0) {
+      this.resolvePendingForThread(threadId, "thread-unsubscribed");
+      record.activity = "idle";
+      record.turnActive = false;
+      record.activityBeforePending = undefined;
+      record.pendingInputType = undefined;
+      this.emitSessionStatus(record, { owner: "none" });
+      this.emitProcessState(record, "idle");
+    }
+    this.schedulePersist();
+  }
+
   /**
    * Debounced persistence of session metadata. The bridge previously kept all
    * session state in memory only, so a 4510 restart forgot every external
@@ -2864,9 +2941,15 @@ export class CodexBridgeService implements CodexBridgeController {
     const statePath = this.statePath;
     if (!statePath) return Promise.resolve();
     const records: PersistedSessionRecord[] = Array.from(this.sessions.values())
-      .filter((record) => !record.isSubagent && record.projectPathKnown)
+      .filter(
+        (record) =>
+          record.ephemeral === false &&
+          !record.isSubagent &&
+          record.projectPathKnown,
+      )
       .map((record) => ({
         id: record.id,
+        ephemeral: false,
         isSubagent: record.isSubagent,
         threadMetadataKnown: record.threadMetadataKnown,
         parentThreadId: record.parentThreadId,
@@ -2886,7 +2969,10 @@ export class CodexBridgeService implements CodexBridgeController {
         completedTurnIds: Array.from(record.completedTurnIds),
         emitted: this.emittedSessionIds.has(record.id),
       }));
-    const payload = JSON.stringify({ version: 1, sessions: records });
+    const payload = JSON.stringify({
+      version: PERSISTED_SESSION_STATE_VERSION,
+      sessions: records,
+    });
     const writeSnapshot = async (): Promise<void> => {
       try {
         await mkdir(dirname(statePath), { recursive: true, mode: 0o700 });
@@ -2913,9 +2999,17 @@ export class CodexBridgeService implements CodexBridgeController {
       return; // No state file yet, or unreadable - start fresh.
     }
     if (!Array.isArray(parsed.sessions)) return;
-    let needsSafeRewrite = false;
+    // Version 1 did not retain Thread.ephemeral, so its bridge-only records
+    // cannot be distinguished safely from structured-output helper threads.
+    // This file is only a projection cache; durable Codex sessions remain in
+    // the provider store and live clients repopulate their bridge records.
+    let needsSafeRewrite = parsed.version !== PERSISTED_SESSION_STATE_VERSION;
     for (const stored of parsed.sessions) {
       if (!stored || typeof stored.id !== "string" || !stored.projectPath) {
+        continue;
+      }
+      if (stored.ephemeral !== false) {
+        needsSafeRewrite = true;
         continue;
       }
       if (this.sessions.has(stored.id)) continue;
@@ -2934,6 +3028,7 @@ export class CodexBridgeService implements CodexBridgeController {
       }
       const record: SessionRecord = {
         id: stored.id,
+        ephemeral: false,
         isSubagent: stored.isSubagent === true,
         threadMetadataKnown: stored.threadMetadataKnown === true,
         parentThreadId: stored.parentThreadId,
@@ -2999,6 +3094,7 @@ export class CodexBridgeService implements CodexBridgeController {
     // the wrong project, so they stay hidden until thread metadata arrives
     // (thread/start response or thread/started notification carries cwd).
     return (
+      record.ephemeral === false &&
       record.threadMetadataKnown &&
       !record.isSubagent &&
       record.projectPathKnown
