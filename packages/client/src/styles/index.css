@@ -447,6 +447,14 @@ body {
   color: var(--text-primary);
 }
 
+/* Native controls share the surrounding UI typeface, including portal menus. */
+button,
+input,
+select,
+textarea {
+  font-family: inherit;
+}
+
 .page {
   max-width: 800px;
   margin: 0 auto;
@@ -9737,10 +9745,6 @@ button.context-usage-indicator--button:focus-visible {
     align-items: stretch;
   }
 
-  .new-session-model-controls {
-    grid-template-columns: 1fr;
-  }
-
   .new-session-effort-control {
     align-items: stretch;
     flex-direction: column;
@@ -9797,9 +9801,16 @@ button.context-usage-indicator--button:focus-visible {
   width: 100%;
 }
 
+.new-session-config-field .filter-dropdown-button,
+.new-session-fast-toggle {
+  min-height: 40px;
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  line-height: 1.4;
+}
+
 .new-session-config-field .filter-dropdown-button {
   justify-content: space-between;
-  min-height: 40px;
 }
 
 .new-session-config-field .filter-dropdown-dropdown {
@@ -9825,21 +9836,24 @@ button.context-usage-indicator--button:focus-visible {
   align-items: center;
   justify-content: center;
   gap: var(--space-2);
-  min-height: 40px;
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border-color);
   border-radius: var(--radius-md);
-  background: var(--bg-secondary);
-  color: var(--text-secondary);
-  font: inherit;
+  background: var(--bg-code);
+  color: var(--text-primary);
   white-space: nowrap;
   cursor: pointer;
+  transition: border-color 0.15s, background 0.15s;
+}
+
+.new-session-fast-toggle:hover:not(:disabled) {
+  background: var(--bg-hover);
+  border-color: var(--text-dimmed);
 }
 
 .new-session-fast-toggle[aria-checked="true"] {
-  color: var(--new-session-accent);
   border-color: var(--new-session-accent);
-  background: color-mix(in srgb, var(--new-session-accent) 12%, transparent);
+  background: color-mix(in srgb, var(--new-session-accent) 10%, transparent);
 }
 
 .new-session-fast-toggle:disabled {
@@ -9853,10 +9867,15 @@ button.context-usage-indicator--button:focus-visible {
 }
 
 .new-session-fast-indicator {
-  width: 8px;
-  height: 8px;
+  width: 10px;
+  height: 10px;
+  flex-shrink: 0;
   border-radius: 50%;
-  background: currentColor;
+  background: var(--text-dimmed);
+}
+
+.new-session-fast-toggle[aria-checked="true"] .new-session-fast-indicator {
+  background: var(--new-session-accent);
 }
 
 .new-session-endpoint-options {
@@ -10408,6 +10427,10 @@ button.context-usage-indicator--button:focus-visible {
 @media (max-width: 600px) {
   .new-session-header h1 {
     font-size: 1.5rem;
+  }
+
+  .new-session-model-controls {
+    grid-template-columns: minmax(0, 1fr);
   }
 
   .mode-option {

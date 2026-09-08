@@ -56,6 +56,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Speed up Pi session opens by reusing parsed JSONL snapshots, avoiding redundant reads and branch scans, deriving summary and messages together, and deferring inline media on the client fast path.
 
 ### Fixed
+- 统一表单控件与页面正文的字体，新建会话的 Fast 开关与模型、思考模式选择器共用字号和字重，并对齐同页选项的底色、圆角和选中状态；修复移动端模型与思考模式仍挤在两列的问题。
 - 修复“全部会话”的移动端列表在默认“近 7 天”筛选下丢失旧置顶会话的问题：置顶项现在绕过普通会话的时间窗口，服务端补齐的所有置顶会话都会稳定排在当前筛选结果顶部；同时修复会话缺少 model/config 元数据时 provider 徽标只剩空边框的问题，此时移动端保留 Codex 等 provider 名称，已有 Yep 创建来源徽标继续正常展示。
 - 修复 Codex Bridge 把自动标题等 structured-output 辅助线程显示成第二个 `Untitled session` 的问题：Bridge 现在遵循 app-server 的 `thread.ephemeral` 标记，不再发布或持久化临时线程，并在 `thread/unsubscribe` 成功后解除连接归属；升级时会丢弃缺少 ephemeral 分类的旧版 Bridge 投影缓存，真实 Codex session 数据不受影响。
 - 修复 Android APK 无法下载会话生成文件的问题：文件查看器不再通过 WebView 不支持的弹窗发起下载，原生壳接管同一文档中的 HTTP(S) 下载，携带当前登录 Cookie 并保存到系统“下载”目录；Android 9 及以下按需申请旧版存储权限。
