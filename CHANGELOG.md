@@ -56,6 +56,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Speed up Pi session opens by reusing parsed JSONL snapshots, avoiding redundant reads and branch scans, deriving summary and messages together, and deferring inline media on the client fast path.
 
 ### Fixed
+- 修复 Android APK 无法下载会话生成文件的问题：文件查看器不再通过 WebView 不支持的弹窗发起下载，原生壳接管同一文档中的 HTTP(S) 下载，携带当前登录 Cookie 并保存到系统“下载”目录；Android 9 及以下按需申请旧版存储权限。
 - 修复 Yep 与飞书对 Codex 审批选项的语义不一致：`acceptForSession`、命令策略 amendment 和网络策略 amendment 现在共用同一判定，Yep 不再把“应用命令策略”误标为“本会话允许”并回传成可能退化为单次允许的 `approve_for_session`；飞书对 session grant 改用精确的 `approve_for_session`，策略 amendment 继续使用 `approve_always`。飞书审批卡同时补上“告诉 Codex 应该改做什么”表单，提交后通过中央 InteractionBroker 原子回传 `deny + feedback`，空反馈不会关闭审批；不具备后续消息队列的外部 bridge 请求不展示该入口。
 - 修复桌面端右侧文件详情面板的源码内容不会随面板宽度自动换行的问题；高亮源码和纯文本 fallback 现在都会在面板内软换行，拖动分隔线会触发内容重新排版，不再只是改变固定宽代码块的可视区域，独立文件页仍保留传统横向滚动。
 - 修复轻量 display 会话在运行中提问后，右侧「会话索引」的问题目录停在旧快照：新提问在 transcript 里可见，索引却仍只显示会话首个问题。问题目录只有两个来源——页面打开时拉取一次的 `display/questions` 快照，以及从当前实时消息实时推导的兜底；而 owned + live 的 display 会话在每个可读 assistant 边界都会跑一次「边界 flush」，重新拉取 display 页并把边界之前的实时消息裁掉（`setMessages(remaining)`），已落盘的提问就此从实时列表转移进投影。flush 只更新了 `displayPage`，没有同步问题索引，Inspector 又因为处于 `in-turn` 而推迟完整安全索引，于是新提问既不在实时消息里、也不在问题快照里，直到重开会话才出现。现在边界 flush 会把刷新后 display 页 turn 上的问题按 messageId 与 client/correlation 身份去重后并入问题索引（纯本地合并，不额外发请求）。

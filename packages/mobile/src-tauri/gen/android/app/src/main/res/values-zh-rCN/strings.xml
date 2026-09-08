@@ -1,0 +1,11 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Yep Anywhere</string>
+    <string name="main_activity_title">Yep Anywhere</string>
+    <string name="default_notification_channel_id">yep_anywhere_agent_attention</string>
+    <string name="download_description">正在从 Yep Anywhere 下载</string>
+    <string name="download_started">正在下载 %1$s，完成后可在“下载”目录中找到。</string>
+    <string name="download_failed">无法下载 %1$s。</string>
+    <string name="download_unsupported">App 暂不支持这种下载类型。</string>
+    <string name="download_storage_permission_denied">此 Android 版本需要存储权限才能保存文件。</string>
+</resources>

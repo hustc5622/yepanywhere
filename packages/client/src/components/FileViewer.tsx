@@ -176,6 +176,21 @@ function getFileName(filePath: string): string {
   return getFilePathParts(filePath).fileName;
 }
 
+/**
+ * Start a same-document download instead of opening a popup. Android WebView
+ * does not implement browser-style popup downloads, but a normal download
+ * navigation is handed to its native DownloadListener.
+ */
+function startFileDownload(url: string, fileName: string): void {
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  link.style.display = "none";
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+}
+
 function getErrorFilePath(err: unknown, fallbackPath: string): string | null {
   const apiError = err as Partial<ApiError> | null;
   if (typeof apiError?.absolutePath === "string") {
@@ -327,7 +342,7 @@ export const FileViewer = memo(function FileViewer({
 
   const handleDownload = useCallback(() => {
     const url = api.getFileRawUrl(projectId, filePath, true);
-    window.open(url, "_blank");
+    startFileDownload(url, getFileName(filePath));
   }, [projectId, filePath]);
 
   const handleOpenInNewTab = useCallback(() => {

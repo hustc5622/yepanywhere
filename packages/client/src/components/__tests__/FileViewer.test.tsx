@@ -4,14 +4,15 @@ import { I18nProvider } from "../../i18n";
 import { UI_KEYS } from "../../lib/storageKeys";
 import { FileViewer } from "../FileViewer";
 
-const { getFile } = vi.hoisted(() => ({
+const { getFile, getFileRawUrl } = vi.hoisted(() => ({
   getFile: vi.fn(),
+  getFileRawUrl: vi.fn(),
 }));
 
 vi.mock("../../api/client", () => ({
   api: {
     getFile,
-    getFileRawUrl: vi.fn(() => "/api/projects/project-1/files/raw"),
+    getFileRawUrl,
   },
 }));
 
@@ -42,6 +43,10 @@ describe("FileViewer", () => {
   beforeEach(() => {
     localStorage.setItem(UI_KEYS.locale, "en");
     getFile.mockReset();
+    getFileRawUrl.mockReset();
+    getFileRawUrl.mockReturnValue(
+      "/api/projects/project-1/files/raw?path=docs%2Fnotes.md&download=true",
+    );
     getFile.mockResolvedValue({
       metadata: {
         path: "docs/notes.md",
@@ -101,6 +106,35 @@ describe("FileViewer", () => {
     expect(await screen.findByText("12 B • 2 lines")).toBeTruthy();
     expect(screen.getByText("docs")).toBeTruthy();
     expect(screen.getByText("notes.md")).toBeTruthy();
+  });
+
+  it("starts downloads without opening a popup so Android WebView can handle them", async () => {
+    const captured: { link: HTMLAnchorElement | null } = { link: null };
+    vi.spyOn(HTMLAnchorElement.prototype, "click").mockImplementation(function (
+      this: HTMLAnchorElement,
+    ) {
+      captured.link = this;
+    });
+    const popup = vi.spyOn(window, "open");
+
+    renderViewer();
+    fireEvent.click(await screen.findByTitle("Download"));
+
+    expect(getFileRawUrl).toHaveBeenCalledWith(
+      "project-1",
+      "docs/notes.md",
+      true,
+    );
+    const clickedLink = captured.link;
+    expect(clickedLink).not.toBeNull();
+    if (!clickedLink)
+      throw new Error("Expected the download link to be clicked");
+    expect(clickedLink.getAttribute("href")).toBe(
+      "/api/projects/project-1/files/raw?path=docs%2Fnotes.md&download=true",
+    );
+    expect(clickedLink.getAttribute("download")).toBe("notes.md");
+    expect(clickedLink.getAttribute("target")).toBeNull();
+    expect(popup).not.toHaveBeenCalled();
   });
 
   it("offers independent actions for copying the title and full text", async () => {

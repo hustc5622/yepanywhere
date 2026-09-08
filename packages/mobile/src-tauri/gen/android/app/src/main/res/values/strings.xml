@@ -2,4 +2,9 @@
     <string name="app_name">Yep Anywhere</string>
     <string name="main_activity_title">Yep Anywhere</string>
     <string name="default_notification_channel_id">yep_anywhere_agent_attention</string>
+    <string name="download_description">Downloading from Yep Anywhere</string>
+    <string name="download_started">Downloading %1$s. You can find it in Downloads when complete.</string>
+    <string name="download_failed">Could not download %1$s.</string>
+    <string name="download_unsupported">This type of download is not supported in the app.</string>
+    <string name="download_storage_permission_denied">Storage permission is required to save files on this Android version.</string>
 </resources>
