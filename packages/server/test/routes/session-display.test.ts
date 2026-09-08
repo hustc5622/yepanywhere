@@ -9,6 +9,7 @@ import type {
 import { Hono } from "hono";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { CodexAppServerHistoryReader } from "../../src/codex-history/CodexAppServerHistoryReader.js";
+import { SessionDisplayService } from "../../src/display/SessionDisplayService.js";
 import { encodeProjectId } from "../../src/projects/paths.js";
 import {
   type SessionDisplayRuntimeState,
@@ -178,6 +179,44 @@ function createRoutes(
 }
 
 describe("session display routes", () => {
+  it("serves conditional output in the requested branch without fetching tool details", async () => {
+    const service = new SessionDisplayService({
+      runtime: {
+        getProcessForSession: vi.fn(),
+        subscribeSession: vi.fn(),
+      },
+    });
+    const output = vi
+      .spyOn(service, "output")
+      .mockResolvedValue({ revision: "same", status: "running" });
+    const detail = vi.spyOn(service, "detail");
+    const app = new Hono();
+    registerSessionDisplayRoutes(app, {
+      displayService: service,
+      scanner: { getOrCreateProject: vi.fn(async () => project()) },
+      providerResolution: { readerFactory: vi.fn() },
+    });
+    try {
+      const response = await app.request(
+        `/projects/${PROJECT_ID}/sessions/${SESSION_ID}/display/tools/tool-id/output?branchId=branch-1&since=same`,
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.json()).toEqual({
+        revision: "same",
+        status: "running",
+      });
+      expect(output).toHaveBeenCalledWith(
+        { projectId: PROJECT_ID, sessionId: SESSION_ID, branchId: "branch-1" },
+        "tool-id",
+        "same",
+      );
+      expect(detail).not.toHaveBeenCalled();
+    } finally {
+      service.dispose();
+    }
+  });
+
   it("annotates native Codex fork questions with cross-session alternatives", async () => {
     const summary: SessionSummary = {
       id: SESSION_ID,

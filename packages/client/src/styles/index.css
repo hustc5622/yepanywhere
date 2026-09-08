@@ -6019,7 +6019,7 @@ a.sidebar-nav-item {
   border-left: 2px solid var(--border-color, #3a3a3a);
   padding: 4px 8px;
   max-height: 220px;
-  overflow: hidden;
+  overflow: auto;
 }
 
 .tool-live-output pre {

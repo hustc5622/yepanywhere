@@ -803,4 +803,5 @@ export type {
   SessionDisplaySubscriptionOptions,
   SessionDisplayGroupPage,
   SessionDisplayToolDetail,
+  SessionDisplayToolOutput,
 } from "./session-display.js";

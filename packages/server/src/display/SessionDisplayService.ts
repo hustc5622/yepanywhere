@@ -4,6 +4,7 @@ import type {
   SessionDisplayGroupPage,
   SessionDisplaySnapshot,
   SessionDisplayToolDetail,
+  SessionDisplayToolOutput,
   SessionDisplayTurnStatus,
   SessionDisplayView,
 } from "@yep-anywhere/shared";
@@ -889,6 +890,36 @@ export class SessionDisplayService {
       ...(start > 0 ? { nextCursor: String(start) } : {}),
     };
   }
+  private toolOutput(
+    entry: Entry,
+    toolId: string,
+  ): SessionDisplayToolOutput | undefined {
+    const step = entry.model?.tools.get(toolId)?.step;
+    if (!step) return undefined;
+    const output = step.status === "running" ? step.preview : "";
+    const revision = createHash("sha256")
+      .update(JSON.stringify([entry.view.epoch, toolId, step.status, output]))
+      .digest("base64url")
+      .slice(0, 20);
+    return { revision, status: step.status, output };
+  }
+
+  async output(
+    selection: DisplaySelection,
+    toolId: string,
+    since?: string,
+  ): Promise<SessionDisplayToolOutput> {
+    if (!decodeDisplayToolId(toolId))
+      throw new Error("Invalid display tool id");
+    // Read only the existing projection's bounded tail. No detail/history reads,
+    // Markdown augmentation, or serialization of command inputs on this path.
+    const result = this.toolOutput(await this.get(selection), toolId);
+    if (!result) throw new Error("Unknown display tool id");
+    return result.revision === since
+      ? { revision: result.revision, status: result.status }
+      : result;
+  }
+
   async detail(
     selection: DisplaySelection,
     toolId: string,
@@ -911,6 +942,13 @@ export class SessionDisplayService {
       );
       if (persisted.length) messages = persisted;
     }
+    // Persisted detail may only contain the original invocation. Keep the
+    // current output tail independent of that body, including JSON pagination.
+    const output = this.toolOutput(entry, toolId);
+    const liveOutput =
+      output?.status === "running"
+        ? { liveOutput: output.output, liveOutputRevision: output.revision }
+        : {};
     // Details are fetched one tool at a time. Huge raw values use a paged JSON
     // representation rather than forcing all renderer inputs into the browser.
     const json = JSON.stringify(messages);
@@ -936,6 +974,7 @@ export class SessionDisplayService {
       return {
         toolId,
         version: entry.model?.tools.get(toolId)?.step.version ?? 0,
+        ...liveOutput,
         messages: [],
         rawJson: {
           content: json.slice(offset, next),
@@ -956,6 +995,7 @@ export class SessionDisplayService {
     return {
       toolId,
       version: entry.model?.tools.get(toolId)?.step.version ?? 0,
+      ...liveOutput,
       messages,
     };
   }

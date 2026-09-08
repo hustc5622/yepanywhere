@@ -2,6 +2,7 @@ import type {
   SessionDisplayGroupPage,
   SessionDisplaySnapshot,
   SessionDisplayToolDetail,
+  SessionDisplayToolOutput,
 } from "@yep-anywhere/shared";
 import type {
   AgentActivity,
@@ -1055,6 +1056,21 @@ export const api = {
     if (options?.cursor) params.set("cursor", options.cursor);
     return fetchJSON<SessionDisplayToolDetail<Message>>(
       `/projects/${projectId}/sessions/${sessionId}/display/tools/${encodeURIComponent(toolId)}?${params}`,
+      { signal: options?.signal },
+    );
+  },
+
+  getSessionDisplayToolOutput: (
+    projectId: string,
+    sessionId: string,
+    toolId: string,
+    options?: { branchId?: string; since?: string; signal?: AbortSignal },
+  ) => {
+    const params = new URLSearchParams();
+    if (options?.branchId) params.set("branchId", options.branchId);
+    if (options?.since) params.set("since", options.since);
+    return fetchJSON<SessionDisplayToolOutput>(
+      `/projects/${projectId}/sessions/${sessionId}/display/tools/${encodeURIComponent(toolId)}/output?${params}`,
       { signal: options?.signal },
     );
   },

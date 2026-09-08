@@ -5,6 +5,7 @@ import {
   applySessionDisplayPatch,
 } from "@yep-anywhere/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { displayToolId } from "../../src/display/SessionDisplayReducer.js";
 import { SessionDisplayService } from "../../src/display/SessionDisplayService.js";
 import type { Message } from "../../src/supervisor/types.js";
 const selection = { projectId: "project", sessionId: "session" };
@@ -50,6 +51,156 @@ function fixture(pollMs = 60_000) {
   };
 }
 describe("SessionDisplayService", () => {
+  it("conditionally reads only the bounded in-memory tail without revisiting history", async () => {
+    const { service, source, push } = fixture();
+    await service.subscribe(selection, vi.fn());
+    const toolId = displayToolId("turn", "output-command");
+    const emitOutput = (partialOutput: string) =>
+      push("message", {
+        uuid: "output-command-turn",
+        type: "assistant",
+        codexTurnId: "turn",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "output-command",
+              name: "Bash",
+              input: { command: "pnpm test", longInput: "x".repeat(140_000) },
+              partialOutput,
+            },
+          ],
+        },
+      });
+    emitOutput(`${"x".repeat(3_000)}first`);
+    await service.snapshot(selection);
+    const first = await service.output(selection, toolId);
+    expect(first.output).toHaveLength(2_048);
+    expect(first.output).toMatch(/first$/);
+    for (let i = 0; i < 3; i++) {
+      const unchanged = await service.output(selection, toolId, first.revision);
+      expect(unchanged).toEqual({
+        revision: first.revision,
+        status: "running",
+      });
+      expect(Buffer.byteLength(JSON.stringify(unchanged))).toBeLessThan(100);
+    }
+    emitOutput(`${"x".repeat(3_000)}later`);
+    await service.snapshot(selection);
+    const changed = await service.output(selection, toolId, first.revision);
+    expect(changed.revision).not.toBe(first.revision);
+    expect(changed.output).toMatch(/later$/);
+    expect(source.read).toHaveBeenCalledTimes(1);
+    expect(source.detail).not.toHaveBeenCalled();
+    push("message", {
+      uuid: "output-result",
+      type: "user",
+      codexTurnId: "turn",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "output-command",
+            content: "all passed",
+          },
+        ],
+      },
+    });
+    await service.snapshot(selection);
+    expect(
+      await service.output(selection, toolId, changed.revision),
+    ).toMatchObject({
+      status: "completed",
+      output: "",
+    });
+    expect(source.detail).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])(
+    "preserves the latest running output when persisted detail has none (paged: %s)",
+    async (paged) => {
+      const { service, source, push } = fixture();
+      await service.subscribe(selection, vi.fn());
+      const invocation: Message = {
+        uuid: "command-turn",
+        type: "assistant",
+        codexTurnId: "turn",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "command",
+              name: "Bash",
+              input: { command: paged ? "x".repeat(140_000) : "pnpm test" },
+            },
+          ],
+        },
+      };
+      source.detail.mockResolvedValue([invocation]);
+      push("message", invocation);
+      push("message", {
+        uuid: "command-turn",
+        type: "assistant",
+        codexTurnId: "turn",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "command",
+              partialOutput: `${"x".repeat(3_000)}latest progress`,
+            },
+          ],
+        },
+      });
+      push("message", {
+        uuid: "progress-turn",
+        type: "assistant",
+        codexTurnId: "turn",
+        message: { role: "assistant", content: "Continuing another step" },
+      });
+      await service.snapshot(selection);
+      const detail = await service.detail(
+        selection,
+        displayToolId("turn", "command"),
+      );
+      expect(source.detail).toHaveBeenCalled();
+      expect(detail.liveOutput).toHaveLength(2_048);
+      expect(detail.liveOutput).toMatch(/latest progress$/);
+      expect(
+        await service.output(
+          selection,
+          displayToolId("turn", "command"),
+          detail.liveOutputRevision,
+        ),
+      ).toEqual({ revision: detail.liveOutputRevision, status: "running" });
+      expect(Boolean(detail.rawJson)).toBe(paged);
+      push("message", {
+        uuid: "command-result",
+        type: "user",
+        codexTurnId: "turn",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "command",
+              content: "all passed",
+            },
+          ],
+        },
+      });
+      await service.snapshot(selection);
+      expect(
+        (await service.detail(selection, displayToolId("turn", "command")))
+          .liveOutput,
+      ).toBeUndefined();
+    },
+  );
+
   it.each([false, true])(
     "restores the latest deferred queue on reconnect (drained: %s)",
     async (drained) => {

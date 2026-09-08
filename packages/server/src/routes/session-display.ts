@@ -159,6 +159,23 @@ export function registerSessionDisplayRoutes(
       },
     );
     routes.get(
+      "/projects/:projectId/sessions/:sessionId/display/tools/:toolId/output",
+      async (c) => {
+        try {
+          c.header("Cache-Control", "no-store");
+          return c.json(
+            await service.output(
+              selection(c),
+              c.req.param("toolId"),
+              c.req.query("since"),
+            ),
+          );
+        } catch (error) {
+          return displayErrorResponse(c, error);
+        }
+      },
+    );
+    routes.get(
       "/projects/:projectId/sessions/:sessionId/display/tools/:toolId",
       async (c) => {
         try {

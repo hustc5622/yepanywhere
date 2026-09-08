@@ -1,5 +1,6 @@
 import type {
   SessionDisplayToolDetail,
+  SessionDisplayToolOutput,
   SessionDisplayToolStep,
 } from "@yep-anywhere/shared";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -8,6 +9,7 @@ import { useI18n } from "../../i18n";
 import { preprocessMessages } from "../../lib/preprocessMessages";
 import type { Message } from "../../types";
 import type { DisplayToolGroupItem } from "../../types/renderItems";
+import { LiveOutputPreview } from "./LiveOutputPreview";
 import { ToolCallRow } from "./ToolCallRow";
 
 interface ToolSelection {
@@ -64,6 +66,9 @@ export function ProjectedToolStepRow({
     useState<SessionDisplayToolDetail<Message> | null>(null);
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState(false);
+  const [outputState, setOutputState] =
+    useState<SessionDisplayToolOutput | null>(null);
+  const [outputError, setOutputError] = useState(false);
   const generation = useRef(0);
   const requestController = useRef<AbortController | null>(null);
   const versionRef = useRef(step.version);
@@ -85,7 +90,10 @@ export function ProjectedToolStepRow({
           step.id,
           { branchId: selection.branchId, cursor, signal: controller.signal },
         );
-        if (request === generation.current) setDetail(next);
+        if (request === generation.current) {
+          requestedVersion.current = next.version;
+          setDetail(next);
+        }
       } catch {
         if (request === generation.current) setError(true);
       } finally {
@@ -97,18 +105,11 @@ export function ProjectedToolStepRow({
   useEffect(() => {
     if (!expanded) return;
     void load();
-    const timer =
-      step.status === "running"
-        ? setInterval(() => {
-            if (!document.hidden) void load();
-          }, 2_000)
-        : undefined;
     return () => {
       generation.current++;
       requestController.current?.abort();
-      clearInterval(timer);
     };
-  }, [expanded, load, step.status]);
+  }, [expanded, load]);
   useEffect(() => {
     if (
       expanded &&
@@ -117,6 +118,60 @@ export function ProjectedToolStepRow({
     )
       void load();
   }, [expanded, step.status, step.version, load]);
+  const detailLoaded = detail !== null;
+  const initialOutputRevision = detail?.liveOutputRevision;
+  const outputEnded = outputState !== null && outputState.status !== "running";
+  useEffect(() => {
+    if (!expanded || !detailLoaded || outputEnded || step.status !== "running")
+      return;
+    let disposed = false;
+    let since = initialOutputRevision;
+    let controller: AbortController | undefined;
+    let timer: ReturnType<typeof setTimeout>;
+    const refresh = async () => {
+      if (!document.hidden) {
+        controller = new AbortController();
+        try {
+          const next = await api.getSessionDisplayToolOutput(
+            selection.projectId,
+            selection.sessionId,
+            step.id,
+            { branchId: selection.branchId, since, signal: controller.signal },
+          );
+          if (disposed) return;
+          since = next.revision;
+          setOutputError(false);
+          if (next.output !== undefined) setOutputState(next);
+          if (next.status !== "running") {
+            setOutputState(next);
+            await load();
+            return;
+          }
+        } catch {
+          if (disposed) return;
+          setOutputError(true);
+        }
+      }
+      if (!disposed) timer = setTimeout(() => void refresh(), 2_000);
+    };
+    timer = setTimeout(() => void refresh(), 2_000);
+    return () => {
+      disposed = true;
+      clearTimeout(timer);
+      controller?.abort();
+    };
+  }, [
+    expanded,
+    detailLoaded,
+    outputEnded,
+    initialOutputRevision,
+    step.status,
+    step.id,
+    selection.projectId,
+    selection.sessionId,
+    selection.branchId,
+    load,
+  ]);
   const items = useMemo(
     () =>
       detail
@@ -126,6 +181,15 @@ export function ProjectedToolStepRow({
         : [],
     [detail],
   );
+  const showLiveOutput =
+    step.status === "running" &&
+    (!outputState || outputState.status === "running") &&
+    /^(bash|shell)$/i.test(step.name);
+  const liveOutput =
+    outputState?.output ??
+    detail?.liveOutput ??
+    items.find((item) => item.partialOutput)?.partialOutput ??
+    step.preview;
   const toggle = () => {
     const next = !expanded;
     remember(expandedTools, key, next);
@@ -135,6 +199,9 @@ export function ProjectedToolStepRow({
       generation.current++;
       requestController.current?.abort();
       setDetail(null);
+      requestedVersion.current = null;
+      setOutputState(null);
+      setOutputError(false);
     }
   };
   return (
@@ -171,6 +238,25 @@ export function ProjectedToolStepRow({
       </button>
       {expanded && (
         <div className="display-step-detail">
+          {showLiveOutput && (
+            <section aria-label={t("sessionDisplayLatestOutput")}>
+              <div className="display-tool-group-state">
+                {t("sessionDisplayLatestOutput")}
+              </div>
+              {liveOutput.trim() ? (
+                <LiveOutputPreview output={liveOutput} />
+              ) : (
+                <div className="display-tool-group-state" role="status">
+                  {t("sessionDisplayWaitingOutput")}
+                </div>
+              )}
+            </section>
+          )}
+          {showLiveOutput && outputError && (
+            <div className="display-tool-group-state" role="status">
+              {t("sessionDisplayOutputRetrying")}
+            </div>
+          )}
           {items.map((item) => (
             <ToolCallRow
               key={item.id}
@@ -195,7 +281,7 @@ export function ProjectedToolStepRow({
               <pre className="display-step-raw">{detail.rawJson.content}</pre>
             </>
           )}
-          {loading && (
+          {loading && !detail && (
             <div className="display-step-loading" role="status">
               {t("sessionToolGroupLoading")}
             </div>

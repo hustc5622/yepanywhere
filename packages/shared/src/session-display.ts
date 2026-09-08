@@ -396,6 +396,9 @@ export interface SessionDisplayToolDetail<TMessage = AppMessage> {
   toolId: string;
   version: number;
   messages: TMessage[];
+  /** Latest bounded terminal tail for a running tool, including an empty tail. */
+  liveOutput?: string;
+  liveOutputRevision?: string;
   /** Large outputs are paged separately; never silently claim completeness. */
   nextCursor?: string;
   rawJson?: {
@@ -404,6 +407,13 @@ export interface SessionDisplayToolDetail<TMessage = AppMessage> {
     total: number;
     revision: string;
   };
+}
+
+/** Conditional, bounded output read; unchanged responses omit the output body. */
+export interface SessionDisplayToolOutput {
+  revision: string;
+  status: SessionDisplayToolStep["status"];
+  output?: string;
 }
 
 export function sameSessionDisplayView(
