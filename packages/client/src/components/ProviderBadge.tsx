@@ -85,12 +85,6 @@ export function ProviderBadge({
     ) {
       return null;
     }
-    if (
-      (provider === "codex" || provider === "codex-oss") &&
-      normalized === "max"
-    ) {
-      return "xhigh";
-    }
     return normalized;
   };
 

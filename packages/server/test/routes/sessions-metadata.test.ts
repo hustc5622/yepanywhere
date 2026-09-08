@@ -726,6 +726,101 @@ describe("Sessions metadata route", () => {
     expect(codexGetSummary).not.toHaveBeenCalled();
   });
 
+  it.each(["priority", "default"] as const)(
+    "returns live model configuration and %s tier in both metadata and history",
+    async (serviceTier) => {
+      const project = createProject();
+      const summary = { ...createSummary(), model: undefined };
+      const process = {
+        id: "proc-1",
+        sessionId: summary.id,
+        provider: "codex",
+        model: "gpt-6-astra",
+        reasoningEffort: "xhigh",
+        serviceTier,
+        state: "in-turn",
+        permissionMode: "bypassPermissions",
+        modeVersion: 1,
+        pendingInputRequest: null,
+        supportsDynamicCommands: false,
+        messageHistory: [],
+      } as unknown as RuntimeProcessSnapshot;
+      const reader = {
+        getSessionSummary: vi.fn(async () => summary),
+        getSession: vi.fn(async () => ({
+          summary,
+          data: { provider: "codex", session: { entries: [] } },
+          messagesAlreadyProjected: true,
+        })),
+      } as unknown as ISessionReader;
+      const routes = createSessionsRoutes({
+        supervisor: {} as SessionsDeps["supervisor"],
+        runtimeController: {
+          getProcessSnapshotForSession: vi.fn(async () => process),
+          wasEverOwned: vi.fn(async () => true),
+        } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
+        scanner: {
+          getOrCreateProject: vi.fn(async () => project),
+        } as unknown as SessionsDeps["scanner"],
+        readerFactory: vi.fn(() => reader),
+        codexSessionCatalog: {
+          getSessionSummary: vi.fn(async () => summary),
+        } as unknown as NonNullable<SessionsDeps["codexSessionCatalog"]>,
+      });
+
+      for (const suffix of ["/metadata", ""] as const) {
+        const response = await routes.request(
+          `/projects/${project.id}/sessions/${summary.id}${suffix}`,
+        );
+        expect(response.status).toBe(200);
+        expect((await response.json()).session).toMatchObject({
+          model: "gpt-6-astra",
+          reasoningEffort: "xhigh",
+          serviceTier,
+        });
+      }
+    },
+  );
+
+  it.each(["priority", "default"] as const)(
+    "restores the saved %s tier when the Codex rollout has no tier field",
+    async (serviceTier) => {
+      const project = createProject();
+      const summary = createSummary();
+      const reader = {
+        getSessionSummary: vi.fn(async () => summary),
+        getSession: vi.fn(async () => ({
+          summary,
+          data: { provider: "codex", session: { entries: [] } },
+          messagesAlreadyProjected: true,
+        })),
+      } as unknown as ISessionReader;
+      const routes = createSessionsRoutes({
+        supervisor: {} as SessionsDeps["supervisor"],
+        runtimeController: {
+          getProcessSnapshotForSession: vi.fn(async () => null),
+          wasEverOwned: vi.fn(async () => true),
+        } as unknown as NonNullable<SessionsDeps["runtimeController"]>,
+        scanner: {
+          getOrCreateProject: vi.fn(async () => project),
+        } as unknown as SessionsDeps["scanner"],
+        readerFactory: vi.fn(() => reader),
+        sessionMetadataService: {
+          getMetadata: vi.fn(() => ({ codexServiceTier: serviceTier })),
+          getProvider: vi.fn(() => "codex"),
+        } as unknown as NonNullable<SessionsDeps["sessionMetadataService"]>,
+      });
+
+      for (const suffix of ["/metadata", ""] as const) {
+        const response = await routes.request(
+          `/projects/${project.id}/sessions/${summary.id}${suffix}`,
+        );
+        expect(response.status).toBe(200);
+        expect((await response.json()).session.serviceTier).toBe(serviceTier);
+      }
+    },
+  );
+
   it("returns the native Codex edit-fork branch family in metadata", async () => {
     const project = createProject();
     const root = {
@@ -970,6 +1065,9 @@ describe("Sessions metadata route", () => {
     const bridgeSummary: SessionSummary = {
       ...persistedSummary,
       ownership: { owner: "external" },
+      model: "gpt-6-astra",
+      reasoningEffort: "xhigh",
+      serviceTier: "priority",
       activity: "in-turn",
       source: "codex-bridge",
       lastTurnStatus: undefined,
@@ -1021,6 +1119,9 @@ describe("Sessions metadata route", () => {
       const json = await response.json();
       expect(json.session).toMatchObject({
         parentSessionId: "ses_parent",
+        model: "gpt-6-astra",
+        reasoningEffort: "xhigh",
+        serviceTier: "priority",
         retryStatus: {
           attempt: 4,
           message: "provider rate limited",

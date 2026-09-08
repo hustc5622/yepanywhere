@@ -493,11 +493,7 @@ export function NewSessionForm({
       ? resolveModelReasoningEffort(
           selectedModelInfo,
           codexReasoningEffort ??
-            (codexReasoningEfforts.length === 0
-              ? thinkingLevel === "max"
-                ? "xhigh"
-                : thinkingLevel
-              : undefined),
+            (codexReasoningEfforts.length === 0 ? thinkingLevel : undefined),
         )
       : undefined;
   const effectiveKimiReasoningEffort =
@@ -530,11 +526,15 @@ export function NewSessionForm({
       ? resolveModelReasoningEffort(selectedModelInfo, thinkingLevel)
       : undefined;
   const effectiveThinkingEffort =
-    resolvedClaudeThinkingEffort && isEffortLevel(resolvedClaudeThinkingEffort)
-      ? resolvedClaudeThinkingEffort
-      : resolvedPiThinkingEffort && isEffortLevel(resolvedPiThinkingEffort)
-        ? resolvedPiThinkingEffort
-        : thinkingLevel;
+    effectiveCodexReasoningEffort &&
+    isEffortLevel(effectiveCodexReasoningEffort)
+      ? effectiveCodexReasoningEffort
+      : resolvedClaudeThinkingEffort &&
+          isEffortLevel(resolvedClaudeThinkingEffort)
+        ? resolvedClaudeThinkingEffort
+        : resolvedPiThinkingEffort && isEffortLevel(resolvedPiThinkingEffort)
+          ? resolvedPiThinkingEffort
+          : thinkingLevel;
   const selectedThinkingPreset: ThinkingPreset =
     selectedProvider === "codex" &&
     thinkingMode === "on" &&
@@ -600,13 +600,9 @@ export function NewSessionForm({
         return;
       }
       const effort = preset.slice(3);
-      if (
-        selectedProvider === "codex" &&
-        codexReasoningEfforts.some(
-          (option) => option.reasoningEffort === effort,
-        )
-      ) {
+      if (selectedProvider === "codex") {
         setCodexReasoningEffort(effort);
+        if (isEffortLevel(effort)) setEffortLevel(effort);
         setThinkingMode("on");
         return;
       }
@@ -614,7 +610,7 @@ export function NewSessionForm({
       setEffortLevel(effort);
       setThinkingMode("on");
     },
-    [codexReasoningEfforts, selectedProvider, setEffortLevel, setThinkingMode],
+    [selectedProvider, setEffortLevel, setThinkingMode],
   );
   const handleThinkingSelect = useCallback(
     (selected: ThinkingPreset[]) => {
@@ -756,9 +752,7 @@ export function NewSessionForm({
         providerName === "codex"
           ? (savedDefaults?.reasoningEffort ??
             (savedThinkingPreset?.startsWith("on:")
-              ? savedThinkingPreset.slice(3) === "max"
-                ? "xhigh"
-                : savedThinkingPreset.slice(3)
+              ? savedThinkingPreset.slice(3)
               : null))
           : null;
       setCodexReasoningEffort(savedCodexReasoningEffort);
@@ -1074,14 +1068,6 @@ export function NewSessionForm({
     setSelectedCodexMcpMode(selectedMode);
   };
 
-  const handleSelectEffort = useCallback(
-    (effort: EffortLevel) => {
-      setEffortLevel(effort);
-      setThinkingMode("on");
-    },
-    [setEffortLevel, setThinkingMode],
-  );
-
   const gatewayModelLimits = useMemo((): LlmGatewayModelLimits | undefined => {
     if (selectedProvider !== "pi") return undefined;
     return resolveGatewayModelLimits(selectedModelInfo);
@@ -1139,9 +1125,18 @@ export function NewSessionForm({
         selectedModelForRequest ??
         undefined)
       : selectedModelForRequest;
-  const thinkingForRequest = supportsThinkingToggle
-    ? getThinkingOption(thinkingMode, effectiveThinkingEffort)
-    : undefined;
+  // Native Codex tiers outside the shared enum (e.g. ultra) travel only in
+  // reasoningEffort; never send an unrelated shared thinking level alongside.
+  const thinkingForRequest =
+    supportsThinkingToggle &&
+    !(
+      selectedProvider === "codex" &&
+      thinkingMode === "on" &&
+      effectiveCodexReasoningEffort &&
+      !isEffortLevel(effectiveCodexReasoningEffort)
+    )
+      ? getThinkingOption(thinkingMode, effectiveThinkingEffort)
+      : undefined;
   const currentProviderDefaults = useMemo(
     (): NewSessionProviderDefaults => ({
       model: modelForRequest,
@@ -1238,6 +1233,15 @@ export function NewSessionForm({
 
       // Get model and thinking settings
       const thinking = thinkingForRequest;
+      // Session input toolbars initialize from this preference. Persist the
+      // resolved native tier as well when restoring defaults or changing models.
+      if (
+        selectedProvider === "codex" &&
+        selectedReasoningEffort &&
+        isEffortLevel(selectedReasoningEffort)
+      ) {
+        setEffortLevel(selectedReasoningEffort);
+      }
       const sessionOptions = {
         mode,
         model: modelForRequest,
@@ -1344,6 +1348,9 @@ export function NewSessionForm({
         },
         initialTitle: trimmedMessage,
         initialProvider: selectedProvider ?? undefined,
+        initialModel: sessionOptions.model,
+        initialReasoningEffort: sessionOptions.reasoningEffort,
+        initialServiceTier: sessionOptions.serviceTier,
       };
       navigate(`${basePath}/projects/${projectId}/sessions/${sessionId}`, {
         state: navigationState,
@@ -1802,24 +1809,25 @@ export function NewSessionForm({
             {t("newSessionEffortTitle")}
           </span>
           <div className="new-session-effort-options">
-            {EFFORT_LEVEL_OPTIONS.map((option) => {
-              const label = getEffortLabel(option.value);
-              const selected =
-                thinkingMode === "on" && thinkingLevel === option.value;
-              return (
-                <button
-                  key={option.value}
-                  type="button"
-                  className={`new-session-effort-option ${selected ? "selected" : ""}`}
-                  onClick={() => handleSelectEffort(option.value)}
-                  disabled={isStarting}
-                  aria-pressed={selected}
-                  aria-label={`${t("newSessionEffortTitle")}: ${label}`}
-                >
-                  {label}
-                </button>
-              );
-            })}
+            {thinkingOptions
+              .filter((option) => option.value.startsWith("on:"))
+              .map((option) => {
+                const label = getEffortLabel(option.value.slice(3));
+                const selected = selectedThinkingPreset === option.value;
+                return (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={`new-session-effort-option ${selected ? "selected" : ""}`}
+                    onClick={() => applyThinkingPreset(option.value)}
+                    disabled={isStarting}
+                    aria-pressed={selected}
+                    aria-label={`${t("newSessionEffortTitle")}: ${label}`}
+                  >
+                    {label}
+                  </button>
+                );
+              })}
           </div>
         </div>
       )}

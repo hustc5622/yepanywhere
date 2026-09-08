@@ -9,6 +9,7 @@ import * as fs from "node:fs/promises";
 import * as path from "node:path";
 import type {
   CodexMcpMode,
+  CodexServiceTier,
   LlmGatewaySessionConfig,
   PermissionMode,
   ProviderName,
@@ -45,6 +46,8 @@ export interface SessionMetadata {
   executor?: string;
   /** Codex MCP profile for app-server sessions. */
   codexMcpMode?: CodexMcpMode;
+  /** Explicit Fast preference, retained across native resumes and forks. */
+  codexServiceTier?: CodexServiceTier;
   /** Effective Codex model source (Codex `model_provider`) for this session. */
   codexModelProvider?: string;
   /** Managed LLM gateway settings used to resume the session. */
@@ -307,6 +310,17 @@ export class SessionMetadataService {
     await this.save();
   }
 
+  async setCodexServiceTier(
+    sessionId: string,
+    codexServiceTier: CodexServiceTier | undefined,
+  ): Promise<void> {
+    this.updateSessionMetadata(sessionId, (metadata) => ({
+      ...metadata,
+      codexServiceTier,
+    }));
+    await this.save();
+  }
+
   /**
    * Persist the effective Codex model source (Codex `model_provider`) so
    * resumes/restarts start the app-server with the same provider and catalog.
@@ -396,6 +410,10 @@ export class SessionMetadataService {
 
   getCodexModelProvider(sessionId: string): string | undefined {
     return this.getMetadata(sessionId)?.codexModelProvider;
+  }
+
+  getCodexServiceTier(sessionId: string): CodexServiceTier | undefined {
+    return this.getMetadata(sessionId)?.codexServiceTier;
   }
 
   getLlmGatewayConfig(sessionId: string): LlmGatewaySessionConfig | undefined {
@@ -586,6 +604,9 @@ export class SessionMetadataService {
     if (updated.provider) cleaned.provider = updated.provider;
     if (updated.executor) cleaned.executor = updated.executor;
     if (updated.codexMcpMode) cleaned.codexMcpMode = updated.codexMcpMode;
+    if (updated.codexServiceTier) {
+      cleaned.codexServiceTier = updated.codexServiceTier;
+    }
     if (updated.codexModelProvider) {
       cleaned.codexModelProvider = updated.codexModelProvider;
     }

@@ -10,6 +10,14 @@ afterEach(() => {
 });
 
 describe("Codex service tier badge", () => {
+  it.each(["medium", "high", "xhigh", "max", "ultra"])(
+    "preserves the exact Codex reasoning tier %s",
+    (effort) => {
+      render(<ProviderBadge provider="codex" reasoningEffort={effort} />);
+      expect(screen.getByText(effort)).toBeTruthy();
+    },
+  );
+
   it("keeps the provider identity on mobile when no config label exists", () => {
     const { container, rerender } = render(<ProviderBadge provider="codex" />);
     const providerBadge = container.querySelector(".provider-badge");

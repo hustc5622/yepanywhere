@@ -58,6 +58,8 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Speed up Pi session opens by reusing parsed JSONL snapshots, avoiding redundant reads and branch scans, deriving summary and messages together, and deferring inline media on the client fast path.
 
 ### Fixed
+- 修复 Codex 新建会话关闭 Fast 后，续聊、修改思考档位触发进程重建或恢复会话时丢失 `serviceTier`、重新继承 `priority` 的问题。Yep 现在持久化创建时的 Fast 选择，在续聊、恢复和编辑分支时重新传递；旧会话可沿用已知的运行中档位。
+- 修复 Codex 新会话所选思考强度与实际 CLI session 不一致的问题：完整表单和紧凑表单统一使用模型支持的原生档位，同步提交与保存的强度；在线程创建、恢复和分支时就应用所选强度，避免初始化返回 CLI 默认值并覆盖后续请求，同时保留 `max` 与 `xhigh` 的独立展示。
 - 统一表单控件与页面正文的字体，新建会话的 Fast 开关与模型、思考模式选择器共用字号和字重，并对齐同页选项的底色、圆角和选中状态；修复移动端模型与思考模式仍挤在两列的问题。
 - 修复“全部会话”的移动端列表在默认“近 7 天”筛选下丢失旧置顶会话的问题：置顶项现在绕过普通会话的时间窗口，服务端补齐的所有置顶会话都会稳定排在当前筛选结果顶部；同时修复会话缺少 model/config 元数据时 provider 徽标只剩空边框的问题，此时移动端保留 Codex 等 provider 名称，已有 Yep 创建来源徽标继续正常展示。
 - 修复 Codex Bridge 把自动标题等 structured-output 辅助线程显示成第二个 `Untitled session` 的问题：Bridge 现在遵循 app-server 的 `thread.ephemeral` 标记，不再发布或持久化临时线程，并在 `thread/unsubscribe` 成功后解除连接归属；升级时会丢弃缺少 ephemeral 分类的旧版 Bridge 投影缓存，真实 Codex session 数据不受影响。

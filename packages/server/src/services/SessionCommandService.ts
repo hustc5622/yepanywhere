@@ -1087,6 +1087,11 @@ export class SessionCommandService {
       (providerRestoresReasoningEffort
         ? sessionSummary?.reasoningEffort
         : undefined);
+    const resumeServiceTier = this.resolveCodexServiceTier(
+      sessionId,
+      providerName,
+      sessionSummary?.serviceTier,
+    );
     const resumeCodexModelProvider =
       providerName === "codex"
         ? (input.codexModelProviderOverride?.sourceId ??
@@ -1153,6 +1158,7 @@ export class SessionCommandService {
           providerName,
           resumeReasoningEffort,
         ),
+        serviceTier: resumeServiceTier,
         providerName,
         codexMcpMode:
           providerName === "codex"
@@ -1222,6 +1228,12 @@ export class SessionCommandService {
     }
 
     const actualSessionId = result.sessionId ?? sessionId;
+    if (resumeServiceTier !== undefined) {
+      await this.deps.sessionMetadataService?.setCodexServiceTier?.(
+        actualSessionId,
+        resumeServiceTier,
+      );
+    }
     if (providerName === "codex" && resumeCodexModelProvider) {
       await this.deps.sessionMetadataService?.setCodexModelProvider?.(
         actualSessionId,
@@ -1546,6 +1558,18 @@ export class SessionCommandService {
     const llmGatewayConfig =
       parsedGatewayConfig.llmGatewayConfig ??
       this.deps.sessionMetadataService?.getLlmGatewayConfig?.(sessionId);
+    const serviceTier = this.resolveCodexServiceTier(
+      sessionId,
+      providerName,
+      process.serviceTier,
+    );
+    // Save before queueMessage can restart the process for a settings change.
+    if (serviceTier !== undefined) {
+      await this.deps.sessionMetadataService?.setCodexServiceTier?.(
+        sessionId,
+        serviceTier,
+      );
+    }
     const result = await this.deps.runtimeController.queueMessage({
       sessionId,
       projectPath: process.projectPath,
@@ -1565,6 +1589,7 @@ export class SessionCommandService {
                 parsedReasoningEffort.reasoningEffort,
               )
             : process.requestedReasoningEffort,
+        serviceTier,
         providerName,
         codexMcpMode:
           providerName === "codex"
@@ -2155,6 +2180,7 @@ export class SessionCommandService {
       llmGatewayConfig?: LlmGatewaySessionConfig;
       codexMcpMode?: CodexMcpMode;
       codexModelProvider?: string;
+      modelSettings?: { serviceTier?: CodexServiceTier };
     },
     requestedProvider: ProviderName | undefined,
     persistCodexModelProvider = false,
@@ -2177,6 +2203,15 @@ export class SessionCommandService {
       await metadata.setCodexMcpMode?.(result.sessionId, prepared.codexMcpMode);
     }
     if (
+      result.provider === "codex" &&
+      prepared.modelSettings?.serviceTier !== undefined
+    ) {
+      await metadata.setCodexServiceTier?.(
+        result.sessionId,
+        prepared.modelSettings.serviceTier,
+      );
+    }
+    if (
       persistCodexModelProvider &&
       result.provider === "codex" &&
       prepared.codexModelProvider
@@ -2192,6 +2227,26 @@ export class SessionCommandService {
         result.permissionMode,
       );
     }
+  }
+
+  private resolveCodexServiceTier(
+    sessionId: string,
+    provider: ProviderName | undefined,
+    effectiveTier?: string,
+  ): CodexServiceTier | undefined {
+    if (provider !== "codex") return undefined;
+    const saved =
+      this.deps.sessionMetadataService?.getCodexServiceTier?.(sessionId);
+    if (saved !== undefined) return saved;
+    // Older Yep sessions may only have a live tier, or a native history tier.
+    // Unknown tiers remain inherited; never infer Fast from the model name.
+    if (effectiveTier === "default" || effectiveTier === "standard") {
+      return "default";
+    }
+    if (effectiveTier === "priority" || effectiveTier === "fast") {
+      return "priority";
+    }
+    return undefined;
   }
 
   private async recordSessionOrigin(

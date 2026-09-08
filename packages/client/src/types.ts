@@ -188,6 +188,9 @@ export interface SessionNavigationState {
   initialStatus?: Extract<SessionOwnershipType, { owner: "self" }>;
   initialTitle?: string;
   initialProvider?: ProviderNameType;
+  initialModel?: string;
+  initialReasoningEffort?: string;
+  initialServiceTier?: string;
   targetMessageId?: string;
   targetBranchId?: string;
   /** Poll the newly-created native edit fork until its sibling graph lands. */

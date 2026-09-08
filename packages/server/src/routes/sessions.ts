@@ -1152,9 +1152,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     const metadataProvider = deps.sessionMetadataService?.getProvider(
       sessionId,
     ) as ProviderName | undefined;
-    const catalogSummary = await deps.codexSessionCatalog
-      ?.getSessionSummary(sessionId, project.path)
-      .catch(() => null);
+    const catalogSummary = bridgedSession
+      ? null
+      : await deps.codexSessionCatalog
+          ?.getSessionSummary(sessionId, project.path)
+          .catch(() => null);
     const providerResolutionDeps = toProviderResolutionDeps(deps);
     const cheapResolutionDeps = deps.codexSessionCatalog
       ? (({
@@ -1240,10 +1242,15 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         parentSessionId: sessionSummary?.parentSessionId,
         forkParentSessionId:
           metadata?.forkParentSessionId ?? sessionSummary?.forkParentSessionId,
-        model: sessionSummary?.model,
+        model: process?.model ?? sessionSummary?.model ?? metadata?.model,
         reasoningEffort:
-          sessionSummary?.reasoningEffort ?? process?.reasoningEffort,
-        serviceTier: sessionSummary?.serviceTier ?? process?.serviceTier,
+          process?.reasoningEffort ?? sessionSummary?.reasoningEffort,
+        serviceTier:
+          process?.serviceTier ??
+          sessionSummary?.serviceTier ??
+          (isCodexProviderName(resolvedProvider)
+            ? metadata?.codexServiceTier
+            : undefined),
         originator: sessionSummary?.originator,
         createdBy: metadata?.createdBy ?? sessionSummary?.createdBy,
         originChannel: metadata?.originChannel ?? sessionSummary?.originChannel,
@@ -2370,8 +2377,24 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         isStarred: metadata?.isStarred,
         createdBy: metadata?.createdBy ?? session.createdBy,
         originChannel: metadata?.originChannel ?? session.originChannel,
-        // Model comes from the session reader (extracted from JSONL)
-        model: session.model,
+        // Live configuration is available before rollout persistence. Modern
+        // Codex turn_context records do not persist the service tier at all.
+        model:
+          process?.model ??
+          bridgedSession?.session.model ??
+          session.model ??
+          metadata?.model,
+        reasoningEffort:
+          process?.reasoningEffort ??
+          bridgedSession?.session.reasoningEffort ??
+          session.reasoningEffort,
+        serviceTier:
+          process?.serviceTier ??
+          bridgedSession?.session.serviceTier ??
+          session.serviceTier ??
+          (isCodexProviderName(session.provider)
+            ? metadata?.codexServiceTier
+            : undefined),
         lastTurnStatus: bridgedSession
           ? bridgedSession.session.lastTurnStatus
           : session.lastTurnStatus,

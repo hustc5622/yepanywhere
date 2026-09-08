@@ -642,6 +642,7 @@ export class Supervisor {
         resumeSessionId: resumeSessionId ?? null,
         permissionMode: effectiveMode,
         model: modelSettings?.model ?? null,
+        serviceTier: modelSettings?.serviceTier ?? null,
         codexMcpMode: modelSettings?.codexMcpMode ?? null,
         codexModelProvider: modelSettings?.codexModelProvider ?? null,
         resumeSessionAt: rewind.resumeSessionAt,

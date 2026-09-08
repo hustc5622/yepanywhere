@@ -3021,6 +3021,22 @@ export class CodexProvider implements AgentProvider {
       // Omission leaves the native thread tier intact on ordinary resume.
       const serviceTier =
         modelSource.id === "openai" ? options.serviceTier : undefined;
+      const requestedReasoningEffort = this.mapEffortToReasoningEffort(
+        options.reasoningEffort,
+        options.effort,
+        options.thinking,
+        modelSource,
+        options.model,
+      );
+      // Apply the selected effort before init, including create-only sessions.
+      // Otherwise thread/start reports the CLI default, which can overwrite
+      // the client's selection and then be sent back on the next message.
+      const threadConfig = {
+        ...mcpProfile.threadConfig,
+        ...(requestedReasoningEffort !== undefined
+          ? { model_reasoning_effort: requestedReasoningEffort }
+          : {}),
+      };
       const threadResumeParams: ThreadResumeParams = {
         threadId: options.resumeSessionId ?? sessionId,
         model: requestedModel,
@@ -3029,7 +3045,7 @@ export class CodexProvider implements AgentProvider {
         cwd: options.cwd,
         approvalPolicy: policy.approvalPolicy,
         sandbox: policy.sandbox,
-        config: mcpProfile.threadConfig,
+        config: threadConfig,
         excludeTurns: true,
         ...(initialResumeTurnsPage
           ? { initialTurnsPage: initialResumeTurnsPage }
@@ -3042,7 +3058,7 @@ export class CodexProvider implements AgentProvider {
         cwd: options.cwd,
         approvalPolicy: policy.approvalPolicy,
         sandbox: policy.sandbox,
-        config: mcpProfile.threadConfig,
+        config: threadConfig,
       };
       let lifecycleHistorySupport: CodexLifecycleHistorySupport = "unknown";
       let resumedActiveTurnId: string | undefined;
@@ -3227,10 +3243,11 @@ export class CodexProvider implements AgentProvider {
             lastTurnId: boundary.turn.id,
             model: requestedModel,
             modelProvider: modelSource.id,
+            ...(serviceTier !== undefined ? { serviceTier } : {}),
             cwd: options.cwd,
             approvalPolicy: policy.approvalPolicy,
             sandbox: policy.sandbox,
-            config: mcpProfile.threadConfig,
+            config: threadConfig,
             excludeTurns: true,
           };
           log.info(
@@ -3399,6 +3416,7 @@ export class CodexProvider implements AgentProvider {
           model: requestedModel,
           codexModelProvider: effectiveModelProvider,
           serviceTier: threadResult.serviceTier,
+          requestedServiceTier: serviceTier ?? null,
           transport: transportKind,
           credentialPresent: Boolean(
             modelSource.providerConfig?.envKey
@@ -3452,13 +3470,7 @@ export class CodexProvider implements AgentProvider {
           threadId: sessionId,
           clientUserMessageId: message.uuid,
           input: buildCodexUserInput(message, internalPrompt),
-          effort: this.mapEffortToReasoningEffort(
-            options.reasoningEffort,
-            options.effort,
-            options.thinking,
-            modelSource,
-            options.model,
-          ),
+          effort: requestedReasoningEffort,
         };
         const retryObserver = async (update: AppServerRetryUpdate) =>
           await activeEventIngress.ingestClientRetry({

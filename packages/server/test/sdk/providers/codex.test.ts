@@ -341,7 +341,7 @@ function sendThread(id, threadId, cwd, options = {}) {
     modelProvider: "openai",
     serviceTier: options.serviceTier ?? process.env.CODEX_FAKE_SERVICE_TIER ?? null,
     cwd,
-    reasoningEffort: null,
+    reasoningEffort: options.reasoningEffort ?? process.env.CODEX_FAKE_REASONING_EFFORT ?? null,
     initialTurnsPage: options.initialTurnsPage || null,
     turnsBackwardsCursor: options.turnsBackwardsCursor || null,
     itemsBackwardsCursor: options.itemsBackwardsCursor || null,
@@ -429,6 +429,7 @@ function handle(message) {
       (turn) => turn.id === message.params.lastTurnId,
     );
     sendThread(message.id, "thread-forked", message.params.cwd, {
+      reasoningEffort: message.params.config?.model_reasoning_effort,
       turns:
         message.params.excludeTurns === true || boundary < 0
           ? []
@@ -708,6 +709,7 @@ function handle(message) {
         })
       : null;
   sendThread(message.id, threadId, message.params.cwd, {
+    reasoningEffort: message.params.config?.model_reasoning_effort,
     serviceTier: message.params.serviceTier,
     turns,
     initialTurnsPage,
@@ -780,6 +782,80 @@ process.stdin.on("data", (chunk) => {
           } else {
             expect(captured.params.serviceTier).toBe(serviceTier);
           }
+        } finally {
+          session?.abort();
+          vi.unstubAllEnvs();
+          rmSync(tempDir, { recursive: true, force: true });
+        }
+      },
+    );
+
+    it.each([
+      [false, "medium"],
+      [false, "high"],
+      [false, "xhigh"],
+      [false, "max"],
+      [false, "ultra"],
+      [false, undefined],
+      [true, "high"],
+      [true, undefined],
+    ] as const)(
+      "applies effort before init and keeps it on turns (resume=%s, effort=%s)",
+      async (resume, reasoningEffort) => {
+        const tempDir = mkdtempSync(
+          join(require("node:os").tmpdir(), "codex-reasoning-effort-"),
+        );
+        const capturePath = join(tempDir, "capture.json");
+        const messageCapturePath = join(tempDir, "messages.jsonl");
+        vi.stubEnv("CODEX_FAKE_CAPTURE", capturePath);
+        vi.stubEnv("CODEX_FAKE_MESSAGE_CAPTURE", messageCapturePath);
+        vi.stubEnv("CODEX_FAKE_REASONING_EFFORT", "xhigh");
+        let session:
+          | Awaited<ReturnType<CodexProvider["startSession"]>>
+          | undefined;
+        try {
+          const provider = new CodexProvider({
+            codexPath: writeFakeCodexAppServer(tempDir),
+          });
+          // Create-only follows the attachment path: init must already carry
+          // the selection before any turn is queued.
+          session = await provider.startSession({
+            cwd: tempDir,
+            resumeSessionId: resume ? "thread-existing" : undefined,
+            reasoningEffort,
+          });
+          await expect(session.iterator.next()).resolves.toMatchObject({
+            value: {
+              type: "system",
+              subtype: "init",
+              reasoningEffort: reasoningEffort ?? "xhigh",
+            },
+          });
+          const captured = JSON.parse(readFileSync(capturePath, "utf8"));
+          expect(captured.method).toBe(
+            resume ? "thread/resume" : "thread/start",
+          );
+          if (reasoningEffort === undefined) {
+            expect(captured.params.config).not.toHaveProperty(
+              "model_reasoning_effort",
+            );
+          } else {
+            expect(captured.params.config.model_reasoning_effort).toBe(
+              reasoningEffort,
+            );
+          }
+          session.queue.push({ text: "first prompt", uuid: "effort-1" });
+          await expect(session.iterator.next()).resolves.toMatchObject({
+            value: { type: "user" },
+          });
+          await expect(session.iterator.next()).resolves.toMatchObject({
+            value: { type: "result" },
+          });
+          const turn = readMessageCapture(messageCapturePath).find(
+            ({ method }) => method === "turn/start",
+          );
+          expect(turn).toBeDefined();
+          expect(turn?.params?.effort).toBe(reasoningEffort);
         } finally {
           session?.abort();
           vi.unstubAllEnvs();
@@ -3227,7 +3303,7 @@ process.stdin.on("data", (chunk) => {
       }
     });
 
-    it("forks through stable lastTurnId without mutating the source or losing thread MCP config", async () => {
+    it("forks through stable lastTurnId without losing thread MCP config or the Fast opt-out", async () => {
       const tempDir = mkdtempSync(
         join(require("node:os").tmpdir(), "codex-app-server-"),
       );
@@ -3258,6 +3334,7 @@ process.stdin.on("data", (chunk) => {
           initialMessage: { text: "edited prompt", uuid: "message-edit" },
           rollbackNumTurns: 1,
           codexMcpMode: "clear",
+          serviceTier: "default",
         });
 
         const messages: Array<Record<string, unknown>> = [];
@@ -3311,6 +3388,7 @@ process.stdin.on("data", (chunk) => {
             params: expect.objectContaining({
               threadId: "thread-existing",
               lastTurnId: "turn-source-2",
+              serviceTier: "default",
               excludeTurns: true,
               config: expect.objectContaining({
                 mcp_servers: expect.objectContaining({
@@ -4507,6 +4585,7 @@ describe("CodexProvider Event Normalization", () => {
         type: "system",
         subtype: "turn_complete",
         turnId: "turn-interrupted",
+        codexTurnId: "turn-interrupted",
         turnStatus: "interrupted",
       }),
     ]);

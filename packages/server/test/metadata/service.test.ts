@@ -439,6 +439,7 @@ describe("SessionMetadataService", () => {
       await service.initialize();
       await service.setProvider("temporary-id", "codex");
       await service.setCodexMcpMode("temporary-id", "standard");
+      await service.setCodexServiceTier("temporary-id", "default");
       await service.setPermissionMode("temporary-id", "bypassPermissions");
       await service.setCreatedBy("temporary-id", "yep");
 
@@ -447,6 +448,7 @@ describe("SessionMetadataService", () => {
       expect(service.getMetadata("durable-id")).toEqual({
         provider: "codex",
         codexMcpMode: "standard",
+        codexServiceTier: "default",
         permissionMode: "bypassPermissions",
         createdBy: "yep",
       });
@@ -461,6 +463,7 @@ describe("SessionMetadataService", () => {
         reloaded.getMetadata("durable-id"),
       );
       expect(reloaded.getMetadata("durable-id")?.createdBy).toBe("yep");
+      expect(reloaded.getCodexServiceTier("temporary-id")).toBe("default");
     });
 
     it("persists an ID alias even when no metadata exists yet", async () => {

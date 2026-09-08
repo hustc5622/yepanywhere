@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it, vi } from "vitest";
 import type { SessionInteractionService } from "../../src/interactions/SessionInteractionService.js";
-import type { SessionMetadataService } from "../../src/metadata/SessionMetadataService.js";
+import { SessionMetadataService } from "../../src/metadata/SessionMetadataService.js";
 import { encodeProjectId } from "../../src/projects/paths.js";
 import type { ProjectScanner } from "../../src/projects/scanner.js";
 import type {
@@ -82,7 +82,7 @@ describe("SessionCommandService runtime boundary", () => {
     ["create", "priority"],
     ["create", "default"],
   ] as const)(
-    "passes %s service tier %s to runtime",
+    "retains %s service tier %s through follow-ups and cold resume",
     async (flow, serviceTier) => {
       const projectPath = mkdtempSync(join(tmpdir(), "session-command-tier-"));
       try {
@@ -99,16 +99,32 @@ describe("SessionCommandService runtime boundary", () => {
           permissionMode: "default",
           modeVersion: 0,
         }));
+        const metadata = new SessionMetadataService({ dataDir: projectPath });
+        await metadata.initialize();
+        const queueMessage = vi.fn(async () => ({
+          success: true as const,
+          process: { id: "process-tier" },
+          restarted: true,
+        }));
         const service = new SessionCommandService({
           runtimeController: {
             startSession: start,
             createSession: start,
+            getProcessSnapshotForSession: vi.fn(async () =>
+              processSnapshot({
+                sessionId: "thread-tier",
+                projectPath,
+                serviceTier: "priority",
+              }),
+            ),
+            queueMessage,
           } as unknown as RuntimeController,
           scanner: {
             getOrCreateProject: vi.fn(async () => project),
           } as unknown as ProjectScanner,
           readerFactory: () => ({}) as ISessionReader,
           sessionInteractionService: interactionService(),
+          sessionMetadataService: metadata,
         });
         const result = await service[flow]({
           projectId,
@@ -122,6 +138,53 @@ describe("SessionCommandService runtime boundary", () => {
               serviceTier,
               providerName: "codex",
             }),
+          }),
+        );
+        expect(metadata.getCodexServiceTier("thread-tier")).toBe(serviceTier);
+
+        // A changed effort can restart the native process. The follow-up has
+        // no Fast field; keep the saved selection even if runtime defaults differ.
+        await expect(
+          service.queue({
+            sessionId: "thread-tier",
+            body: { message: "continue", reasoningEffort: "xhigh" },
+          }),
+        ).resolves.toMatchObject({ ok: true });
+        expect(queueMessage).toHaveBeenCalledWith(
+          expect.objectContaining({
+            modelSettings: expect.objectContaining({ serviceTier }),
+          }),
+        );
+
+        // Simulate a server restart and a native rollout without service_tier.
+        const reloaded = new SessionMetadataService({ dataDir: projectPath });
+        await reloaded.initialize();
+        const resumeSession = vi.fn(async () => ({
+          id: "process-resumed",
+          sessionId: "thread-tier",
+          provider: "codex" as const,
+          permissionMode: "default" as const,
+          modeVersion: 0,
+        }));
+        const resumedService = new SessionCommandService({
+          runtimeController: { resumeSession } as unknown as RuntimeController,
+          scanner: {
+            getOrCreateProject: vi.fn(async () => project),
+          } as unknown as ProjectScanner,
+          readerFactory: () => ({}) as ISessionReader,
+          sessionInteractionService: interactionService(),
+          sessionMetadataService: reloaded,
+        });
+        await expect(
+          resumedService.resume({
+            projectId,
+            sessionId: "thread-tier",
+            body: { message: "continue later", reasoningEffort: "xhigh" },
+          }),
+        ).resolves.toMatchObject({ ok: true });
+        expect(resumeSession).toHaveBeenCalledWith(
+          expect.objectContaining({
+            modelSettings: expect.objectContaining({ serviceTier }),
           }),
         );
 
@@ -146,6 +209,41 @@ describe("SessionCommandService runtime boundary", () => {
       } finally {
         rmSync(projectPath, { recursive: true, force: true });
       }
+    },
+  );
+
+  it.each([
+    ["codex", "default", "default"],
+    ["codex", "priority", "priority"],
+    ["codex", "fast", "priority"],
+    ["codex", undefined, undefined],
+    ["codex", "flex", undefined],
+    ["pi", "priority", undefined],
+  ] as const)(
+    "keeps an older %s session's live tier %s on a queued restart",
+    async (provider, liveTier, expectedTier) => {
+      const queueMessage = vi.fn(async () => ({
+        success: true as const,
+        process: { id: "process-1" },
+        restarted: true,
+      }));
+      const service = createService({
+        getProcessSnapshotForSession: vi.fn(async () =>
+          processSnapshot({ provider, serviceTier: liveTier }),
+        ),
+        queueMessage,
+      });
+      await expect(
+        service.queue({
+          sessionId: "session-1",
+          body: { message: "continue", reasoningEffort: "xhigh" },
+        }),
+      ).resolves.toMatchObject({ ok: true });
+      expect(queueMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelSettings: expect.objectContaining({ serviceTier: expectedTier }),
+        }),
+      );
     },
   );
 
