@@ -10,6 +10,13 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 ### Added
 - Codex 会话执行中新增“回复并继续”作为默认发送操作（桌面 Enter），通过现有 steering 通道提交异步问题的回答或补充；保留独立的“打断并发送”和“排队”（Ctrl+Enter），同步更新中英文提示及移动端按钮换行。
 - APK 侧边栏新增 Home、Mini 服务快捷切换，分别显示最近 24 小时已结束且未读的会话数；打开侧边栏时独立查询两端并每 15 秒刷新，区分离线与需要登录，切换服务不清除未读。Inbox 新增分页截断前的完整计数，兼容旧服务时对可能截断的计数显示 `+`。
+
+### Fixed
+- 修复 Codex 子会话事件被误记为主会话输出、旧审阅结论在后续对话末尾反复出现的问题：按原始线程 ID 隔离实时事件，并依据已加载的原生历史范围清除缺失线程归属的旧展示缓存；保留尚未落盘的新一轮输出。
+
+## [2026.9.0] - 2026-09-08
+
+### Added
 - 执行中的 Bash/Shell 步骤展开后优先展示最近 12 行终端输出；完整详情首次展开加载，后续通过独立接口刷新最多 2,048 字符的内存尾部，版本未变化时不重复传输输出正文、不回读历史，不重置已打开的详情分页；收起或切到后台暂停刷新。无输出时明确提示可能正在缓冲或写日志。
 - 新建 Codex 会话的模型选择旁新增 Fast（优先）开关，按模型能力启用，可保存为默认；开启请求 `priority`，关闭显式请求 `default`，同时覆盖带附件的两阶段创建流程；会话状态和列表徽标将 `priority` 显示为 Fast（优先），与创建页保持一致。
 - Pi 会话的 thinking 现在是 display 时间线上的一等行，并承担工具合并的分割点。此前 Pi 的推理只存在于实时 WebSocket 流里：display 路径固定 `deferThinking: true`，normalization 直接丢弃 thinking 块（不留占位、也没有按需详情），所以刷新或重进会话后所有 thinking 行凭空消失。更严重的是结构塌陷——Pi 的叙事几乎全由 thinking 承担（实测一个会话 146 个 thinking / 329 个 toolCall，assistant text 只有 19 段），Codex 靠 commentary 分割工具组的机制在 Pi 上没有对应物，于是重进后整段历史被压成 18 个巨型工具组（最大一组 63 个工具）。现在 Pi 解析在 defer 模式下保留 240 字符预览（`deferred` + `thinkingLength`）而不是清空，display 协议新增 strict 的 `thinking` segment（预览 + `truncated` + `detailRef`），投影为每个推理行 flush 当前工具批次；同一会话变成 174 个推理行 / 182 个工具组（单组均值 2.3、最大 23）。预览只够折叠行的单行摘要，展开时通过新的 `display/thinking/:detailRef` 路由按需取全文；该路由用「完整推理」重读会话再重建同一份投影，因此推理行无论预览还是全文读取都必然存在并消耗 detail index，detail ref 在两种读取下逐字节一致（真实会话验证），既能解析推理全文，也不会让既有 tool-group ref 错位。行默认折叠、复用现有 ThinkingBlock，展开失败或 revision 过期会显式提示；实时流路径不变，raw 尾部与 display 的推理行按消息身份去重，避免同一段推理渲染两次。范围限定 Pi：其他 provider 的 reasoning 仍不进入轻量页，等这一版观察后再扩。
@@ -62,7 +69,6 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Speed up Pi session opens by reusing parsed JSONL snapshots, avoiding redundant reads and branch scans, deriving summary and messages together, and deferring inline media on the client fast path.
 
 ### Fixed
-- 修复 Codex 子会话事件被误记为主会话输出、旧审阅结论在后续对话末尾反复出现的问题：按原始线程 ID 隔离实时事件，并依据已加载的原生历史范围清除缺失线程归属的旧展示缓存；保留尚未落盘的新一轮输出。
 - 修复 Codex 异步提问被显示成最终回复的问题：实时消息与历史记录保留异步投递和问题信息，显示独立提问卡片及回复提示，不再因其 `final_answer` 标记误判任务正在收尾。
 - 修复统一会话展示中同一消息的多个文本块互相覆盖、工具前后回复顺序错乱的问题；重连时同步最新排队消息，避免待执行消息消失或已清空的队列重新出现。
 - 修复统一会话投影遗漏 assistant Markdown HTML，导致绝对文件路径链接、加粗和列表显示为原始语法：首开、历史分页和实时增量现在统一生成安全 Markdown，保留文件预览所需的路径及行号，并按文本节点缓存渲染结果。
