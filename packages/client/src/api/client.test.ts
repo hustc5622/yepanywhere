@@ -200,7 +200,7 @@ describe("Codex structured input API", () => {
     fetchMock.mockReset();
   });
 
-  it("serializes selected skills for start, resume, queue, and deferred queue", async () => {
+  it("serializes selected skills and keeps reply, interrupt, and deferred delivery distinct", async () => {
     fetchMock.mockResolvedValue({
       ok: true,
       json: async () => ({
@@ -243,6 +243,18 @@ describe("Codex structured input API", () => {
       true,
       [skillInput],
     );
+    await api.queueMessage(
+      "session-1",
+      "reply",
+      undefined,
+      undefined,
+      "temp-reply",
+      undefined,
+      undefined,
+      false,
+      [skillInput],
+      false,
+    );
 
     const bodies = fetchMock.mock.calls.map(([, request]) =>
       JSON.parse(String(request?.body)),
@@ -264,6 +276,12 @@ describe("Codex structured input API", () => {
       expect.objectContaining({
         message: "defer",
         deferred: true,
+        codexInputs: [skillInput],
+      }),
+      expect.objectContaining({
+        message: "reply",
+        deferred: false,
+        interruptBeforeSend: false,
         codexInputs: [skillInput],
       }),
     ]);

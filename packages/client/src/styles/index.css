@@ -4905,6 +4905,16 @@ a.sidebar-nav-item {
   flex-shrink: 0;
 }
 
+.message-input-toolbar-send-options {
+  flex-wrap: wrap;
+}
+
+.message-input-toolbar-send-options .message-input-actions {
+  max-width: 100%;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
 .send-button,
 .stop-button,
 .queue-button {

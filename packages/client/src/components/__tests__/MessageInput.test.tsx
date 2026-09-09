@@ -168,21 +168,66 @@ describe("MessageInput", () => {
       localStorage.setItem("yep-anywhere-locale", locale);
       const onQueue = vi.fn();
       const onStop = vi.fn();
+      const onInterruptSend = vi.fn();
       const { textarea, onSend } = renderMessageInput({
         provider: "codex",
         isRunning: true,
         isThinking: true,
         onQueue,
         onStop,
+        onInterruptSend,
       });
       const name = locale === "en" ? "Interrupt & send" : "打断并发送";
       const button = await screen.findByRole("button", { name });
       typeInTextarea(textarea, "New instructions");
       fireEvent.click(button);
-      expect(onSend).toHaveBeenCalledWith("New instructions");
+      expect(onInterruptSend).toHaveBeenCalledWith("New instructions");
+      expect(onSend).not.toHaveBeenCalled();
+      expect(button.title).not.toContain("Enter");
       // One request owns interrupt-and-send; the UI must not race a separate stop.
       expect(onStop).not.toHaveBeenCalled();
       expect(onQueue).not.toHaveBeenCalled();
+    },
+  );
+
+  it.each(["en", "zh-CN"])(
+    "replies to a running Codex turn without interrupting in %s",
+    async (locale) => {
+      localStorage.setItem("yep-anywhere-locale", locale);
+      const onInterruptSend = vi.fn();
+      const onQueue = vi.fn();
+      const onStop = vi.fn();
+      const { textarea, onSend } = renderMessageInput({
+        provider: "codex",
+        isRunning: true,
+        isThinking: true,
+        onInterruptSend,
+        onQueue,
+        onStop,
+      });
+      const name = locale === "en" ? "Reply & continue" : "回复并继续";
+      const button = (await screen.findByRole("button", {
+        name,
+      })) as HTMLButtonElement;
+      expect(button.disabled).toBe(true);
+      typeInTextarea(textarea, "支持多选同行人");
+      fireEvent.click(button);
+      expect(onSend).toHaveBeenCalledWith("支持多选同行人");
+      expect(textarea.value).toBe("");
+
+      typeInTextarea(textarea, "补充：记录修改人");
+      fireEvent.keyDown(textarea, { key: "Enter" });
+      expect(onSend).toHaveBeenLastCalledWith("补充：记录修改人");
+      expect(onSend).toHaveBeenCalledTimes(2);
+      expect(onInterruptSend).not.toHaveBeenCalled();
+      expect(onStop).not.toHaveBeenCalled();
+      expect(onQueue).not.toHaveBeenCalled();
+
+      typeInTextarea(textarea, "下一项任务");
+      fireEvent.keyDown(textarea, { key: "Enter", ctrlKey: true });
+      expect(onQueue).toHaveBeenCalledWith("下一项任务");
+      expect(onSend).toHaveBeenCalledTimes(2);
+      expect(onInterruptSend).not.toHaveBeenCalled();
     },
   );
 

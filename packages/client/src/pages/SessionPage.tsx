@@ -1081,7 +1081,7 @@ function SessionPageContent({
     }
   };
 
-  const handleSend = async (text: string) => {
+  const handleSend = async (text: string, interruptBeforeSend = false) => {
     if (effectiveProvider === "codex") {
       const command = parseCodexSlashCommand(text);
       if (command.kind === "invalid-compact-args") {
@@ -1360,7 +1360,7 @@ function SessionPageContent({
           session?.reasoningEffort,
           false,
           codexInputs,
-          effectiveProvider === "codex",
+          effectiveProvider === "codex" && interruptBeforeSend,
         );
         // If process was restarted due to thinking mode change, reconnect stream
         if (result.restarted && result.processId) {
@@ -2739,6 +2739,14 @@ function SessionPageContent({
             ) && (
               <MessageInput
                 onSend={handleSend}
+                onInterruptSend={
+                  effectiveProvider === "codex" &&
+                  status.owner === "self" &&
+                  processState === "in-turn" &&
+                  !editRewind
+                    ? (text) => handleSend(text, true)
+                    : undefined
+                }
                 onQueue={
                   status.owner !== "none" && processState !== "idle"
                     ? handleQueue

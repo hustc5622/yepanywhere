@@ -177,7 +177,7 @@ describe("TextBlock", () => {
     expect(screen.getByText("Question for you")).toBeDefined();
     expect(
       screen.getByText(
-        "This message does not pause the task. You can reply in the message box.",
+        "The task keeps running. Type your answer in the message box and choose Reply & continue.",
       ),
     ).toBeDefined();
     expect(screen.getByText("Which address?")).toBeDefined();

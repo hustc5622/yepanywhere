@@ -91,6 +91,8 @@ function filterCommands(commands: string[], query: string): string[] {
 
 interface Props {
   onSend: (text: string) => void;
+  /** Explicitly interrupt the active turn before sending. */
+  onInterruptSend?: (text: string) => void;
   /** Queue a deferred message (sent when agent's turn ends). Only provided when agent is running. */
   onQueue?: (text: string) => void;
   disabled?: boolean;
@@ -144,6 +146,7 @@ interface Props {
 
 export function MessageInput({
   onSend,
+  onInterruptSend,
   onQueue,
   disabled,
   placeholder,
@@ -339,27 +342,35 @@ export function MessageInput({
     onDraftControlsReady?.(controls);
   }, [controls, onDraftControlsReady]);
 
-  const handleSubmit = useCallback(() => {
-    // Stop voice recording and get any pending interim text
-    const pendingVoice = voiceButtonRef.current?.stopAndFinalize() ?? "";
+  const submitMessage = useCallback(
+    (send: (message: string) => void) => {
+      // Stop voice recording and get any pending interim text
+      const pendingVoice = voiceButtonRef.current?.stopAndFinalize() ?? "";
 
-    // Combine committed text with any pending voice text
-    let finalText = text.trimEnd();
-    if (pendingVoice) {
-      finalText = finalText ? `${finalText} ${pendingVoice}` : pendingVoice;
-    }
+      // Combine committed text with any pending voice text
+      let finalText = text.trimEnd();
+      if (pendingVoice) {
+        finalText = finalText ? `${finalText} ${pendingVoice}` : pendingVoice;
+      }
 
-    const hasContent = finalText.trim() || attachments.length > 0;
-    if (hasContent && !disabled) {
-      const message = finalText.trim();
-      // Clear input state but keep localStorage for failure recovery
-      controls.clearInput();
-      setInterimTranscript("");
-      onSend(message);
-      // Refocus the textarea so user can continue typing
-      textareaRef.current?.focus();
-    }
-  }, [text, disabled, controls, onSend, attachments.length]);
+      const hasContent = finalText.trim() || attachments.length > 0;
+      if (hasContent && !disabled) {
+        const message = finalText.trim();
+        // Clear input state but keep localStorage for failure recovery
+        controls.clearInput();
+        setInterimTranscript("");
+        send(message);
+        // Refocus the textarea so user can continue typing
+        textareaRef.current?.focus();
+      }
+    },
+    [text, disabled, controls, attachments.length],
+  );
+
+  const handleSubmit = useCallback(
+    () => submitMessage(onSend),
+    [submitMessage, onSend],
+  );
 
   const handleQueue = useCallback(() => {
     // Stop voice recording and get any pending interim text
@@ -739,6 +750,9 @@ export function MessageInput({
             isThinking={isThinking}
             onStop={onStop}
             onSend={handleSubmit}
+            onInterruptSend={
+              onInterruptSend ? () => submitMessage(onInterruptSend) : undefined
+            }
             onQueue={onQueue ? handleQueue : undefined}
             canSend={!!(text.trim() || attachments.length > 0)}
             disabled={disabled}

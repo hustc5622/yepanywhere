@@ -55,6 +55,7 @@ export interface MessageInputToolbarProps {
   isThinking?: boolean;
   onStop?: () => void;
   onSend?: () => void;
+  onInterruptSend?: () => void;
   /** Queue a deferred message. Only provided when agent is running. */
   onQueue?: () => void;
   canSend?: boolean;
@@ -97,6 +98,7 @@ export function MessageInputToolbar({
   isThinking,
   onStop,
   onSend,
+  onInterruptSend,
   onQueue,
   canSend,
   disabled,
@@ -106,12 +108,12 @@ export function MessageInputToolbar({
   const { thinkingMode, cycleThinkingMode, thinkingLevel } = useModelSettings();
   const [isContextModalOpen, setIsContextModalOpen] = useState(false);
   const showStop = isRunning && onStop && isThinking;
-  const interruptOnSend = provider === "codex" && isRunning;
+  const replyOnSend = provider === "codex";
   const activeSendLabel = t(
-    interruptOnSend ? "toolbarInterruptLabel" : "toolbarInsertLabel",
+    replyOnSend ? "toolbarReplyContinueLabel" : "toolbarInsertLabel",
   );
   const activeSendTitle = t(
-    interruptOnSend ? "toolbarInterruptTitle" : "toolbarInsertTitle",
+    replyOnSend ? "toolbarReplyContinueTitle" : "toolbarInsertTitle",
   );
   const visibleCommandButtons =
     commandButtons?.filter((button) => button.showButton) ??
@@ -301,6 +303,18 @@ export function MessageInputToolbar({
               <line x1="3" y1="18" x2="3.01" y2="18" />
             </svg>
             <span>{t("toolbarQueueLabel")}</span>
+          </button>
+        )}
+        {onInterruptSend && (
+          <button
+            type="button"
+            onClick={onInterruptSend}
+            disabled={disabled || !canSend}
+            className="queue-button message-submit-choice"
+            title={t("toolbarInterruptTitle")}
+            aria-label={t("toolbarInterruptLabel")}
+          >
+            <span>{t("toolbarInterruptLabel")}</span>
           </button>
         )}
         {onSend && (onQueue || !showStop || canSend) && (

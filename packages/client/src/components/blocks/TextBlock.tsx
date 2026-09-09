@@ -304,7 +304,7 @@ export const TextBlock = memo(function TextBlock({
           </div>
           <div className="text-block-async-hint">
             {i18n?.t("messageAsyncHint") ??
-              "This message does not pause the task. You can reply in the message box."}
+              "The task keeps running. Type your answer in the message box and choose Reply & continue."}
           </div>
         </div>
       )}
