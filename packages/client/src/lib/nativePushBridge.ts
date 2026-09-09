@@ -8,6 +8,7 @@ const REQUEST_TIMEOUT_MS: Record<NativePushMethod, number> = {
   // Uploading a full native ring buffer can take several batches on a slow
   // link (up to ~1000 entries in 500-entry POSTs).
   uploadLogs: 60000,
+  nodeNotifications: 20000,
 };
 
 export type NativePushPermissionState =
@@ -33,7 +34,22 @@ type NativePushMethod =
   | "status"
   | "requestPermission"
   | "getToken"
+  | "nodeNotifications"
   | "uploadLogs";
+
+export interface MobileNodeNotification {
+  alias: "home" | "mini";
+  status: "online" | "login-required" | "offline";
+  finishedUnreadCount?: number;
+  /** Older servers only return a capped inbox list. */
+  limited?: boolean;
+}
+
+export function getMobileNodeNotifications(): Promise<{
+  nodes: MobileNodeNotification[];
+}> {
+  return invokeNativePush("nodeNotifications");
+}
 
 interface NativePushResponse<T> {
   id: string;

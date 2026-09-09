@@ -38,6 +38,7 @@ class MainActivity : TauriActivity() {
   private var mainWebView: WebView? = null
   private var nativePushBridge: NativePushBridge? = null
   private var sessionWatcher: YepSessionWatcher? = null
+  private val nodeNotifications = YepNodeNotifications()
   private var pendingNotificationPath: String? = null
   private var pendingDownload: PendingDownload? = null
   private val pendingPermissionCallbackIds = mutableListOf<String>()
@@ -131,6 +132,7 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onDestroy() {
+    nodeNotifications.close()
     sessionWatcher?.stop()
     sessionWatcher = null
     // Break the JavaScript-interface reference chain explicitly. WebView owns
@@ -512,6 +514,13 @@ class MainActivity : TauriActivity() {
     fun getToken(callbackId: String) {
       Log.i(TAG, "bridge.getToken: callbackId=$callbackId")
       activity.getFcmToken(callbackId)
+    }
+
+    @JavascriptInterface
+    fun getNodeNotifications(callbackId: String) {
+      activity.nodeNotifications.read { result ->
+        respond(callbackId, true, result, null)
+      }
     }
 
     @JavascriptInterface

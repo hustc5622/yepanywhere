@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { JSDOM } from "jsdom";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const indexHtml = readFileSync(
   resolve(process.cwd(), "../mobile/static-shim/index.html"),
@@ -110,6 +110,43 @@ afterEach(() => {
 });
 
 describe("APK mobile shell recovery", () => {
+  it("forwards both node counts through the native bridge after switching servers", () => {
+    const { dom, frame } = mountShell();
+    const getNodeNotifications = vi.fn();
+    Object.defineProperty(dom.window, "YepNativePush", {
+      value: { getNodeNotifications },
+    });
+    clickSavedNode(dom, "http://39.106.189.88:18022");
+    const postMessage = vi.spyOn(frame.contentWindow as Window, "postMessage");
+    postClientMessage(dom, frame, {
+      type: "yep-anywhere:native-push-request",
+      method: "nodeNotifications",
+      id: "node-counts",
+    });
+    expect(getNodeNotifications).toHaveBeenCalledWith("node-counts");
+    const result = {
+      nodes: [
+        { alias: "home", status: "online", finishedUnreadCount: 3 },
+        { alias: "mini", status: "online", finishedUnreadCount: 0 },
+      ],
+    };
+    const resolveNative = Reflect.get(dom.window, "__yepNativePushResolve") as (
+      id: string,
+      responseJson: string,
+    ) => void;
+    resolveNative("node-counts", JSON.stringify({ ok: true, result }));
+    expect(postMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        type: "yep-anywhere:native-push-response",
+        id: "node-counts",
+        ok: true,
+        result,
+      }),
+      "*",
+    );
+    expect(frame.src).toContain("39.106.189.88:18022");
+  });
+
   it("migrates the retired persisted endpoint to the current default", () => {
     const { dom, frame } = mountShell({
       storedChannel: "tcp",

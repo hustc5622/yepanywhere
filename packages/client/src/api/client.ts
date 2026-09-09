@@ -141,6 +141,8 @@ export interface InboxItem {
  * Inbox response with sessions categorized into priority tiers.
  */
 export interface InboxResponse {
+  /** Available on servers with APK node notification counts. */
+  finishedUnreadCount?: number;
   badgeCount: number;
   badgeSessionIds: string[];
   needsAttention: InboxItem[];

@@ -1040,7 +1040,9 @@
             ? "getToken"
             : method === "uploadLogs"
               ? "uploadLogs"
-              : null;
+              : method === "nodeNotifications"
+                ? "getNodeNotifications"
+                : null;
 
     if (!bridgeMethod || typeof bridge[bridgeMethod] !== "function") {
       logNativePush(

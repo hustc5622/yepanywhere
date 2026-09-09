@@ -2250,6 +2250,49 @@ h2 {
   color: var(--text-color);
 }
 
+.sidebar-server-switcher {
+  display: flex;
+  gap: 0.5rem;
+  padding: 0 1rem 0.5rem;
+}
+
+.sidebar-server-button {
+  flex: 1;
+  min-width: 0;
+  padding: 0.5rem 0.625rem;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: transparent;
+  color: var(--text-color);
+  text-align: left;
+  cursor: pointer;
+}
+
+.sidebar-server-button.is-active {
+  border-color: var(--app-yep-green);
+  background: color-mix(in srgb, var(--app-yep-green) 10%, transparent);
+}
+
+.sidebar-server-button:focus-visible {
+  outline: 2px solid var(--app-yep-green);
+  outline-offset: 2px;
+}
+
+.sidebar-server-name {
+  display: flex;
+  align-items: center;
+  gap: 0.25rem;
+  font-weight: 600;
+}
+
+.sidebar-server-status {
+  display: block;
+  margin-top: 0.25rem;
+  font-size: var(--font-size-xs);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+
 /* YepAnywhere Logo */
 .yep-anywhere-logo {
   display: inline-flex;

@@ -13,6 +13,7 @@ import { useI18n } from "../i18n";
 import { activityBus } from "../lib/activityBus";
 import { formatSmartTime } from "../lib/datetime";
 import { compareSessionsByPinAndUpdatedAt } from "../lib/sessionOrdering";
+import { MobileServerSwitcher } from "./MobileServerSwitcher";
 import { ProjectGitStatusButton } from "./ProjectGitStatusButton";
 import { RemoteProjectIcon } from "./RemoteProjectIcon";
 import { SessionListItem } from "./SessionListItem";
@@ -855,6 +856,8 @@ export function Sidebar({
             </>
           )}
         </div>
+
+        <MobileServerSwitcher visible={shouldLoadSessionLists} />
 
         <div className="sidebar-actions">
           {/* New Session: link to most recent project's new session page */}

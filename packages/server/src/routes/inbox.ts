@@ -130,6 +130,8 @@ export interface InboxItem {
 }
 
 export interface InboxResponse {
+  /** Unread, non-busy sessions updated within 24h, before tier limits. */
+  finishedUnreadCount: number;
   badgeCount: number;
   badgeSessionIds: string[];
   needsAttention: InboxItem[];
@@ -493,6 +495,14 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
 
     // Apply limits per tier
     const response: InboxResponse = {
+      finishedUnreadCount: allSessions.filter(
+        (item) =>
+          item.hasUnread &&
+          !item.pendingInputType &&
+          item.activity !== "in-turn" &&
+          now - new Date(item.session.updatedAt).getTime() <=
+            TWENTY_FOUR_HOURS_MS,
+      ).length,
       badgeCount: badgeSessionIds.size,
       badgeSessionIds: Array.from(badgeSessionIds),
       needsAttention: needsAttention.slice(0, MAX_ITEMS_PER_TIER),

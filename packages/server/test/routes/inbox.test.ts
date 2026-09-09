@@ -628,6 +628,43 @@ describe("Inbox Routes", () => {
   });
 
   describe("tier limits", () => {
+    it("counts finished unread before truncation and excludes busy, seen and old sessions", async () => {
+      const project = createProject("proj1", "myproject", "/sessions/proj1");
+      const sessions = Array.from({ length: 25 }, (_, i) =>
+        createSession(`done-${i}`, "proj1", minutesAgo(5)),
+      );
+      sessions.push(
+        createSession("running", "proj1", minutesAgo(5)),
+        createSession("approval", "proj1", minutesAgo(5)),
+        createSession("seen", "proj1", minutesAgo(5)),
+        createSession("old", "proj1", hoursAgo(25)),
+      );
+      for (const session of sessions) unreadMap.set(session.id, true);
+      unreadMap.set("seen", false);
+      processMap.set("running", {
+        getPendingInputRequest: () => null,
+        state: { type: "in-turn" },
+      });
+      processMap.set("approval", {
+        getPendingInputRequest: () => ({ type: "tool-approval", id: "req" }),
+        state: { type: "waiting-input" },
+      });
+      vi.mocked(mockScanner.listProjects).mockResolvedValue([project]);
+      sessionsByDir.set("/sessions/proj1", sessions);
+      const deps = {
+        scanner: mockScanner,
+        readerFactory: mockReaderFactory,
+        supervisor: mockSupervisor,
+        notificationService: mockNotificationService,
+        sessionIndexService: mockSessionIndexService,
+      };
+      const result = await makeRequest(deps);
+      expect(result.recentActivity).toHaveLength(20);
+      expect(result.finishedUnreadCount).toBe(25);
+      unreadMap.set("done-0", false);
+      expect((await makeRequest(deps)).finishedUnreadCount).toBe(24);
+    });
+
     it("limits each tier to 20 items", async () => {
       const project = createProject("proj1", "myproject", "/sessions/proj1");
       // Create 25 sessions, all recently updated
