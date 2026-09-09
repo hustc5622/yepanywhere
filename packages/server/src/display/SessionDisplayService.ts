@@ -32,6 +32,8 @@ export interface DisplaySourcePage {
   provider: string;
   messages: Message[];
   turnStatuses?: Readonly<Record<string, SessionDisplayTurnStatus>>;
+  /** Native Codex turns covering [from, before); newer live turns may lag history. */
+  codexTurnWindow?: { turnIds: string[]; from: number; before: number };
   activity: SessionDisplayActivity["state"];
   cursor?: string;
   stamp: string;
@@ -109,6 +111,7 @@ export function compactDisplayMessage(message: RecordValue): RecordValue {
     "role",
     "timestamp",
     "codexTurnId",
+    "codexThreadId",
     "turnId",
     "codexCorrelationKey",
     "clientUserMessageId",
@@ -359,6 +362,8 @@ export class SessionDisplayService {
       if (
         message.isSubagent === true ||
         message.isSidechain === true ||
+        (typeof message.codexThreadId === "string" &&
+          message.codexThreadId !== entry.selection.sessionId) ||
         message.parent_tool_use_id ||
         message.parentToolUseId
       )
@@ -656,6 +661,28 @@ export class SessionDisplayService {
         texts.set(identity(message), text(content));
     }
     for (const [key, message] of entry.overlay) {
+      const turnId = message.codexTurnId ?? message.turnId;
+      const window = page.codexTurnWindow;
+      const timestamp =
+        typeof message.timestamp === "string"
+          ? Date.parse(message.timestamp)
+          : Number.NaN;
+      // Older providers lost the child thread id. Only remove such leftovers
+      // when native history proves their turn is absent within the loaded
+      // interval. Unknown newer turns and turns outside this page remain live.
+      if (
+        (typeof message.codexThreadId === "string" &&
+          message.codexThreadId !== entry.selection.sessionId) ||
+        (message.codexThreadId === undefined &&
+          window &&
+          typeof turnId === "string" &&
+          !window.turnIds.includes(turnId) &&
+          timestamp >= window.from &&
+          timestamp < window.before)
+      ) {
+        entry.overlay.delete(key);
+        continue;
+      }
       if (
         message.type === "error" &&
         typeof message.displayQuestionId === "string"

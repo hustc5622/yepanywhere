@@ -13,6 +13,7 @@ import { SessionDisplayService } from "../../src/display/SessionDisplayService.j
 import { encodeProjectId } from "../../src/projects/paths.js";
 import {
   type SessionDisplayRuntimeState,
+  createSessionDisplaySource,
   registerSessionDisplayRoutes,
 } from "../../src/routes/session-display.js";
 import { CodexSessionReader } from "../../src/sessions/codex-reader.js";
@@ -179,6 +180,69 @@ function createRoutes(
 }
 
 describe("session display routes", () => {
+  it("bounds legacy overlay cleanup by native turns and keeps the inferred live turn", async () => {
+    const { getSession } = createRoutes(2);
+    const loaded = await getSession();
+    const reader = {
+      getSession,
+      getSessionSummary: vi.fn(async () => loaded.summary),
+      getSessionFileStats: vi.fn(async () => ({ mtime: 1, size: 1 })),
+    };
+    const source = createSessionDisplaySource({
+      scanner: {
+        getOrCreateProject: vi.fn(async () => ({
+          ...project(),
+          provider: "codex" as const,
+        })),
+      },
+      providerResolution: {
+        readerFactory: () => reader as never,
+        codexReaderFactory: () => reader as never,
+        codexSessionsDir: "/tmp/codex-sessions",
+      },
+      codexAppServerHistoryReader: {
+        getSemanticTurn: vi.fn(),
+        getSemanticTurnsPage: vi.fn(async () => ({
+          kind: "loaded" as const,
+          provider: "codex" as const,
+          summary: loaded.summary,
+          revision: "revision",
+          messages: [
+            {
+              uuid: "first",
+              type: "user",
+              codexTurnId: "first",
+              timestamp: "2026-09-08T14:00:00Z",
+            },
+            {
+              uuid: "latest",
+              type: "user",
+              codexTurnId: "latest",
+              timestamp: "2026-09-08T14:50:00Z",
+            },
+          ] as Message[],
+          turnStatuses: {
+            first: "completed" as const,
+            latest: "interrupted" as const,
+          },
+          inferredLatestTurnId: "latest",
+          nextCursor: "older-native-turns",
+        })),
+      },
+    });
+    const selection = { projectId: PROJECT_ID, sessionId: SESSION_ID };
+    const page = await source.read(selection);
+    expect(page.turnStatuses).toEqual({ first: "completed" });
+    expect(page.codexTurnWindow).toEqual({
+      turnIds: ["first", "latest"],
+      from: Date.parse("2026-09-08T14:00:00Z"),
+      before: Date.parse("2026-09-08T14:50:00Z"),
+    });
+    expect(
+      (await source.read(selection, page.cursor)).codexTurnWindow,
+    ).toBeUndefined();
+  });
+
   it("serves conditional output in the requested branch without fetching tool details", async () => {
     const service = new SessionDisplayService({
       runtime: {

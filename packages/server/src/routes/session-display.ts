@@ -460,6 +460,11 @@ export function createSessionDisplaySource(
           );
         if (native.kind === "loaded") {
           const turnStatuses = { ...native.turnStatuses };
+          const turnStarts = native.messages.flatMap((message) => {
+            if (message.type !== "user" || !message.timestamp) return [];
+            const timestamp = Date.parse(message.timestamp);
+            return Number.isFinite(timestamp) ? [timestamp] : [];
+          });
           if (native.inferredLatestTurnId)
             delete turnStatuses[native.inferredLatestTurnId];
           const branch = await deps.getBranchState?.(
@@ -476,6 +481,15 @@ export function createSessionDisplaySource(
                 })
               : native.messages,
             turnStatuses,
+            ...(!cursor && native.turnStatuses && turnStarts.length > 0
+              ? {
+                  codexTurnWindow: {
+                    turnIds: Object.keys(native.turnStatuses),
+                    from: Math.min(...turnStarts),
+                    before: Math.max(...turnStarts),
+                  },
+                }
+              : {}),
             activity: activity(
               resolved,
               native.inferredLatestTurnId

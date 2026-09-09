@@ -6,7 +6,10 @@ import {
 } from "@yep-anywhere/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { displayToolId } from "../../src/display/SessionDisplayReducer.js";
-import { SessionDisplayService } from "../../src/display/SessionDisplayService.js";
+import {
+  type DisplaySourcePage,
+  SessionDisplayService,
+} from "../../src/display/SessionDisplayService.js";
 import type { Message } from "../../src/supervisor/types.js";
 const selection = { projectId: "project", sessionId: "session" };
 const services: SessionDisplayService[] = [];
@@ -18,19 +21,21 @@ function fixture(pollMs = 60_000) {
   let push: (type: string, data: unknown) => void = () => {};
   const source = {
     stamp: vi.fn(async () => "1"),
-    read: vi.fn(async () => ({
-      provider: "codex",
-      messages: [
-        {
-          uuid: "u",
-          type: "user",
-          codexTurnId: "turn",
-          message: { role: "user", content: "Run" },
-        },
-      ] as Message[],
-      activity: "running" as const,
-      stamp: "1",
-    })),
+    read: vi.fn(
+      async (): Promise<DisplaySourcePage> => ({
+        provider: "codex",
+        messages: [
+          {
+            uuid: "u",
+            type: "user",
+            codexTurnId: "turn",
+            message: { role: "user", content: "Run" },
+          },
+        ] as Message[],
+        activity: "running" as const,
+        stamp: "1",
+      }),
+    ),
     detail: vi.fn(async () => [] as Message[]),
   };
   const runtime = {
@@ -414,6 +419,74 @@ describe("SessionDisplayService", () => {
       ),
     ).toEqual(["AB"]);
   });
+
+  it("rejects child thread output without relying on a subagent flag", async () => {
+    const { service, source, push } = fixture(10);
+    vi.useFakeTimers();
+    await service.subscribe(selection, vi.fn());
+    const before = await service.snapshot(selection);
+    for (const isReplay of [false, true]) {
+      push("message", {
+        uuid: "child-review",
+        type: "assistant",
+        codexThreadId: "child-thread",
+        codexTurnId: "child-turn",
+        isReplay,
+        message: { role: "assistant", content: "Disposition: fix" },
+      });
+    }
+    source.stamp.mockResolvedValue("2");
+    await vi.advanceTimersByTimeAsync(11);
+    expect((await service.snapshot(selection)).nodes).toEqual(before.nodes);
+  });
+
+  it.each([false, true])(
+    "reconciles old unscoped reviews only against native history (native: %s)",
+    async (native) => {
+      vi.useFakeTimers();
+      const { service, source, push } = fixture(10);
+      const initial = await source.read();
+      await service.subscribe(selection, vi.fn());
+      const from = Date.parse("2026-09-08T14:00:00Z");
+      const before = Date.parse("2026-09-08T14:50:00Z");
+      const messages = [
+        { id: "fix", turn: "child-review", time: "2026-09-08T14:05:44Z" },
+        { id: "ship", turn: "child-recheck", time: "2026-09-08T14:07:40Z" },
+        { id: "parent", turn: "turn", time: "2026-09-08T14:06:00Z" },
+        { id: "new", turn: "not-persisted", time: "2026-09-08T14:51:00Z" },
+        { id: "outside-page", turn: "older", time: "2026-09-08T13:59:00Z" },
+      ];
+      for (const m of messages)
+        push("message", {
+          uuid: m.id,
+          type: "assistant",
+          codexTurnId: m.turn,
+          timestamp: m.time,
+          message: { role: "assistant", content: m.id },
+        });
+      source.read.mockResolvedValue({
+        ...initial,
+        ...(native
+          ? { codexTurnWindow: { turnIds: ["turn", "latest"], from, before } }
+          : {}),
+      });
+      for (const stamp of ["2", "3"]) {
+        source.stamp.mockResolvedValue(stamp);
+        await vi.advanceTimersByTimeAsync(11);
+        const snapshot = await service.snapshot(selection);
+        const texts = snapshot.nodes.flatMap((node) =>
+          node.type === "segment" && node.segment.type === "assistant_text"
+            ? [node.segment.content]
+            : [],
+        );
+        expect(texts).toEqual(
+          native
+            ? ["parent", "new", "outside-page"]
+            : messages.map((m) => m.id),
+        );
+      }
+    },
+  );
 
   it("projects fatal runtime errors and retains hold across tool updates", async () => {
     const { service, push } = fixture();

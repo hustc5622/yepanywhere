@@ -206,6 +206,7 @@ if (argv[0] === "app-server" && process.env.CODEX_FAKE_APP_SERVER_ERROR) {
   process.exit(1);
 }
 let buffer = "";
+let activeThreadId = "thread-new";
 const attemptsByMethod = new Map();
 
 function send(id, result) {
@@ -372,7 +373,7 @@ function handle(message) {
     notify(
       "turn/completed",
       {
-        threadId: "thread-new",
+        threadId: activeThreadId,
         turn: {
           id: "turn-rewrite",
           status: "completed",
@@ -439,6 +440,7 @@ function handle(message) {
     return;
   }
   if (message.method === "turn/start") {
+    activeThreadId = message.params.threadId;
     const eventMode = process.env.CODEX_FAKE_EVENT_MODE === "1";
     const activeTurn = process.env.CODEX_FAKE_ACTIVE_TURN === "1";
     const failedTurn = process.env.CODEX_FAKE_FAILED_TURN === "1";
@@ -463,7 +465,7 @@ function handle(message) {
       notify(
         "turn/started",
         {
-          threadId: "thread-new",
+          threadId: activeThreadId,
           turn: { id: "turn-rewrite", status: "inProgress", items: [] },
         },
         1000,
@@ -471,7 +473,7 @@ function handle(message) {
       notify(
         "item/completed",
         {
-          threadId: "thread-new",
+          threadId: activeThreadId,
           turnId: "turn-rewrite",
           item: {
             id: "agent-event-spine",
@@ -486,7 +488,7 @@ function handle(message) {
         notify(
           "item/completed",
           {
-            threadId: "thread-new",
+            threadId: activeThreadId,
             turnId: "turn-rewrite",
             item: {
               id: "file-generated",
@@ -507,7 +509,7 @@ function handle(message) {
       notify(
         "future/provider-event",
         {
-          threadId: "thread-new",
+          threadId: activeThreadId,
           turnId: "turn-rewrite",
           authorization: "Bearer must-not-be-persisted",
         },
@@ -517,7 +519,7 @@ function handle(message) {
         "approval-event-spine",
         "item/commandExecution/requestApproval",
         {
-          threadId: "thread-new",
+          threadId: activeThreadId,
           turnId: "turn-rewrite",
           itemId: "command-event-spine",
           command: "pwd",
@@ -1281,6 +1283,40 @@ process.stdin.on("data", (chunk) => {
             });
           } else if (message.method === "turn/steer") {
             send({ turnId: "turn-live" });
+            for (const threadId of ["child-thread", "thread-bridge"]) {
+              socket.send(
+                JSON.stringify({
+                  method: "item/completed",
+                  params: {
+                    threadId,
+                    turnId: "turn-live",
+                    item: {
+                      type: "agentMessage",
+                      id: `${threadId}-reply`,
+                      text:
+                        threadId === "child-thread"
+                          ? "Disposition: fix"
+                          : "Parent reply",
+                      phase: "final_answer",
+                    },
+                  },
+                }),
+              );
+              socket.send(
+                JSON.stringify({
+                  method: "turn/completed",
+                  params: {
+                    threadId,
+                    turn: {
+                      id: "turn-live",
+                      status: "completed",
+                      items: [],
+                      error: null,
+                    },
+                  },
+                }),
+              );
+            }
             socket.send(
               JSON.stringify({
                 method: "turn/completed",
@@ -1315,8 +1351,10 @@ process.stdin.on("data", (chunk) => {
         resumeSessionId: "thread-bridge",
         initialMessage: { text: "continue", uuid: "bridge-message" },
       });
+      const runtimeMessages: SDKMessage[] = [];
       try {
         for await (const message of session.iterator) {
+          runtimeMessages.push(message);
           if (
             message.type === "result" &&
             message.clientUserMessageId === "bridge-message"
@@ -1359,6 +1397,17 @@ process.stdin.on("data", (chunk) => {
         const events = await eventStore.replay({
           sessionId: "thread-bridge",
         });
+        expect(events.some((event) => event.threadId === "child-thread")).toBe(
+          true,
+        );
+        expect(
+          runtimeMessages.filter((message) => message.type === "assistant"),
+        ).toMatchObject([
+          {
+            codexThreadId: "thread-bridge",
+            message: { content: "Parent reply" },
+          },
+        ]);
         expect(events.length).toBeGreaterThan(0);
         expect(
           events.every(
@@ -4365,6 +4414,80 @@ describe("CodexProvider Event Normalization", () => {
     expect(typeof provider.startSession).toBe("function");
   });
 
+  it.each([
+    [
+      "item/started",
+      {
+        item: { id: "review", type: "agentMessage", text: "Disposition: fix" },
+      },
+    ],
+    [
+      "item/completed",
+      {
+        item: { id: "review", type: "agentMessage", text: "Disposition: fix" },
+      },
+    ],
+    [
+      "item/agentMessage/delta",
+      { itemId: "review", delta: "Disposition: fix" },
+    ],
+    [
+      "item/commandExecution/outputDelta",
+      { itemId: "command", delta: "child output" },
+    ],
+    [
+      "rawResponseItem/completed",
+      {
+        item: {
+          type: "custom_tool_call",
+          id: "tool",
+          call_id: "call",
+          name: "apply_patch",
+          input: "child edit",
+        },
+      },
+    ],
+    [
+      "turn/completed",
+      {
+        turn: { id: "child-turn", status: "completed", items: [], error: null },
+      },
+    ],
+    [
+      "error",
+      {
+        turnId: "child-turn",
+        error: { message: "child failed" },
+        willRetry: false,
+      },
+    ],
+  ])(
+    "isolates foreign-thread %s notifications from the parent",
+    (method, fields) => {
+      const provider = createTestProvider() as unknown as {
+        convertNotificationToSDKMessages: (
+          notification: { method: string; params: unknown },
+          sessionId: string,
+          usage: Map<string, unknown>,
+        ) => unknown[];
+      };
+      expect(
+        provider.convertNotificationToSDKMessages(
+          {
+            method,
+            params: {
+              threadId: "child-thread",
+              turnId: "child-turn",
+              ...fields,
+            },
+          },
+          "parent-thread",
+          new Map(),
+        ),
+      ).toEqual([]);
+    },
+  );
+
   it("preserves async questions through agent-message lifecycle notifications", () => {
     const provider = createTestProvider() as unknown as {
       convertNotificationToSDKMessages: (
@@ -4850,7 +4973,7 @@ describe("CodexProvider Event Normalization", () => {
         exit_code: 0,
         status: "completed",
       },
-      "session-1",
+      "thread-1",
       "turn-1",
       "item/completed",
     );
@@ -4896,7 +5019,7 @@ describe("CodexProvider Event Normalization", () => {
         exit_code: 0,
         status: "completed",
       },
-      "session-1",
+      "thread-1",
       "turn-2",
       "item/completed",
     );
@@ -4954,7 +5077,7 @@ describe("CodexProvider Event Normalization", () => {
         exit_code: 1,
         status: "completed",
       },
-      "session-1",
+      "thread-1",
       "turn-2",
       "item/completed",
     );
@@ -5009,7 +5132,7 @@ describe("CodexProvider Event Normalization", () => {
           },
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
     );
 
@@ -5078,7 +5201,7 @@ describe("CodexProvider Event Normalization", () => {
         threadId: "thread-1",
         turnId: "turn-1",
       },
-      "session-1",
+      "thread-1",
     );
     const changed = provider.attachCanonicalCodexItem(
       [{ type: "assistant", uuid: "file-normalized" }],
@@ -5107,7 +5230,7 @@ describe("CodexProvider Event Normalization", () => {
         threadId: "thread-1",
         turnId: "turn-1",
       },
-      "session-1",
+      "thread-1",
     );
 
     const serialized = JSON.stringify([generated, changed]);
@@ -5145,13 +5268,13 @@ describe("CodexProvider Event Normalization", () => {
             type: "image_generation_call",
             status: "generating",
             saved_path:
-              "/Users/test/.codex/generated_images/session-1/ig_456.png",
+              "/Users/test/.codex/generated_images/thread-1/ig_456.png",
             revised_prompt: "A saved generated image",
             result: "iVBORw0KGgoAAAANSUhEUgAA",
           },
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
     );
 
@@ -5207,7 +5330,7 @@ describe("CodexProvider Event Normalization", () => {
           },
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
     );
 
@@ -5253,7 +5376,7 @@ describe("CodexProvider Event Normalization", () => {
           },
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
     );
 
@@ -5286,7 +5409,7 @@ describe("CodexProvider Event Normalization", () => {
           },
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
     );
 
@@ -5316,14 +5439,14 @@ describe("CodexProvider Event Normalization", () => {
           },
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
     );
 
     expect(messages).toHaveLength(1);
     expect(messages[0]).toMatchObject({
       type: "error",
-      session_id: "session-1",
+      session_id: "thread-1",
       error:
         "You've hit your usage limit. Visit https://chatgpt.com/codex/settings/usage to purchase more credits or try again later.",
       codexError: expect.objectContaining({
@@ -5357,7 +5480,7 @@ describe("CodexProvider Event Normalization", () => {
           },
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
     );
 
@@ -5402,7 +5525,7 @@ describe("CodexProvider Event Normalization", () => {
           },
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
       new Map(),
       new Map(),
@@ -5420,7 +5543,7 @@ describe("CodexProvider Event Normalization", () => {
           error: { message: "unknown Codex error" },
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
       new Map(),
       new Map(),
@@ -5469,7 +5592,7 @@ describe("CodexProvider Event Normalization", () => {
           },
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
       contexts,
     );
@@ -5506,7 +5629,7 @@ describe("CodexProvider Event Normalization", () => {
           },
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
       contexts,
     );
@@ -5633,7 +5756,7 @@ describe("CodexProvider Event Normalization", () => {
           },
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
       new Map(),
     );
@@ -5680,7 +5803,7 @@ describe("CodexProvider Event Normalization", () => {
           delta: "line one\n",
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
       new Map(),
       buffers,
@@ -5713,7 +5836,7 @@ describe("CodexProvider Event Normalization", () => {
           delta: "line two\n",
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
       new Map(),
       buffers,
@@ -5738,7 +5861,7 @@ describe("CodexProvider Event Normalization", () => {
           },
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
       new Map(),
       buffers,
@@ -5754,7 +5877,7 @@ describe("CodexProvider Event Normalization", () => {
           turn: { id: "turn-1", status: "completed", items: [] },
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
       new Map(),
       buffers,
@@ -5776,7 +5899,7 @@ describe("CodexProvider Event Normalization", () => {
         method: "warning",
         params: { threadId: "thread-1", message: "Sandbox degraded" },
       },
-      "session-1",
+      "thread-1",
       new Map(),
     );
     expect(warning).toHaveLength(1);
@@ -5792,7 +5915,7 @@ describe("CodexProvider Event Normalization", () => {
         method: "guardianWarning",
         params: { threadId: "thread-1", message: "Approval is required" },
       },
-      "session-1",
+      "thread-1",
       new Map(),
     );
     expect(guardianWarning[0]).toMatchObject({
@@ -5807,7 +5930,7 @@ describe("CodexProvider Event Normalization", () => {
         method: "deprecationNotice",
         params: { summary: "Old flag", details: "Use --new-flag instead" },
       },
-      "session-1",
+      "thread-1",
       new Map(),
     );
     expect(deprecation).toEqual([]);
@@ -5820,14 +5943,14 @@ describe("CodexProvider Event Normalization", () => {
           details: null,
         },
       },
-      "session-1",
+      "thread-1",
       new Map(),
     );
     expect(rollbackDeprecation).toEqual([]);
 
     const empty = provider.convertNotificationToSDKMessages(
       { method: "configWarning", params: {} },
-      "session-1",
+      "thread-1",
       new Map(),
     );
     expect(empty).toEqual([]);
@@ -5848,7 +5971,7 @@ describe("CodexProvider Event Normalization", () => {
           method: "future/provider-event",
           params: { authorization: "must-not-be-projected" },
         },
-        "session-1",
+        "thread-1",
         new Map(),
       ),
     ).toEqual([]);

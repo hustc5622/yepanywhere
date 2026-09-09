@@ -3635,6 +3635,15 @@ export class CodexProvider implements AgentProvider {
           const canonicalNotification =
             activeEventIngress.notificationFromEvent(canonicalEvent);
 
+          // The bridge also broadcasts child-thread activity. Keep it in the
+          // event journal, but never project it into this thread's runtime.
+          if (
+            canonicalEvent.threadId &&
+            canonicalEvent.threadId !== sessionId
+          ) {
+            continue;
+          }
+
           if (canonicalNotification.method === "thread/tokenUsage/updated") {
             const usage = this.extractTurnUsage(canonicalNotification.params);
             if (usage) {
@@ -3783,7 +3792,12 @@ export class CodexProvider implements AgentProvider {
             }
           }
           for (const msg of messages) {
-            yield logMessage(msg);
+            yield logMessage({
+              ...msg,
+              ...(canonicalEvent.threadId
+                ? { codexThreadId: canonicalEvent.threadId }
+                : {}),
+            });
           }
 
           if (
@@ -4542,6 +4556,8 @@ export class CodexProvider implements AgentProvider {
     retryableErrorsByTurnId: Map<string, CanonicalCodexError> = new Map(),
     workspaceRoot?: string,
   ): SDKMessage[] {
+    const threadId = asRecord(notification.params)?.threadId;
+    if (typeof threadId === "string" && threadId !== sessionId) return [];
     switch (notification.method) {
       case "thread/tokenUsage/updated": {
         const usage = this.extractTurnUsage(notification.params);
