@@ -41,6 +41,7 @@ import {
   type CodexProviderConfig,
 } from "../../../src/sdk/providers/codex.js";
 import type { SDKMessage, ToolApprovalResult } from "../../../src/sdk/types.js";
+import { Process } from "../../../src/supervisor/Process.js";
 import { Supervisor } from "../../../src/supervisor/Supervisor.js";
 import { UploadManager } from "../../../src/uploads/manager.js";
 
@@ -439,6 +440,26 @@ function handle(message) {
     });
     return;
   }
+  if (message.method === "turn/start" && process.env.CODEX_FAKE_LARGE_IMAGE === "1") {
+    const turnId = "large-turn-" + attempt;
+    const threadId = message.params.threadId;
+    send(message.id, { turn: { id: turnId, status: "inProgress", items: [], error: null } });
+    if (process.env.CODEX_FAKE_DISCONNECT === "1") {
+      setTimeout(() => process.exit(1), 20);
+      return;
+    }
+    const bytes = Buffer.alloc(8 * 1024 * 1024);
+    Buffer.from("89504e470d0a1a0a", "hex").copy(bytes);
+    notify("item/completed", { threadId, turnId, item: {
+      type: "imageGeneration", id: "image-" + attempt, status: "completed",
+      result: bytes.toString("base64"), transparentBackground: false,
+    } });
+    notify("item/completed", { threadId, turnId, item: {
+      type: "agentMessage", id: "reply-" + attempt, text: "reply " + attempt, phase: "final_answer",
+    } });
+    notify("turn/completed", { threadId, turn: { id: turnId, status: "completed", items: [], error: null } });
+    return;
+  }
   if (message.method === "turn/start") {
     activeThreadId = message.params.threadId;
     const eventMode = process.env.CODEX_FAKE_EVENT_MODE === "1";
@@ -740,6 +761,113 @@ process.stdin.on("data", (chunk) => {
       chmodSync(fakeCodexPath, 0o755);
       return fakeCodexPath;
     }
+
+    it.each([false, true])(
+      "handles queued input after a large image or transport failure (disconnect=%s)",
+      async (disconnect) => {
+        const tempDir = mkdtempSync(
+          join(require("node:os").tmpdir(), "codex-deferred-image-"),
+        );
+        const capturePath = join(tempDir, "capture.json");
+        const messageCapturePath = join(tempDir, "messages.jsonl");
+        vi.stubEnv("CODEX_FAKE_CAPTURE", capturePath);
+        vi.stubEnv("CODEX_FAKE_MESSAGE_CAPTURE", messageCapturePath);
+        vi.stubEnv("CODEX_FAKE_LARGE_IMAGE", "1");
+        vi.stubEnv("CODEX_FAKE_DISCONNECT", disconnect ? "1" : "0");
+        let managed: Process | undefined;
+        let session:
+          | Awaited<ReturnType<CodexProvider["startSession"]>>
+          | undefined;
+        try {
+          const provider = new CodexProvider({
+            codexPath: writeFakeCodexAppServer(tempDir),
+            eventSpine: { store: new InMemoryCodexEventStore() },
+            generatedArtifactUploadManager: new UploadManager({
+              uploadsDir: join(tempDir, "uploads"),
+            }),
+          });
+          session = await provider.startSession({
+            cwd: tempDir,
+            initialMessage: { text: "generate", uuid: "first" },
+          });
+          managed = new Process(session.iterator, {
+            projectPath: tempDir,
+            projectId: "project-1",
+            sessionId: "thread-new",
+            provider: "codex",
+            queue: session.queue,
+            abortFn: session.abort,
+            steerFn: session.steer,
+            idleTimeoutMs: 60_000,
+          });
+          const messages: SDKMessage[] = [];
+          managed.subscribe((event) => {
+            if (event.type === "message") messages.push(event.message);
+          });
+          const imagePath = join(tempDir, "attachment.png");
+          writeFileSync(imagePath, Buffer.from("89504e470d0a1a0a", "hex"));
+          managed.deferMessage({
+            text: "align these boxes",
+            tempId: "queued-image",
+            attachments: [
+              {
+                id: "attachment",
+                name: "attachment.png",
+                originalName: "attachment.png",
+                path: imagePath,
+                size: 8,
+                mimeType: "image/png",
+              },
+            ],
+          });
+          await vi.waitFor(() => expect(managed?.state.type).toBe("idle"), {
+            timeout: 10_000,
+          });
+          const starts = readMessageCapture(messageCapturePath).filter(
+            (request) => request.method === "turn/start",
+          );
+          if (disconnect) {
+            expect(starts).toHaveLength(1);
+            expect(managed.getDeferredQueueSummary()).toMatchObject([
+              { tempId: "queued-image", blocked: true },
+            ]);
+            expect(
+              messages.some((message) => message.tempId === "queued-image"),
+            ).toBe(false);
+            expect(messages.some((message) => message.type === "error")).toBe(
+              true,
+            );
+          } else {
+            expect(starts).toHaveLength(2);
+            expect(JSON.stringify(starts[1]?.params)).toContain(
+              "align these boxes",
+            );
+            expect(starts[1]?.params).toMatchObject({
+              input: expect.arrayContaining([
+                { type: "localImage", path: imagePath },
+              ]),
+            });
+            expect(managed.getDeferredQueueSummary()).toEqual([]);
+            expect(
+              messages.filter((message) => message.type === "result"),
+            ).toHaveLength(2);
+            expect(messages.some((message) => message.type === "error")).toBe(
+              false,
+            );
+            expect(
+              messages.some(
+                (message) => message.message?.content === "reply 2",
+              ),
+            ).toBe(true);
+          }
+        } finally {
+          managed?.terminate("test_complete");
+          session?.abort();
+          vi.unstubAllEnvs();
+          rmSync(tempDir, { recursive: true, force: true });
+        }
+      },
+    );
 
     it.each([
       [false, "priority"],

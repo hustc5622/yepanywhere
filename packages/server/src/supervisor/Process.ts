@@ -1526,13 +1526,24 @@ export class Process {
    * Get a summary of the deferred queue for SSE events and client sync.
    */
   getDeferredQueueSummary(): {
+    attachments?: UserMessage["attachments"];
+    blocked?: boolean;
     tempId?: string;
     content: string;
     timestamp: string;
   }[] {
     return this.deferredQueue.map((entry) => ({
       tempId: entry.message.tempId,
+      ...(this.messageQueue &&
+      (!this.acceptingMessages ||
+        this.iteratorDone ||
+        this.messageQueue.isClosed)
+        ? { blocked: true }
+        : {}),
       content: entry.message.text,
+      ...(entry.message.attachments?.length
+        ? { attachments: entry.message.attachments }
+        : {}),
       timestamp: entry.timestamp,
     }));
   }
@@ -2434,6 +2445,20 @@ export class Process {
     this.clearIdleTimer();
     if (this.interruptSendInProgress) {
       this.setState({ type: "idle", since: new Date() });
+      return;
+    }
+    // A final result can arrive after the resident provider has shut down.
+    // Keep deferred inputs visible instead of acknowledging an unconsumable
+    // message and then dropping it when the iterator returns done.
+    if (
+      this.messageQueue &&
+      (!this.acceptingMessages ||
+        this.iteratorDone ||
+        this.messageQueue.isClosed)
+    ) {
+      this.emitDeferredQueueChange();
+      this.setState({ type: "idle", since: new Date() });
+      this.startIdleTimer();
       return;
     }
     // Feed next deferred message before transitioning to idle

@@ -18,6 +18,7 @@ import {
   type GeneratedArtifactWarning,
   isUrlProjectId,
 } from "@yep-anywhere/shared";
+import { isStandardBase64 } from "../utils/base64.js";
 import { readValidatedZipEntries } from "./attachment-extractor.js";
 import type { UploadManager } from "./manager.js";
 
@@ -831,9 +832,7 @@ function decodeInlinePng(encoded: string, maxBytes: number): Buffer {
   if (
     encoded.length > maxEncodedLength ||
     encoded.length % 4 !== 0 ||
-    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
-      encoded,
-    )
+    !isStandardBase64(encoded)
   ) {
     throw new GeneratedArtifactPolicyError(
       encoded.length > maxEncodedLength ? "size_limit" : "invalid_payload",

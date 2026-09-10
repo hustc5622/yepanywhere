@@ -1,3 +1,4 @@
+import type { UploadedFile } from "@yep-anywhere/shared";
 import {
   type AgentActivity,
   type MarkdownAugment,
@@ -250,6 +251,8 @@ export type { StreamingMarkdownCallbacks } from "./useStreamingContent";
 
 /** Deferred message queued server-side, waiting for agent's turn to end */
 export interface DeferredMessage {
+  blocked?: boolean;
+  attachments?: UploadedFile[];
   tempId?: string;
   content: string;
   timestamp: string;

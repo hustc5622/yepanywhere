@@ -18,6 +18,7 @@ import type {
   SessionRetryStatus,
   SessionRuntime,
   ThinkingConfig,
+  UploadedFile,
   UrlProjectId,
 } from "@yep-anywhere/shared";
 import type { PermissionMode, SDKMessage } from "../sdk/types.js";
@@ -302,7 +303,13 @@ export type ProcessEvent =
   | { type: "retry-status"; retryStatus?: SessionRetryStatus }
   | {
       type: "deferred-queue";
-      messages: { tempId?: string; content: string; timestamp: string }[];
+      messages: {
+        tempId?: string;
+        content: string;
+        timestamp: string;
+        attachments?: UploadedFile[];
+        blocked?: boolean;
+      }[];
     };
 
 // Process options

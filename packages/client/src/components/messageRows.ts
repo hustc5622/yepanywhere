@@ -1,3 +1,4 @@
+import type { UploadedFile } from "@yep-anywhere/shared";
 import type { RenderItem } from "../types/renderItems";
 
 /**
@@ -24,6 +25,8 @@ export interface PendingMessage {
 
 /** Deferred message queued server-side */
 export interface DeferredMessage {
+  blocked?: boolean;
+  attachments?: UploadedFile[];
   tempId?: string;
   content: string;
   timestamp: string;

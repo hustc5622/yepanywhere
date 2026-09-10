@@ -1305,6 +1305,7 @@
   "userPromptShowLess": "Show less",
   "userPromptAwaiting": "Waiting to be picked up",
   "userPromptSending": "Sending...",
+  "userPromptQueueBlocked": "Not sent · session stopped; cancel and resend",
   "userPromptQueuedNext": "Queued · after this turn",
   "userPromptQueuedPosition": "Queued (#{position})",
   "userPromptCancelQueued": "Cancel queued message",

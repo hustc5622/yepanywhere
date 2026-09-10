@@ -316,7 +316,7 @@ function parseInlineImageData(imageUrl: string): {
   return { mimeType, bytes };
 }
 
-function formatFileSize(bytes?: number): string {
+export function formatFileSize(bytes?: number): string {
   if (!bytes || bytes < 0) return "unknown size";
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
@@ -596,7 +596,7 @@ function UploadedFileItem({
 /**
  * Renders uploaded file attachments below the user prompt
  */
-function UploadedFilesMetadata({
+export function UploadedFilesMetadata({
   files,
   feishu,
 }: {

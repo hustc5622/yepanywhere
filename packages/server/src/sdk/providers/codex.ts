@@ -1205,6 +1205,10 @@ export class CodexAppServerClient {
     });
   }
 
+  get isClosed(): boolean {
+    return this.closed;
+  }
+
   async nextNotification(signal?: AbortSignal): Promise<JsonRpcNotification> {
     return await this.notifications.shift(signal);
   }
@@ -3629,6 +3633,9 @@ export class CodexProvider implements AgentProvider {
 
         while (!turnComplete && !signal.aborted) {
           const rawNotification = await appServer.nextNotification(signal);
+          // A synthetic transport error is terminal for the input consumer,
+          // unlike a failed model turn on an otherwise healthy connection.
+          if (appServer.isClosed) queue.close();
           const canonicalEvent =
             rawNotification.canonicalEvent ??
             (await activeEventIngress.ingestNotification(rawNotification));
@@ -3866,6 +3873,9 @@ export class CodexProvider implements AgentProvider {
         } as SDKMessage);
       }
     } finally {
+      // The trailing result reports provider shutdown, not a reusable turn
+      // boundary. Reject admission before Process handles that result.
+      queue.close();
       runtimeState.activeTurnId = null;
       runtimeState.ready = false;
       await appServer?.closeAndWait();

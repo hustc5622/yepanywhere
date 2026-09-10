@@ -24,6 +24,10 @@ import { MessageActions } from "./MessageActions";
 import { ProcessingIndicator } from "./ProcessingIndicator";
 import { RenderItemComponent } from "./RenderItemComponent";
 import {
+  UploadedFilesMetadata,
+  formatFileSize,
+} from "./blocks/UserPromptBlock";
+import {
   type DeferredMessage,
   type MessageRow,
   type PendingMessage,
@@ -1001,15 +1005,26 @@ export const MessageList = memo(function MessageList({
           <div className="deferred-message">
             <div className="message-user-prompt deferred-message-bubble">
               {row.deferred.content}
+              <UploadedFilesMetadata
+                files={(row.deferred.attachments ?? []).map((file) => ({
+                  originalName: file.originalName,
+                  mimeType: file.mimeType,
+                  path: file.path,
+                  size: formatFileSize(file.size),
+                }))}
+              />
             </div>
             <div className="deferred-message-footer">
               <span className="deferred-message-status">
-                {row.index === 0
-                  ? (i18n?.t("userPromptQueuedNext") ??
-                    "Queued · after this turn")
-                  : (i18n?.t("userPromptQueuedPosition", {
-                      position: row.index + 1,
-                    }) ?? `Queued (#${row.index + 1})`)}
+                {row.deferred.blocked
+                  ? (i18n?.t("userPromptQueueBlocked") ??
+                    "Not sent · session stopped; cancel and resend")
+                  : row.index === 0
+                    ? (i18n?.t("userPromptQueuedNext") ??
+                      "Queued · after this turn")
+                    : (i18n?.t("userPromptQueuedPosition", {
+                        position: row.index + 1,
+                      }) ?? `Queued (#${row.index + 1})`)}
               </span>
               {row.deferred.tempId && onCancelDeferred && (
                 <button

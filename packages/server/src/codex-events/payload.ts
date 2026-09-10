@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isStandardBase64 } from "../utils/base64.js";
 import type { SafeJsonValue } from "./types.js";
 
 export interface CodexPayloadOptions {
@@ -79,11 +80,7 @@ export function serializeCodexPayload(
       if (imageGeneration && key === "result" && typeof entry === "string") {
         output.resultSummary = {
           encoding:
-            /^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
-              entry,
-            ) && entry.length >= 16
-              ? "base64"
-              : "opaque",
+            isStandardBase64(entry) && entry.length >= 16 ? "base64" : "opaque",
           encodedLength: entry.length,
           encodedSha256: `sha256:${createHash("sha256").update(entry).digest("hex")}`,
         };

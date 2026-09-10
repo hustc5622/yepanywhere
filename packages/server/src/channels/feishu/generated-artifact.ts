@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isStandardBase64 } from "../../utils/base64.js";
 
 export const MAX_FEISHU_GENERATED_IMAGE_BYTES = 10 * 1024 * 1024;
 
@@ -68,12 +69,7 @@ export function inspectCodexGeneratedImage(
   if (encoded.length > maxEncodedLength) {
     return { status: "blocked", sourceId, reason: "size_limit" };
   }
-  if (
-    encoded.length % 4 !== 0 ||
-    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(
-      encoded,
-    )
-  ) {
+  if (encoded.length % 4 !== 0 || !isStandardBase64(encoded)) {
     return { status: "blocked", sourceId, reason: "invalid_payload" };
   }
 

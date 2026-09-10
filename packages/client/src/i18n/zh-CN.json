@@ -1305,6 +1305,7 @@
   "userPromptShowLess": "收起",
   "userPromptAwaiting": "等待采用",
   "userPromptSending": "发送中…",
+  "userPromptQueueBlocked": "未发送 · 会话已停止，请取消后重新发送",
   "userPromptQueuedNext": "排队中 · 本轮结束后发送",
   "userPromptQueuedPosition": "排队中（第 {position} 条）",
   "userPromptCancelQueued": "取消排队消息",

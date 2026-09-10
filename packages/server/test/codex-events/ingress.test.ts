@@ -32,6 +32,52 @@ afterEach(() => {
 });
 
 describe("Codex event ingress", () => {
+  it("journals a large generated image and continues with turn completion", async () => {
+    const store = new InMemoryCodexEventStore();
+    const ingress = await CodexEventIngress.create({
+      store,
+      runtime: CODEX_EVENT_RUNTIME_IDENTITY,
+      sessionId: "large-image",
+      connectionId: "large-image-connection",
+    });
+    const encoded = Buffer.alloc(8 * 1024 * 1024, 0xcd).toString("base64");
+    const image = await ingress.ingestNotification({
+      method: "item/completed",
+      params: {
+        threadId: "large-image",
+        turnId: "turn-1",
+        item: {
+          type: "imageGeneration",
+          id: "image-1",
+          status: "completed",
+          result: encoded,
+        },
+      },
+    });
+    expect(image.payload.data).toMatchObject({
+      item: {
+        resultSummary: {
+          encoding: "base64",
+          encodedLength: encoded.length,
+        },
+      },
+    });
+    expect(JSON.stringify(image)).not.toContain(encoded);
+    const terminal = await ingress.ingestNotification({
+      method: "turn/completed",
+      params: {
+        threadId: "large-image",
+        turn: {
+          id: "turn-1",
+          status: "completed",
+          items: [],
+          error: null,
+        },
+      },
+    });
+    expect(terminal.method).toBe("turn/completed");
+  });
+
   it("keeps the runtime identity aligned with the checked-in stable manifest", () => {
     const manifest = JSON.parse(
       readFileSync(

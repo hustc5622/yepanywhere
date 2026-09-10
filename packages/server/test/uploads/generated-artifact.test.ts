@@ -430,9 +430,8 @@ describe("GeneratedArtifactMaterializer", () => {
 
   it("does not block generated images based on prompt content", async () => {
     const context = await createContext();
-    const png = Buffer.from([
-      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00,
-    ]);
+    const png = Buffer.alloc(9);
+    Buffer.from("89504e470d0a1a0a", "hex").copy(png);
     const result = await context.materializer.materialize(
       {
         lifecycle: "completed",
@@ -770,37 +769,39 @@ describe("GeneratedArtifactMaterializer", () => {
     ]);
   });
 
-  it("preserves completed inline PNG support without consulting savedPath", async () => {
-    const context = await createContext();
-    const png = Buffer.from([
-      0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0x00,
-    ]);
-    const result = await context.materializer.materialize(
-      {
-        lifecycle: "completed",
-        threadId: "thread-1",
-        turnId: "turn-1",
-        item: {
-          type: "imageGeneration",
-          id: "image-1",
-          status: "completed",
-          revisedPrompt: "Draw a blue square",
-          result: png.toString("base64"),
-          savedPath: "/forged/must-not-be-read.png",
+  it.each([9, 8 * 1024 * 1024])(
+    "materializes a %i-byte inline PNG without consulting savedPath",
+    async (size) => {
+      const context = await createContext();
+      const png = Buffer.alloc(size);
+      Buffer.from("89504e470d0a1a0a", "hex").copy(png);
+      const result = await context.materializer.materialize(
+        {
+          lifecycle: "completed",
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "imageGeneration",
+            id: "image-1",
+            status: "completed",
+            revisedPrompt: "Draw a blue square",
+            result: png.toString("base64"),
+            savedPath: "/forged/must-not-be-read.png",
+          },
         },
-      },
-      context.grant,
-    );
+        context.grant,
+      );
 
-    expect(result.warnings).toEqual([]);
-    expect(result.artifacts[0]).toMatchObject({
-      kind: "image",
-      mimeType: "image/png",
-      sizeBytes: png.length,
-      previewUrl: expect.stringContaining("/api/projects/"),
-    });
-    expect(JSON.stringify(result)).not.toContain("/forged");
-  });
+      expect(result.warnings).toEqual([]);
+      expect(result.artifacts[0]).toMatchObject({
+        kind: "image",
+        mimeType: "image/png",
+        sizeBytes: png.length,
+        previewUrl: expect.stringContaining("/api/projects/"),
+      });
+      expect(JSON.stringify(result)).not.toContain("/forged");
+    },
+  );
 });
 
 function fileChangeItem(path: string, id = "file-item-1") {

@@ -70,6 +70,52 @@ afterEach(() => {
 });
 
 describe("interrupt and send", () => {
+  it("retains deferred inputs when a closing provider emits its final result", async () => {
+    const { process, queue, users, endTurn } = setup();
+    process.deferMessage({ text: "Still waiting", tempId: "deferred" });
+    queue.close();
+    endTurn();
+    await vi.waitFor(() => expect(process.state.type).toBe("idle"));
+    expect(process.getDeferredQueueSummary()).toMatchObject([
+      { tempId: "deferred", content: "Still waiting" },
+    ]);
+    expect(users).toHaveLength(0);
+    expect(queue.depth).toBe(0);
+  });
+
+  it("includes attachments in queue events and reconnect summaries", () => {
+    const { process } = setup();
+    const events: unknown[] = [];
+    process.subscribe((event) => {
+      if (event.type === "deferred-queue") events.push(event.messages);
+    });
+    const attachments = [
+      {
+        id: "image-1",
+        name: "image.png",
+        originalName: "Screenshot.png",
+        path: "/uploads/project/session/image.png",
+        size: 1234,
+        mimeType: "image/png",
+      },
+      {
+        id: "file-1",
+        name: "notes.txt",
+        originalName: "notes.txt",
+        path: "/uploads/project/session/notes.txt",
+        size: 24,
+        mimeType: "text/plain",
+      },
+    ];
+    process.deferMessage({ text: "", tempId: "attachments-only", attachments });
+    expect(process.getDeferredQueueSummary()).toMatchObject([
+      { content: "", tempId: "attachments-only", attachments },
+    ]);
+    expect(events).toEqual([process.getDeferredQueueSummary()]);
+    process.cancelDeferredMessage("attachments-only");
+    expect(events.at(-1)).toEqual([]);
+  });
+
   it("waits for the terminal event after an early interrupt acknowledgement", async () => {
     const { process, queue, interruptFn, steerFn, users, endTurn } = setup();
     const sent = process.queueMessage(

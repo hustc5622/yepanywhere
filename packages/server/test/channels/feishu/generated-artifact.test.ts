@@ -2,6 +2,14 @@ import { describe, expect, it } from "vitest";
 import { inspectCodexGeneratedImage } from "../../../src/channels/feishu/generated-artifact.js";
 
 describe("inspectCodexGeneratedImage", () => {
+  it("accepts a multi-megabyte PNG without exhausting the stack", () => {
+    const bytes = Buffer.alloc(8 * 1024 * 1024);
+    pngBytes().copy(bytes);
+    expect(
+      inspectCodexGeneratedImage(imageMessage(bytes.toString("base64"))),
+    ).toMatchObject({ status: "ready", artifact: { sizeBytes: bytes.length } });
+  });
+
   it("accepts a bounded completed PNG without exposing the local path", () => {
     const result = inspectCodexGeneratedImage(
       imageMessage(pngBytes().toString("base64"), {
