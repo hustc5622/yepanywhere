@@ -1,6 +1,7 @@
 import { useEffect, useState } from "react";
 import { Outlet, useOutletContext, useParams } from "react-router-dom";
 import { Sidebar } from "../components/Sidebar";
+import { useMobileViewport } from "../hooks/useMobileViewport";
 import { useSidebarPreference } from "../hooks/useSidebarPreference";
 import { useSidebarWidth } from "../hooks/useSidebarWidth";
 import { useViewportWidth } from "../hooks/useViewportWidth";
@@ -33,6 +34,7 @@ export function NavigationLayout() {
 
   // Desktop mode as long as collapsed sidebar fits
   const isWideScreen = canShowDesktop(viewportWidth);
+  useMobileViewport(!isWideScreen);
   // Auto-collapse if viewport too narrow for expanded sidebar, or if user prefers collapsed
   const effectivelyCollapsed = !isExpanded || !canShowExpanded(viewportWidth);
 

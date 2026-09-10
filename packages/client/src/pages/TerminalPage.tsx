@@ -2,6 +2,7 @@ import { FitAddon } from "@xterm/addon-fit";
 import { WebLinksAddon } from "@xterm/addon-web-links";
 import { Terminal } from "@xterm/xterm";
 import "@xterm/xterm/css/xterm.css";
+import "../styles/terminal-font.css";
 import {
   type PointerEvent,
   useCallback,
@@ -355,7 +356,11 @@ export function TerminalPage() {
     const visualBottom =
       (viewport?.offsetTop ?? 0) + (viewport?.height ?? window.innerHeight);
     const pageTop = page.getBoundingClientRect().top;
-    const availableHeight = Math.max(1, Math.round(visualBottom - pageTop));
+    // Respect the parent safe area as well as the visual viewport. In the APK,
+    // native IME padding already resizes the iframe; do not subtract it again.
+    const parentBottom = page.parentElement?.getBoundingClientRect().bottom;
+    const bottom = Math.min(visualBottom, parentBottom ?? visualBottom);
+    const availableHeight = Math.max(1, Math.floor(bottom - pageTop));
 
     page.style.setProperty(
       "--terminal-available-height",
@@ -464,10 +469,25 @@ export function TerminalPage() {
     termRef.current = term;
     fitRef.current = fit;
 
-    requestAnimationFrame(() => {
+    const initialFrame = requestAnimationFrame(() => {
       fitTerminal();
       term.focus();
     });
+
+    // Start with a usable fallback, then remeasure after the bundled font loads.
+    // Setting a different family invalidates xterm's cached character metrics.
+    let disposed = false;
+    document.fonts?.load('13px "Yep Terminal"').then(
+      (fonts) => {
+        if (disposed || fonts.length === 0) return;
+        term.options.fontFamily = '"Yep Terminal", monospace';
+        fitTerminal();
+        term.refresh(0, term.rows - 1);
+      },
+      () => {
+        // Keep the terminal usable if the font request fails; never lose output.
+      },
+    );
 
     const dataDisposable = term.onData(handleTerminalData);
 
@@ -477,6 +497,8 @@ export function TerminalPage() {
     observer.observe(containerRef.current);
 
     return () => {
+      disposed = true;
+      cancelAnimationFrame(initialFrame);
       observer.disconnect();
       dataDisposable.dispose();
       term.dispose();
@@ -486,10 +508,17 @@ export function TerminalPage() {
   }, [fitTerminal, handleTerminalData]);
 
   useEffect(() => {
+    let frame = 0;
     const syncAndFit = () => {
-      syncViewportBounds();
-      requestAnimationFrame(fitTerminal);
+      cancelAnimationFrame(frame);
+      frame = requestAnimationFrame(() => {
+        syncViewportBounds();
+        fitTerminal();
+      });
     };
+    const parent = pageRef.current?.parentElement;
+    const observer = new ResizeObserver(syncAndFit);
+    if (parent) observer.observe(parent);
 
     syncAndFit();
     window.addEventListener("resize", syncAndFit);
@@ -498,6 +527,8 @@ export function TerminalPage() {
     window.visualViewport?.addEventListener("scroll", syncAndFit);
 
     return () => {
+      cancelAnimationFrame(frame);
+      observer.disconnect();
       window.removeEventListener("resize", syncAndFit);
       window.removeEventListener("orientationchange", syncAndFit);
       window.visualViewport?.removeEventListener("resize", syncAndFit);

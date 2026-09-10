@@ -1,0 +1,9 @@
+/* Bundled Nerd Font: no device font installation or third-party request needed. */
+@font-face {
+  font-family: "Yep Terminal";
+  src: url("../assets/fonts/JetBrainsMonoNLNerdFontMono-Regular.ttf")
+    format("truetype");
+  font-weight: 400;
+  font-style: normal;
+  font-display: swap;
+}

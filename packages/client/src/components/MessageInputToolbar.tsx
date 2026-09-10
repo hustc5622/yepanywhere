@@ -241,6 +241,17 @@ export function MessageInputToolbar({
               label={button.label}
             />
           ))}
+        <ContextUsageIndicator
+          usage={contextUsage}
+          size={16}
+          labelMode="tokens"
+          onClick={
+            projectId && sessionId
+              ? () => setIsContextModalOpen(true)
+              : undefined
+          }
+          ariaLabel={t("contextBreakdownTitle")}
+        />
       </div>
       <div className="message-input-actions">
         {/* Pending approval indicator */}
@@ -263,17 +274,6 @@ export function MessageInputToolbar({
             </span>
           </button>
         )}
-        <ContextUsageIndicator
-          usage={contextUsage}
-          size={16}
-          labelMode="tokens"
-          onClick={
-            projectId && sessionId
-              ? () => setIsContextModalOpen(true)
-              : undefined
-          }
-          ariaLabel={t("contextBreakdownTitle")}
-        />
         {/* Keep both submission choices visible while the agent is running. */}
         {onQueue && (
           <button
@@ -314,7 +314,12 @@ export function MessageInputToolbar({
             title={t("toolbarInterruptTitle")}
             aria-label={t("toolbarInterruptLabel")}
           >
-            <span>{t("toolbarInterruptLabel")}</span>
+            <span className="message-submit-label-full">
+              {t("toolbarInterruptLabel")}
+            </span>
+            <span className="message-submit-label-compact" aria-hidden="true">
+              {t("toolbarInterruptCompact")}
+            </span>
           </button>
         )}
         {onSend && (onQueue || !showStop || canSend) && (
@@ -329,7 +334,23 @@ export function MessageInputToolbar({
             <span className="send-icon" aria-hidden="true">
               ↑
             </span>
-            {onQueue && <span>{activeSendLabel}</span>}
+            {onQueue && (
+              <>
+                <span className="message-submit-label-full">
+                  {activeSendLabel}
+                </span>
+                <span
+                  className="message-submit-label-compact"
+                  aria-hidden="true"
+                >
+                  {t(
+                    replyOnSend
+                      ? "toolbarReplyContinueCompact"
+                      : "toolbarInsertCompact",
+                  )}
+                </span>
+              </>
+            )}
           </button>
         )}
         {showStop && (onQueue || !canSend) && (
