@@ -183,6 +183,10 @@ interface PiStreamState {
    * the pending tool call instead of appending a new row.
    */
   toolCallOwners: Map<string, SDKMessage>;
+  toolOutputSnapshots: Map<
+    string,
+    { terminal: string; log: string; combined: string }
+  >;
 }
 
 interface PiExtensionProviderConfig {
@@ -1257,6 +1261,7 @@ export class PiProvider implements AgentProvider {
           blocks: new Map(),
           sequence: 0,
           toolCallOwners: new Map(),
+          toolOutputSnapshots: new Map(),
           pendingUser: {
             uuid: userId,
             tempId: message.tempId,
@@ -1317,6 +1322,30 @@ export class PiProvider implements AgentProvider {
     signal: AbortSignal,
     runtime?: PiRuntimeRef,
   ): Promise<SDKMessage[]> {
+    if (event.type === "tool_execution_update") {
+      const result = isRecord(event.partialResult) ? event.partialResult : {};
+      const content = result.content;
+      const text =
+        typeof content === "string"
+          ? content
+          : Array.isArray(content)
+            ? content
+                .filter(isRecord)
+                .map((block) => stringValue(block.text) ?? "")
+                .join("\n")
+            : "";
+      return this.toolOutputSdkMessages(
+        event.toolCallId,
+        text,
+        "terminal",
+        stream,
+      );
+    }
+    if (event.type === "tool_execution_end") {
+      stream.toolOutputSnapshots.delete(stringValue(event.toolCallId) ?? "");
+      stream.toolCallOwners.delete(stringValue(event.toolCallId) ?? "");
+      return [];
+    }
     if (event.type === "extension_ui_request") {
       const partial = this.partialToolOutputSdkMessages(event, stream);
       if (partial) return partial;
@@ -1577,6 +1606,7 @@ export class PiProvider implements AgentProvider {
       const oldest = stream.toolCallOwners.keys().next();
       if (oldest.done) break;
       stream.toolCallOwners.delete(oldest.value);
+      stream.toolOutputSnapshots.delete(oldest.value);
     }
   }
 
@@ -1607,18 +1637,43 @@ export class PiProvider implements AgentProvider {
       // A malformed relay is a dropped preview frame, never a turn failure.
       return [];
     }
-    const toolCallId = stringValue(payload.toolCallId);
-    const text = typeof payload.text === "string" ? payload.text : "";
-    if (!toolCallId || !text) return [];
+    return this.toolOutputSdkMessages(
+      payload.toolCallId,
+      payload.text,
+      payload.source === "log" ? "log" : "terminal",
+      stream,
+    );
+  }
 
+  private toolOutputSdkMessages(
+    rawId: unknown,
+    rawText: unknown,
+    source: "terminal" | "log",
+    stream: PiStreamState,
+  ): SDKMessage[] {
+    const toolCallId = stringValue(rawId);
+    if (
+      !toolCallId ||
+      typeof rawText !== "string" ||
+      (!rawText && source !== "log")
+    )
+      return [];
     const owner = stream.toolCallOwners.get(toolCallId);
     const content = owner?.message?.content;
     if (!owner || !Array.isArray(content)) return [];
-
-    const bounded =
-      text.length > PI_PARTIAL_OUTPUT_LIMIT
-        ? text.slice(-PI_PARTIAL_OUTPUT_LIMIT)
-        : text;
+    const snapshot = stream.toolOutputSnapshots.get(toolCallId) ?? {
+      terminal: "",
+      log: "",
+      combined: "",
+    };
+    snapshot[source] = rawText.slice(-8_000);
+    const bounded = [snapshot.terminal, snapshot.log]
+      .filter(Boolean)
+      .join("\n")
+      .slice(-PI_PARTIAL_OUTPUT_LIMIT);
+    if (bounded === snapshot.combined) return [];
+    snapshot.combined = bounded;
+    stream.toolOutputSnapshots.set(toolCallId, snapshot);
     return [
       {
         ...owner,

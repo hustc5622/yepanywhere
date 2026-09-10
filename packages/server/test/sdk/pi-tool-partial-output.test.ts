@@ -6,7 +6,8 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { PiProvider } from "../../src/sdk/providers/pi.js";
 
 /**
- * Pi's RPC event stream has no tool progress event, so a long-running bash call
+ * Native RPC progress and extension log tails share the same preview path.
+ * Previously a long-running bash call
  * used to render as a bare `IN` card until the tool result landed. The Yep
  * extension relays `tool_execution_update` through `ui.notify`, and the provider
  * turns that relay into a `partialOutput` snapshot on the pending tool_use
@@ -36,7 +37,7 @@ function createExtensionHarness() {
   return {
     handlers,
     notify,
-    ctx: { ui: { notify } },
+    ctx: { cwd: tmpdir(), ui: { notify } },
     extensionApi,
     relayed(): Array<{ toolCallId: string; text: string }> {
       return notify.mock.calls.map(([message]) =>
@@ -185,8 +186,14 @@ process.stdin.on("data", (chunk) => {
       output({ type: "message_update", assistantMessageEvent: { type: "text_delta", contentIndex: 0, delta: "running it" } });
       output({ type: "message_update", assistantMessageEvent: { type: "toolcall_end", contentIndex: 1, toolCall: { id: "call-live", name: "bash", arguments: { command: "pnpm test" } } } });
       output({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "running it" }, { type: "toolCall", id: "call-live", name: "bash", arguments: { command: "pnpm test" } }], stopReason: "toolUse", timestamp: Date.now() } });
+      output({ type: "tool_execution_update", toolCallId: "call-live", partialResult: { content: [{ type: "text", text: "compiling...\n" }] } });
       output({ type: "extension_ui_request", id: "notify-1", method: "notify", message: "__YEP_PI_TOOL_PARTIAL__:" + JSON.stringify({ toolCallId: "call-live", text: "compiling...\n" }) });
       output({ type: "extension_ui_request", id: "notify-2", method: "notify", message: "__YEP_PI_TOOL_PARTIAL__:" + JSON.stringify({ toolCallId: "call-live", text: "compiling...\nlinking...\n" }) });
+      output({ type: "extension_ui_request", method: "notify", message: "__YEP_PI_TOOL_PARTIAL__:" + JSON.stringify({ toolCallId: "call-live", text: "--- /tmp/tests.log ---\n10 passed", source: "log" }) });
+      output({ type: "tool_execution_update", toolCallId: "call-live", partialResult: { content: [{ type: "text", text: "ok" }] } });
+      output({ type: "extension_ui_request", method: "notify", message: "__YEP_PI_TOOL_PARTIAL__:" + JSON.stringify({ toolCallId: "call-live", text: "--- /tmp/tests.log ---\n20 passed", source: "log" }) });
+      output({ type: "tool_execution_end", toolCallId: "call-live" });
+      output({ type: "tool_execution_update", toolCallId: "call-live", partialResult: { content: [{ type: "text", text: "late" }] } });
       output({ type: "extension_ui_request", id: "notify-3", method: "notify", message: "plain notify, not a relay" });
       output({ type: "extension_ui_request", id: "notify-4", method: "notify", message: "__YEP_PI_TOOL_PARTIAL__:{not json" });
       output({ type: "extension_ui_request", id: "notify-5", method: "notify", message: "__YEP_PI_TOOL_PARTIAL__:" + JSON.stringify({ toolCallId: "unknown-call", text: "orphan" }) });
@@ -308,7 +315,15 @@ describe("PiProvider live tool output", () => {
         (block) => typeof block.partialOutput === "string",
       ),
     );
-    expect(previews).toHaveLength(2);
+    expect(previews).toHaveLength(5);
+    expect(
+      blocksOf(previews[3]).find((block) => block.type === "tool_use")
+        ?.partialOutput,
+    ).toBe("ok\n--- /tmp/tests.log ---\n10 passed");
+    expect(
+      blocksOf(previews[4]).find((block) => block.type === "tool_use")
+        ?.partialOutput,
+    ).toBe("ok\n--- /tmp/tests.log ---\n20 passed");
 
     const [first, second] = previews;
     const toolBlockOf = (message: StreamedMessage | undefined) =>

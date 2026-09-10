@@ -858,9 +858,7 @@ function processMessage(
                   0);
             const nextItem = appendSourceMessage(existingItem, msg);
             const incomingPartialOutput =
-              typeof block.partialOutput === "string" &&
-              block.partialOutput.length >
-                (existingItem.partialOutput?.length ?? 0)
+              typeof block.partialOutput === "string"
                 ? block.partialOutput
                 : existingItem.partialOutput;
             const withInput =

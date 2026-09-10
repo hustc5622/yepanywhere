@@ -2084,6 +2084,31 @@ Details with a &gt; comparison.</result>
       });
     });
 
+    it.each(["22%", "ok", ""])(
+      "uses the latest bounded snapshot: %j",
+      (output) => {
+        const messages: Message[] = ["11%", output].map(
+          (partialOutput, index) => ({
+            id: `snapshot-${index}`,
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "live",
+                name: "Bash",
+                input: { command: "pytest" },
+                partialOutput,
+              },
+            ],
+            timestamp: `2024-01-01T00:00:0${index}Z`,
+          }),
+        );
+        expect(preprocessMessages(messages)[0]).toMatchObject({
+          partialOutput: output,
+        });
+      },
+    );
+
     it("refreshes partialOutput from replayed tool_use snapshots", () => {
       const messages: Message[] = [
         {
