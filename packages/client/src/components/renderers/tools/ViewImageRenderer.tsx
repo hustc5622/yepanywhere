@@ -2,10 +2,12 @@ import { useState } from "react";
 import { api } from "../../../api/client";
 import { useOptionalSessionMetadata } from "../../../contexts/SessionMetadataContext";
 import { useFetchedImage } from "../../../hooks/useRemoteImage";
+import { useOptionalI18n } from "../../../i18n";
 import { Modal } from "../../ui/Modal";
 import type { ToolRenderer } from "./types";
 
 interface ViewImageInput {
+  snapshotUrl?: string;
   path?: string;
   url?: string;
   title?: string;
@@ -15,6 +17,7 @@ interface ViewImageInput {
 }
 
 type ImageSource =
+  | { type: "snapshot"; url: string; label: string }
   | { type: "local"; path: string; label: string }
   | { type: "direct"; url: string; label: string };
 
@@ -42,6 +45,8 @@ function getImageInput(input: unknown, result?: unknown): ViewImageInput {
   const inputRecord = isRecord(input) ? input : {};
   const resultRecord = isRecord(result) ? result : {};
   return {
+    snapshotUrl:
+      getString(inputRecord.snapshotUrl) ?? getString(resultRecord.snapshotUrl),
     path: getString(inputRecord.path) ?? getString(resultRecord.path),
     url: getString(inputRecord.url) ?? getString(resultRecord.url),
     title: getString(inputRecord.title),
@@ -98,6 +103,15 @@ function getImageSource(
   input: ViewImageInput,
   metadata?: ImageSessionMetadata | null,
 ): ImageSource | null {
+  if (input.snapshotUrl) {
+    return {
+      type: "snapshot",
+      url: input.snapshotUrl,
+      label: input.path
+        ? getImageLabel(input, input.path)
+        : (input.title ?? "Image"),
+    };
+  }
   if (input.path) {
     const projectRelativePath = getProjectRelativePath(
       input.path,
@@ -211,10 +225,14 @@ function ViewImageModalContent({
   source: ImageSource;
   alt: string;
 }) {
+  const i18n = useOptionalI18n();
+  const [attempt, setAttempt] = useState(0);
   const apiPath =
-    source.type === "local"
-      ? `/api/local-image?path=${encodeURIComponent(source.path)}`
-      : null;
+    source.type === "snapshot"
+      ? `${source.url}?attempt=${attempt}`
+      : source.type === "local"
+        ? `/api/local-image?path=${encodeURIComponent(source.path)}`
+        : null;
   const { url, loading, error, bytes, mimeType } = useFetchedImage(apiPath);
 
   if (source.type === "direct") {
@@ -226,6 +244,22 @@ function ViewImageModalContent({
   }
 
   if (error || !url) {
+    if (source.type === "snapshot") {
+      return (
+        <div className="viewimage-error">
+          <p>
+            {i18n?.t("imageSnapshotUnavailable") ??
+              "The image from this tool call is unavailable. If the tool is still running, try again shortly."}
+          </p>
+          <button
+            type="button"
+            onClick={() => setAttempt((value) => value + 1)}
+          >
+            {i18n?.t("sessionDisplayRetry") ?? "Retry"}
+          </button>
+        </div>
+      );
+    }
     return (
       <div className="viewimage-error">{error ?? "Failed to load image"}</div>
     );

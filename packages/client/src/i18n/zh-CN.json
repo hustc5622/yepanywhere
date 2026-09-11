@@ -1,4 +1,5 @@
 {
+  "imageSnapshotUnavailable": "无法读取这次工具调用的图片。如果工具仍在运行，请稍后重试。",
   "messageAsyncQuestion": "向你提问",
   "messageAsyncUpdate": "异步消息",
   "messageAsyncHint": "任务会继续执行。在输入框填写回答，选择“回复并继续”即可。",

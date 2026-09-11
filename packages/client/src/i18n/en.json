@@ -1,4 +1,5 @@
 {
+  "imageSnapshotUnavailable": "The image from this tool call is unavailable. If the tool is still running, try again shortly.",
   "messageAsyncQuestion": "Question for you",
   "messageAsyncUpdate": "Async update",
   "messageAsyncHint": "The task keeps running. Type your answer in the message box and choose Reply & continue.",

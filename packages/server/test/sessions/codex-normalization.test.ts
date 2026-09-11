@@ -9,7 +9,10 @@ import {
   buildCodexBranchView,
   computeCodexRollbackNumTurns,
 } from "../../src/sessions/codex-rollback.js";
-import { normalizeSession } from "../../src/sessions/normalization.js";
+import {
+  convertCodexEntries,
+  normalizeSession,
+} from "../../src/sessions/normalization.js";
 import type { LoadedSession } from "../../src/sessions/types.js";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -2424,5 +2427,36 @@ describe("computeCodexRollbackNumTurns", () => {
         timestamp: "2024-01-01T00:00:01Z",
       }),
     ).toBe(1);
+  });
+});
+
+describe("Codex recorded image previews", () => {
+  it("keeps direct view_image history tied to the call rather than its mutable path", () => {
+    const messages = convertCodexEntries(
+      [
+        {
+          type: "response_item",
+          timestamp: "2026-09-10T00:00:00Z",
+          payload: {
+            type: "function_call",
+            name: "view_image",
+            call_id: "image-1",
+            arguments: '{"path":"/tmp/phone.png"}',
+          },
+        },
+      ],
+      "thread-1",
+    );
+    expect(messages[0]?.message?.content).toEqual([
+      {
+        type: "tool_use",
+        id: "image-1",
+        name: "view_image",
+        input: {
+          path: "/tmp/phone.png",
+          snapshotUrl: "/api/sessions/thread-1/codex-images/image-1",
+        },
+      },
+    ]);
   });
 });

@@ -72,6 +72,7 @@ import { createActivityRoutes } from "./routes/activity.js";
 import { createBrowserProfilesRoutes } from "./routes/browser-profiles.js";
 import { createClientLogsRoutes } from "./routes/client-logs.js";
 import { createCodexBridgeRoutes } from "./routes/codex-bridge.js";
+import { createCodexImageRoutes } from "./routes/codex-images.js";
 import {
   type CodexTranscriptStoreSource,
   createCodexTranscriptRoutes,
@@ -130,7 +131,11 @@ import { SessionCommandService } from "./services/SessionCommandService.js";
 import { SessionTitleService } from "./services/SessionTitleService.js";
 import type { SharingService } from "./services/SharingService.js";
 import { CodexSessionReader } from "./sessions/codex-reader.js";
-import { invalidateCodexSessionManifest } from "./sessions/codex-session-manifest.js";
+import { resolveExistingCodexRolloutPath } from "./sessions/codex-rollout-file.js";
+import {
+  getCodexSessionManifest,
+  invalidateCodexSessionManifest,
+} from "./sessions/codex-session-manifest.js";
 import { GeminiSessionReader } from "./sessions/gemini-reader.js";
 import { KimiSessionReader } from "./sessions/kimi-reader.js";
 import { normalizeSession } from "./sessions/normalization.js";
@@ -1616,6 +1621,17 @@ export function createApp(options: AppOptions): AppResult {
       }),
     );
   }
+
+  app.route(
+    "/api/sessions",
+    createCodexImageRoutes({
+      resolveSessionFile: async (sessionId) => {
+        const manifest = await getCodexSessionManifest(CODEX_SESSIONS_DIR);
+        const entry = manifest.byId.get(sessionId);
+        return entry ? resolveExistingCodexRolloutPath(entry.filePath) : null;
+      },
+    }),
+  );
 
   // Local image serving (opt-in, restricted to allowed paths)
   if (options.allowedImagePaths && options.allowedImagePaths.length > 0) {

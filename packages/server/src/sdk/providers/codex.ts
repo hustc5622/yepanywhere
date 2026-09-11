@@ -68,6 +68,7 @@ import {
   normalizeCodexImageGenerationRecord,
   summarizeCodexImageGenerationResult,
 } from "../../codex/image-generation.js";
+import { codexImagePreviewUrl } from "../../codex/image-preview.js";
 import {
   getCodexMcpAppServerArgs,
   resolveCodexMcpThreadProfile,
@@ -5946,7 +5947,10 @@ export class CodexProvider implements AgentProvider {
                   type: "tool_use",
                   id: item.id,
                   name: "ViewImage",
-                  input: { path: publicPath },
+                  input: {
+                    path: publicPath,
+                    snapshotUrl: codexImagePreviewUrl(sessionId, item.id),
+                  },
                 },
               ],
             },

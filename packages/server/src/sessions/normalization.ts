@@ -72,6 +72,7 @@ import {
   normalizeCodexImageGenerationRecord,
   summarizeCodexImageGenerationResult,
 } from "../codex/image-generation.js";
+import { codexImagePreviewUrl } from "../codex/image-preview.js";
 import {
   type CodexToolCallContext,
   canonicalizeCodexToolName,
@@ -1386,6 +1387,26 @@ export function convertCodexEntries(
         responseUserClientIds.get(entry),
       );
       for (const msg of convertedMessages) {
+        if (
+          entry.payload.type === "function_call" &&
+          canonicalizeCodexToolName(entry.payload.name).split(".").pop() ===
+            "view_image"
+        ) {
+          const blocks = msg.message?.content;
+          if (Array.isArray(blocks)) {
+            for (const block of blocks) {
+              if (block.type === "tool_use" && isRecord(block.input)) {
+                block.input = {
+                  ...block.input,
+                  snapshotUrl: codexImagePreviewUrl(
+                    sessionId,
+                    entry.payload.call_id,
+                  ),
+                };
+              }
+            }
+          }
+        }
         if (entry.payload.type === "message" && entry.payload.id) {
           const asyncMessage = readCodexAsyncMessage(
             asyncItems.get(entry.payload.id),

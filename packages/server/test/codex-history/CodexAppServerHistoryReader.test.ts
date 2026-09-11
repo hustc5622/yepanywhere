@@ -698,7 +698,10 @@ describe("CodexAppServerHistoryReader", () => {
         type: "tool_use",
         id: "image-view",
         name: "ViewImage",
-        input: { path: "/tmp/project/screenshot.png" },
+        input: {
+          path: "/tmp/project/screenshot.png",
+          snapshotUrl: `/api/sessions/${forkedThread.id}/codex-images/image-view`,
+        },
       },
     ]);
     expect(JSON.stringify(result.messages)).not.toContain("data:image");

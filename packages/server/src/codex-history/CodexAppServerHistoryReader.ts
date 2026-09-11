@@ -10,6 +10,7 @@ import {
   publicCodexFileChanges,
   publicCodexFilePath,
 } from "../codex/file-change.js";
+import { codexImagePreviewUrl } from "../codex/image-preview.js";
 import { codexUserMessageIdentity } from "../codex/user-message-identity.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
 import type { ThreadItem } from "../sdk/providers/codex-protocol/generated/v2/ThreadItem.js";
@@ -1209,11 +1210,20 @@ function projectThreadItem(
         throw new CodexHistoryParityError();
       }
       const publicPath = publicCodexFilePath(item.path, { workspaceRoot });
-      return toolMessages(base, "ViewImage", { path: publicPath }, item.id, {
-        content: `Viewed image: ${publicPath}`,
-        isError: false,
-        completed: true,
-      });
+      return toolMessages(
+        base,
+        "ViewImage",
+        {
+          path: publicPath,
+          snapshotUrl: codexImagePreviewUrl(sessionId, item.id),
+        },
+        item.id,
+        {
+          content: `Viewed image: ${publicPath}`,
+          isError: false,
+          completed: true,
+        },
+      );
     }
     case "imageGeneration": {
       if (projectionMode === "strict") {

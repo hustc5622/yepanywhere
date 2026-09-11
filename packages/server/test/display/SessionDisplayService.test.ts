@@ -9,6 +9,7 @@ import { displayToolId } from "../../src/display/SessionDisplayReducer.js";
 import {
   type DisplaySourcePage,
   SessionDisplayService,
+  compactDisplayMessage,
 } from "../../src/display/SessionDisplayService.js";
 import type { Message } from "../../src/supervisor/types.js";
 const selection = { projectId: "project", sessionId: "session" };
@@ -56,6 +57,28 @@ function fixture(pollMs = 60_000) {
   };
 }
 describe("SessionDisplayService", () => {
+  it("retains per-call image previews in the compact live tool replay", () => {
+    const message = {
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "image",
+            name: "ViewImage",
+            input: {
+              path: "/tmp/phone.png",
+              snapshotUrl: "/api/sessions/session/codex-images/image",
+            },
+          },
+        ],
+      },
+    };
+    expect(compactDisplayMessage(message).message).toMatchObject(
+      message.message,
+    );
+  });
   it("conditionally reads only the bounded in-memory tail without revisiting history", async () => {
     const { service, source, push } = fixture();
     await service.subscribe(selection, vi.fn());

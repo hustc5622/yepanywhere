@@ -113,7 +113,7 @@ export function createLocalImageRoutes(deps: LocalImageDeps) {
 
       c.header("Content-Type", contentType);
       c.header("Content-Length", stats.size.toString());
-      c.header("Cache-Control", "private, max-age=3600");
+      c.header("Cache-Control", "private, no-store");
 
       return stream(c, async (s) => {
         const readable = createReadStream(resolvedPath);

@@ -5186,6 +5186,38 @@ describe("CodexProvider Event Normalization", () => {
     });
   });
 
+  it("attaches per-call recorded image URLs to both started and completed live views", () => {
+    const provider = createTestProvider() as unknown as {
+      convertItemToSDKMessages: (
+        item: unknown,
+        sessionId: string,
+        turnId: string,
+        sourceEvent: "item/started" | "item/completed",
+      ) => Array<Record<string, unknown>>;
+    };
+    for (const sourceEvent of ["item/started", "item/completed"] as const) {
+      const messages = provider.convertItemToSDKMessages(
+        { id: "image-1", type: "image_view", path: "/tmp/phone.png" },
+        "thread-1",
+        "turn-1",
+        sourceEvent,
+      );
+      expect(messages[0]?.message).toMatchObject({
+        content: [
+          {
+            type: "tool_use",
+            id: "image-1",
+            name: "ViewImage",
+            input: {
+              path: "/tmp/phone.png",
+              snapshotUrl: "/api/sessions/thread-1/codex-images/image-1",
+            },
+          },
+        ],
+      });
+    }
+  });
+
   it("normalizes no-match ripgrep exit code as non-error Grep result", () => {
     const provider = createTestProvider() as unknown as {
       convertItemToSDKMessages: (

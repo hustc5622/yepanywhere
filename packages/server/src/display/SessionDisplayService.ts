@@ -144,6 +144,7 @@ export function compactDisplayMessage(message: RecordValue): RecordValue {
             "file_path",
             "path",
             "url",
+            "snapshotUrl",
             "pattern",
             "query",
             "description",
