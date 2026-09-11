@@ -15,6 +15,7 @@ import { AppearanceSettings } from "./AppearanceSettings";
 import { DevelopmentSettings } from "./DevelopmentSettings";
 import { DevicesSettings } from "./DevicesSettings";
 import { EmulatorSettings } from "./EmulatorSettings";
+import { FeishuAuthorizationSettings } from "./FeishuAuthorizationSettings";
 import { LibrarySettings } from "./LibrarySettings";
 import { LifecycleWebhooksSettings } from "./LifecycleWebhooksSettings";
 import { LocalAccessSettings } from "./LocalAccessSettings";
@@ -26,6 +27,7 @@ import type { SettingsCategory } from "./types";
 
 // Map category IDs to their components
 const CATEGORY_COMPONENTS: Record<string, React.ComponentType> = {
+  "feishu-authorization": FeishuAuthorizationSettings,
   appearance: AppearanceSettings,
   model: ModelSettings,
   "agent-context": AgentContextSettings,

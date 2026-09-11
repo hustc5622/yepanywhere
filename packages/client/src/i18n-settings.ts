@@ -111,6 +111,12 @@ export function getSettingsCategories(
       description: t("settingsProvidersDescription"),
     },
     {
+      id: "feishu-authorization",
+      label: t("feishuAuthTitle"),
+      icon: "🔗",
+      description: t("feishuAuthDescription"),
+    },
+    {
       id: "source-control",
       label: t("settingsSourceControlTitle"),
       icon: "⑂",
