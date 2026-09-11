@@ -35,6 +35,7 @@ export type {
   FeishuDomain,
   FeishuGroupSessionMode,
   FeishuPermissionMode,
+  FeishuProxyMode,
   FeishuReplyMode,
   FeishuSecretRef,
   FeishuSecretSource,
@@ -810,3 +811,4 @@ export type {
   SessionDisplayToolDetail,
   SessionDisplayToolOutput,
 } from "./session-display.js";
+export * from "./feishu-user-auth.js";

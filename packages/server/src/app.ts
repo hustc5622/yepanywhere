@@ -87,6 +87,7 @@ import {
 import { createDevRoutes } from "./routes/dev.js";
 import { createDeviceRoutes } from "./routes/devices.js";
 import { createFeishuChannelRoutes } from "./routes/feishu-channel.js";
+import { createFeishuUserAuthRoutes } from "./routes/feishu-user-auth.js";
 import { createFilesRoutes } from "./routes/files.js";
 import { createGitStatusRoutes } from "./routes/git-status.js";
 import { createGlobalSessionsRoutes } from "./routes/global-sessions.js";
@@ -1557,6 +1558,10 @@ export function createApp(options: AppOptions): AppResult {
   }
 
   if (options.feishuChannelService) {
+    app.route(
+      "/api/auth/feishu",
+      createFeishuUserAuthRoutes(options.feishuChannelService),
+    );
     app.route(
       "/api/channels/feishu",
       createFeishuChannelRoutes({

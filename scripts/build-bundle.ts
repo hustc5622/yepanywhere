@@ -418,6 +418,14 @@ step("Bundle Pi RPC extension", () => {
   log("  Pi RPC extension bundled into staging");
 });
 
+step("Bundle Yep Feishu MCP", () => {
+  fs.cpSync(
+    path.join(SERVER_PACKAGE, "resources/feishu"),
+    path.join(STAGING_DIR, "resources/feishu"),
+    { recursive: true },
+  );
+});
+
 // Generate the bundle package.json in staging without modifying the workspace.
 step("Generate bundle package.json", () => {
   log("Generating bundle package.json...");

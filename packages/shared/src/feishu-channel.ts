@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { FeishuUserAuthConfigSchema } from "./feishu-user-auth.js";
 import type { CodexMcpMode, PermissionMode } from "./types.js";
 
 export const FeishuDomainSchema = z.enum(["feishu", "lark"]);
@@ -76,6 +77,7 @@ export const FeishuAccountConfigSchema = z.object({
     .default("standard"),
   defaultPermissionMode: FeishuPermissionModeSchema.default("default"),
   replyMode: FeishuReplyModeSchema.default("card"),
+  userAuth: FeishuUserAuthConfigSchema.optional(),
 });
 
 export type FeishuAccountConfig = z.infer<typeof FeishuAccountConfigSchema>;
@@ -158,6 +160,7 @@ export const FeishuSessionBindingSchema = z.object({
   updatedAt: z.iso.datetime(),
   lastInboundMessageId: z.string().min(1).max(512).optional(),
   lastInboundSenderOpenId: z.string().min(1).max(512).optional(),
+  userAuthOwnerOpenId: z.string().min(1).max(512).optional(),
 });
 
 export interface FeishuSessionBinding

@@ -32,6 +32,61 @@ export function createFeishuChannelRoutes(
   });
 
   app.get("/accounts", (c) => c.json({ accounts: service.listAccounts() }));
+  app.get("/user-auth", async (c) => {
+    const users = [];
+    for (const account of service.configStore.list()) {
+      if (!account.enabled || !account.userAuth?.enabled) continue;
+      for (const user of new Set([
+        ...account.allowedUsers,
+        ...account.adminUsers,
+      ]))
+        users.push(await service.userAuth.status(account.id, user));
+    }
+    return c.json({ users });
+  });
+  app.put("/accounts/:accountId/user-auth", async (c) => {
+    const account = service.configStore.get(c.req.param("accountId"));
+    if (!account) return c.json({ error: "account_not_found" }, 404);
+    const body = await readJsonObject(c.req.raw);
+    const parsed = FeishuAccountConfigSchema.safeParse({
+      ...account,
+      userAuth: body,
+    });
+    if (!parsed.success)
+      return c.json({ error: "invalid_user_auth_config" }, 400);
+    return c.json({ account: await service.upsertAccount(parsed.data) });
+  });
+  app.post("/accounts/:accountId/user-auth/:user/action", async (c) => {
+    try {
+      const body = await readJsonObject(c.req.raw);
+      const account = c.req.param("accountId");
+      const user = c.req.param("user");
+      if (body?.action === "cancel") {
+        await service.userAuth.cancel(account, user);
+        return c.json({ success: true });
+      }
+      if (body?.action === "connect")
+        return c.json(await service.userAuth.begin(account, user));
+      if (
+        body?.action === "mcp-config" &&
+        typeof body.workspace === "string" &&
+        service.mcpGateway
+      )
+        return c.json({
+          mcpServer: await service.mcpGateway.connectorConfig(
+            account,
+            user,
+            body.workspace,
+          ),
+        });
+      return c.json({ error: "invalid_action" }, 400);
+    } catch (error) {
+      return c.json(
+        { error: error instanceof Error ? error.message : String(error) },
+        400,
+      );
+    }
+  });
   app.get("/status", (c) => c.json({ accounts: service.listStatuses() }));
   app.get("/doctor", (c) => c.json(service.doctor()));
   app.get("/diagnostics", (c) => {

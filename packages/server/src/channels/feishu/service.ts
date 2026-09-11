@@ -22,6 +22,8 @@ import { FeishuSecretStore } from "./secret-store.js";
 import { FeishuStatusRegistry } from "./status.js";
 import type { FeishuTransportFactory } from "./transport.js";
 import type { FeishuBotIdentity } from "./transport.js";
+import { FeishuMcpGateway } from "./user-auth/mcp-gateway.js";
+import { FeishuUserAuthService } from "./user-auth/service.js";
 
 export interface FeishuInboundEnvelope {
   account: FeishuAccountConfig;
@@ -45,6 +47,7 @@ export interface FeishuMessageMutationEnvelope {
 
 export interface FeishuChannelServiceOptions {
   dataDir: string;
+  localServerUrl?: string;
   configStore?: FeishuAccountConfigStore;
   secretStore?: FeishuSecretStore;
   statusRegistry?: FeishuStatusRegistry;
@@ -137,6 +140,13 @@ export interface FeishuMessageMutationPipelineDiagnostic {
 }
 
 export class FeishuChannelService {
+  readonly userAuth: FeishuUserAuthService;
+  readonly mcpGateway?: FeishuMcpGateway;
+  private authorizationHandler?: (
+    accountId: string,
+    user: string,
+    url?: string,
+  ) => Promise<boolean>;
   readonly configStore: FeishuAccountConfigStore;
   readonly secretStore: FeishuSecretStore;
   readonly statusRegistry: FeishuStatusRegistry;
@@ -170,6 +180,39 @@ export class FeishuChannelService {
     this.onMessage = options.onMessage;
     this.onMessageMutation = options.onMessageMutation;
     this.onCardAction = options.onCardAction;
+    this.userAuth = new FeishuUserAuthService({
+      dataDir: options.dataDir,
+      accounts: () => this.configStore.list(),
+      secret: (account) => this.secretStore.resolve(account.secretRef),
+      onAuthorized: async (accountId, user) => {
+        await this.authorizationHandler?.(accountId, user);
+      },
+    });
+    if (options.localServerUrl)
+      this.mcpGateway = new FeishuMcpGateway({
+        dataDir: options.dataDir,
+        serverUrl: options.localServerUrl,
+        auth: this.userAuth,
+        secret: (accountId) => {
+          const account = this.configStore.get(accountId);
+          return account
+            ? this.secretStore.resolve(account.secretRef)
+            : undefined;
+        },
+        onAuthRequired: (accountId, user, url) =>
+          this.authorizationHandler?.(accountId, user, url) ??
+          Promise.resolve(false),
+      });
+  }
+
+  setAuthorizationHandler(
+    handler: (
+      accountId: string,
+      user: string,
+      url?: string,
+    ) => Promise<boolean>,
+  ) {
+    this.authorizationHandler = handler;
   }
 
   async initialize(): Promise<void> {
@@ -182,6 +225,7 @@ export class FeishuChannelService {
       ]);
       this.initialized = true;
       await this.reconcile();
+      this.userAuth.start();
     } catch {
       this.initializationErrorCode = "STORE_INITIALIZATION_FAILED";
     }
@@ -498,6 +542,7 @@ export class FeishuChannelService {
   }
 
   async shutdown(): Promise<void> {
+    await this.userAuth.shutdown();
     this.shuttingDown = true;
     await this.reconcileChain.catch(() => undefined);
     const connections = [...this.connections.values()];

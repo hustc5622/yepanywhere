@@ -204,7 +204,7 @@ export class LarkSdkFeishuTransport implements FeishuTransport {
 
 let sharedDirectHttpInstance: Lark.HttpInstance | undefined;
 
-function directLarkHttpInstance(): Lark.HttpInstance {
+export function directLarkHttpInstance(): Lark.HttpInstance {
   if (sharedDirectHttpInstance) return sharedDirectHttpInstance;
 
   // Keep proxy selection scoped to the account. Mutating the SDK's shared Axios
@@ -245,7 +245,7 @@ function directLarkHttpInstance(): Lark.HttpInstance {
   return sharedDirectHttpInstance;
 }
 
-function shouldBypassProxy(
+export function shouldBypassProxy(
   account: FeishuTransportFactoryInput["account"],
 ): boolean {
   if (account.proxyMode === "direct") return true;

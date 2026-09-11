@@ -8,6 +8,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 ## [Unreleased]
 
 ### Added
+- 飞书用户授权由 Yep 独立管理：新增 OAuth + PKCE 授权入口、后台续期、跨进程刷新锁、令牌失效分类、飞书授权卡片和中英文设置页。原生 Lark MCP 保留 38 个工具入口并随 Yep 打包，不再运行 MLB 或读取旧机器人 token 文件；渠道会话使用受管配置，Desktop/CLI 提供显式迁移工具。授权等待只发生在业务请求发送前，取消后不重放写操作。
 - Codex 的 DeepSeek 模型源新增 DeepSeek V4.1 Flash（`deepseek-flash`），支持图片输入、1M 上下文与 low/high/max 推理档位，并作为新建会话时的首选 DeepSeek 模型。已下线的 `deepseek-v4-flash`、`deepseek-v4-flash-vision-exp` 从选择器移除，但仍保留在模型目录中，旧会话续聊仍能正确路由到 DeepSeek 而不是 OpenAI；`deepseek-v4-pro` 保留并标注将于 2026-09-14 起由 V4.1 Flash 承接。Pi 等走 LLM gateway 的 provider 在网关上架该模型后即可直接选用。
 - Codex 会话执行中新增“回复并继续”作为默认发送操作（桌面 Enter），通过现有 steering 通道提交异步问题的回答或补充；保留独立的“打断并发送”和“排队”（Ctrl+Enter），同步更新中英文提示及移动端按钮换行。
 - APK 侧边栏新增 Home、Mini 服务快捷切换，分别显示最近 24 小时已结束且未读的会话数；打开侧边栏时独立查询两端并每 15 秒刷新，区分离线与需要登录，切换服务不清除未读。Inbox 新增分页截断前的完整计数，兼容旧服务时对可能截断的计数显示 `+`。

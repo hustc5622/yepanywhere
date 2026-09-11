@@ -108,6 +108,8 @@ DELETE /bindings/:scopeKey
 
 连接失败采用带 jitter 的有界指数退避。REST 429/平台频控按 API 类别分别退避；任何重试都不得再次创建 provider turn。CardKit 更新失败走 durable outbox 或 plain fallback，不改变 canonical turn 的终态。
 
+用户文档授权与机器人消息连接分别管理。启用、回调配置、原生 MCP 和迁移步骤见 [Yep 原生飞书用户授权与 MCP](./feishu-user-authorization.md)。
+
 ## 用户命令
 
 ```text
@@ -121,6 +123,9 @@ DELETE /bindings/:scopeKey
 /project use <configured-name>
 /mode <allowed-mode>
 /doctor
+/auth
+/auth status
+/auth cancel
 /codex <supported-action>
 ```
 
