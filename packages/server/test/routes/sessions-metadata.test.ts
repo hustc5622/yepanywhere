@@ -1671,7 +1671,8 @@ describe("Sessions metadata route", () => {
       undefined,
       expect.objectContaining({
         providerName: "codex",
-        model: undefined,
+        // Resuming without an explicit model keeps the session's last model.
+        model: "deepseek-v4-flash",
         codexModelProvider: "deepseek",
       }),
     );
