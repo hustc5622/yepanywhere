@@ -55,6 +55,13 @@ export interface CodexModelSourceCatalogModel {
   }>;
   /** Provider-native compatibility mapping for legacy/client tier names. */
   reasoningEffortAliases?: Readonly<Record<string, string>>;
+  /**
+   * Retired upstream slug: still accepted by the provider (and therefore still
+   * valid for resuming existing sessions), but no longer offered in the
+   * new-session picker. Keep such entries in `allowedModelIds` so
+   * `findModelSource` can still route an old session back to this source.
+   */
+  hidden?: boolean;
 }
 
 export interface CodexModelSourceCatalog {
@@ -127,27 +134,63 @@ const CODEX_MODEL_SOURCE_DEFINITIONS: Record<
     catalog: {
       // Bumped when the managed catalog contents change so the materialized
       // `<dataDir>/codex-model-catalogs/<managedId>.json` file is refreshed.
-      managedId: "deepseek-codex-2026-08-21",
+      managedId: "deepseek-codex-2026-09-10",
       provenance: {
         upstreamUrl:
           "https://api-docs.deepseek.com/zh-cn/quick_start/agent_integrations/codex",
-        fetchedOn: "2026-08-21",
+        fetchedOn: "2026-09-10",
         minimalClientVersion: "0.144.0",
       },
-      // DeepSeek V4 Flash, V4 Pro, and the experimental V4 Flash Vision model
-      // over the Codex Responses API. Only the Vision model accepts images.
-      // The official catalog advertises low/high/max; legacy medium and xhigh
-      // requests map to high (see design §10.3).
+      // DeepSeek-V4.1-Flash (`deepseek-flash`) is the current model and the
+      // only one the provider still lists; it accepts images. The retired
+      // `deepseek-v4-flash*` slugs stay allowed (upstream still serves them
+      // via V4.1 Flash) so existing sessions resume, but they are hidden from
+      // the picker. `deepseek-v4-pro` is being retired in an orderly manner:
+      // from 2026-09-14 12:00 CST its requests are routed to V4.1 Flash until
+      // a V4.1 Pro ships. The official catalog advertises low/high/max; legacy
+      // medium and xhigh requests map to high (see design §10.3).
       allowedModelIds: [
-        "deepseek-v4-flash",
+        "deepseek-flash",
         "deepseek-v4-pro",
+        "deepseek-v4-flash",
         "deepseek-v4-flash-vision-exp",
       ],
       models: [
         {
-          slug: "deepseek-v4-flash",
-          displayName: "DeepSeek V4 Flash",
-          description: "DeepSeek V4 Flash via the Codex Responses API.",
+          slug: "deepseek-flash",
+          displayName: "DeepSeek V4.1 Flash",
+          description:
+            "DeepSeek-V4.1-Flash with image input via the Codex Responses API.",
+          contextWindow: 1_048_576,
+          maxOutputTokens: 384_000,
+          inputModalities: ["text", "image"],
+          supportsImageDetailOriginal: true,
+          defaultReasoningEffort: "high",
+          supportedReasoningEfforts: [
+            {
+              reasoningEffort: "low",
+              description: "Fast responses with lighter reasoning",
+            },
+            {
+              reasoningEffort: "high",
+              description: "Extra high reasoning depth for complex problems",
+            },
+            {
+              reasoningEffort: "max",
+              description: "Maximum reasoning depth for the hardest problems",
+            },
+          ],
+          reasoningEffortAliases: {
+            minimal: "low",
+            medium: "high",
+            xhigh: "high",
+          },
+        },
+        {
+          slug: "deepseek-v4-pro",
+          displayName: "DeepSeek V4 Pro",
+          description:
+            "DeepSeek V4 Pro via the Codex Responses API. Being retired: from 2026-09-14 requests are served by V4.1 Flash.",
           contextWindow: 1_048_576,
           maxOutputTokens: 384_000,
           inputModalities: ["text"],
@@ -164,10 +207,13 @@ const CODEX_MODEL_SOURCE_DEFINITIONS: Record<
             xhigh: "high",
           },
         },
+        // Retired upstream; kept for resume compatibility only.
         {
-          slug: "deepseek-v4-pro",
-          displayName: "DeepSeek V4 Pro",
-          description: "DeepSeek V4 Pro via the Codex Responses API.",
+          slug: "deepseek-v4-flash",
+          displayName: "DeepSeek V4 Flash (retired)",
+          description:
+            "Retired DeepSeek V4 Flash slug; requests are served by V4.1 Flash.",
+          hidden: true,
           contextWindow: 1_048_576,
           maxOutputTokens: 384_000,
           inputModalities: ["text"],
@@ -186,9 +232,10 @@ const CODEX_MODEL_SOURCE_DEFINITIONS: Record<
         },
         {
           slug: "deepseek-v4-flash-vision-exp",
-          displayName: "DeepSeek V4 Flash Vision (Experimental)",
+          displayName: "DeepSeek V4 Flash Vision (retired)",
           description:
-            "Experimental DeepSeek V4 Flash with image input via the Codex Responses API.",
+            "Retired experimental DeepSeek V4 Flash Vision slug; requests are served by V4.1 Flash.",
+          hidden: true,
           contextWindow: 1_048_576,
           maxOutputTokens: 384_000,
           inputModalities: ["text", "image"],
@@ -468,7 +515,10 @@ export class CodexModelSourceRegistry {
     const catalog = definition.catalog;
     if (!catalog) return [];
     return catalog.models
-      .filter((model) => catalog.allowedModelIds.includes(model.slug))
+      .filter(
+        (model) =>
+          !model.hidden && catalog.allowedModelIds.includes(model.slug),
+      )
       .map((model) => ({
         id: `${definition.id}/${model.slug}`,
         modelProvider: definition.id,
@@ -577,7 +627,10 @@ function buildCodexCatalogJson(catalog: CodexModelSourceCatalog): {
         }),
       ),
       shell_type: "default",
-      visibility: "list",
+      // Retired slugs stay in the catalog so resuming an existing session can
+      // still resolve their metadata, but Codex must not list them in its own
+      // picker. Model lookup by slug ignores visibility, so "hide" is safe.
+      visibility: model.hidden ? "hide" : "list",
       supported_in_api: true,
       priority: index,
       availability_nux: null,

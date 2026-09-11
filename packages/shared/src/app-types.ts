@@ -389,6 +389,9 @@ const LLM_GATEWAY_MODEL_LIMIT_RULES: ReadonlyArray<
   // ByteDance Doubao Seed 2.x — 256K context, 128K output (all variants).
   ["doubao-seed", { context: 256_000, output: 128_000 }],
   // DeepSeek V4 Pro/Flash — 1M context, 384K output.
+  // `deepseek-flash` is DeepSeek-V4.1-Flash; longest-prefix matching keeps it
+  // ahead of the generic `deepseek` fallback below.
+  ["deepseek-flash", { context: 1_048_576, output: 384_000 }],
   ["deepseek-v4", { context: 1_000_000, output: 384_000 }],
   ["deepseek", { context: 128_000, output: 64_000 }],
   // Zhipu GLM — 5.2 is 1M, 5.1 and earlier are 200K; 131K output.

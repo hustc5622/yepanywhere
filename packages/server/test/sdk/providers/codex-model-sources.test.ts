@@ -57,10 +57,14 @@ describe("CodexModelSourceRegistry", () => {
       registry.assertModelSelectable("deepseek", "gpt-5.6-sol"),
     ).toThrowError(/not valid/i);
     expect(() =>
-      registry.assertModelSelectable("deepseek", "deepseek-v4-flash"),
+      registry.assertModelSelectable("deepseek", "deepseek-flash"),
     ).not.toThrow();
     expect(() =>
       registry.assertModelSelectable("deepseek", "deepseek-v4-pro"),
+    ).not.toThrow();
+    // Retired slugs stay selectable so existing sessions still resume.
+    expect(() =>
+      registry.assertModelSelectable("deepseek", "deepseek-v4-flash"),
     ).not.toThrow();
     expect(() =>
       registry.assertModelSelectable(
@@ -72,7 +76,7 @@ describe("CodexModelSourceRegistry", () => {
 
   it("blocks selecting a source that is unavailable", () => {
     expect(() =>
-      withoutKey().assertModelSelectable("deepseek", "deepseek-v4-flash"),
+      withoutKey().assertModelSelectable("deepseek", "deepseek-flash"),
     ).toThrowError(/unavailable/i);
   });
 
@@ -125,48 +129,66 @@ describe("CodexModelSourceRegistry", () => {
     const parsed = JSON.parse(readFileSync(catalogPath as string, "utf8"));
     expect(parsed.models).toEqual([
       expect.objectContaining({
-        slug: "deepseek-v4-flash",
-        context_window: 1_048_576,
-        input_modalities: ["text"],
-        supports_image_detail_original: false,
-        default_reasoning_level: "high",
-        supported_reasoning_levels: [
-          { effort: "low", description: "Fast responses" },
-          { effort: "high", description: "Deeper reasoning" },
-          { effort: "max", description: "Maximum reasoning" },
-        ],
-      }),
-      expect.objectContaining({
-        slug: "deepseek-v4-pro",
-        context_window: 1_048_576,
-        input_modalities: ["text"],
-        supports_image_detail_original: false,
-        default_reasoning_level: "high",
-        supported_reasoning_levels: [
-          { effort: "low", description: "Fast responses" },
-          { effort: "high", description: "Deeper reasoning" },
-          { effort: "max", description: "Maximum reasoning" },
-        ],
-      }),
-      expect.objectContaining({
-        slug: "deepseek-v4-flash-vision-exp",
+        slug: "deepseek-flash",
+        visibility: "list",
         context_window: 1_048_576,
         input_modalities: ["text", "image"],
         supports_image_detail_original: true,
         default_reasoning_level: "high",
         supported_reasoning_levels: [
+          {
+            effort: "low",
+            description: "Fast responses with lighter reasoning",
+          },
+          {
+            effort: "high",
+            description: "Extra high reasoning depth for complex problems",
+          },
+          {
+            effort: "max",
+            description: "Maximum reasoning depth for the hardest problems",
+          },
+        ],
+      }),
+      expect.objectContaining({
+        slug: "deepseek-v4-pro",
+        visibility: "list",
+        context_window: 1_048_576,
+        input_modalities: ["text"],
+        supports_image_detail_original: false,
+        default_reasoning_level: "high",
+        supported_reasoning_levels: [
           { effort: "low", description: "Fast responses" },
           { effort: "high", description: "Deeper reasoning" },
           { effort: "max", description: "Maximum reasoning" },
         ],
+      }),
+      // Retired slugs stay in the catalog (so resume can resolve their
+      // metadata) but must not be listed in Codex's own picker.
+      expect.objectContaining({
+        slug: "deepseek-v4-flash",
+        visibility: "hide",
+        context_window: 1_048_576,
+        input_modalities: ["text"],
+        supports_image_detail_original: false,
+      }),
+      expect.objectContaining({
+        slug: "deepseek-v4-flash-vision-exp",
+        visibility: "hide",
+        context_window: 1_048_576,
+        input_modalities: ["text", "image"],
+        supports_image_detail_original: true,
       }),
     ]);
   });
 
   it("maps a model slug back to its owning custom source", () => {
     const registry = withKey();
-    expect(registry.findModelSource("deepseek-v4-flash")).toBe("deepseek");
+    expect(registry.findModelSource("deepseek-flash")).toBe("deepseek");
     expect(registry.findModelSource("deepseek-v4-pro")).toBe("deepseek");
+    // Retired slugs must still route to DeepSeek, not the built-in OpenAI
+    // source, so old sessions resume against the right provider.
+    expect(registry.findModelSource("deepseek-v4-flash")).toBe("deepseek");
     expect(registry.findModelSource("deepseek-v4-flash-vision-exp")).toBe(
       "deepseek",
     );
@@ -175,28 +197,23 @@ describe("CodexModelSourceRegistry", () => {
     expect(registry.findModelSource(undefined)).toBeUndefined();
   });
 
-  it("exposes catalog models as composite picker ModelInfo", () => {
+  it("offers only current models in the picker", () => {
     const registry = withKey();
     const infos = registry.getCatalogModelInfos(registry.require("deepseek"));
     expect(infos).toEqual([
       expect.objectContaining({
-        id: "deepseek/deepseek-v4-flash",
+        id: "deepseek/deepseek-flash",
         modelProvider: "deepseek",
-        providerModelId: "deepseek-v4-flash",
-        contextWindow: 1_048_576,
-      }),
-      expect.objectContaining({
-        id: "deepseek/deepseek-v4-pro",
-        modelProvider: "deepseek",
-        providerModelId: "deepseek-v4-pro",
+        providerModelId: "deepseek-flash",
+        name: "DeepSeek V4.1 Flash",
         contextWindow: 1_048_576,
         maxOutputTokens: 384_000,
         defaultReasoningEffort: "high",
       }),
       expect.objectContaining({
-        id: "deepseek/deepseek-v4-flash-vision-exp",
+        id: "deepseek/deepseek-v4-pro",
         modelProvider: "deepseek",
-        providerModelId: "deepseek-v4-flash-vision-exp",
+        providerModelId: "deepseek-v4-pro",
         contextWindow: 1_048_576,
         maxOutputTokens: 384_000,
         defaultReasoningEffort: "high",
@@ -208,47 +225,35 @@ describe("CodexModelSourceRegistry", () => {
     const registry = withKey();
     // DeepSeek advertises low/high/max; supported tiers pass through.
     expect(
-      registry.resolveReasoningEffort("deepseek", "deepseek-v4-flash", "low"),
+      registry.resolveReasoningEffort("deepseek", "deepseek-flash", "low"),
     ).toBe("low");
     expect(
-      registry.resolveReasoningEffort("deepseek", "deepseek-v4-flash", "high"),
+      registry.resolveReasoningEffort("deepseek", "deepseek-flash", "high"),
     ).toBe("high");
     expect(
       registry.resolveReasoningEffort("deepseek", "deepseek-v4-pro", "max"),
     ).toBe("max");
     expect(
-      registry.resolveReasoningEffort(
-        "deepseek",
-        "deepseek-v4-flash-vision-exp",
-        "max",
-      ),
+      registry.resolveReasoningEffort("deepseek", "deepseek-v4-flash", "max"),
     ).toBe("max");
     // The official compatibility table maps medium/xhigh to high.
     expect(
-      registry.resolveReasoningEffort(
-        "deepseek",
-        "deepseek-v4-flash",
-        "medium",
-      ),
+      registry.resolveReasoningEffort("deepseek", "deepseek-flash", "medium"),
     ).toBe("high");
     expect(
-      registry.resolveReasoningEffort("deepseek", "deepseek-v4-flash", "xhigh"),
+      registry.resolveReasoningEffort("deepseek", "deepseek-flash", "xhigh"),
     ).toBe("high");
     // Unknown higher tiers clamp to the highest advertised tier.
     expect(
-      registry.resolveReasoningEffort("deepseek", "deepseek-v4-flash", "ultra"),
+      registry.resolveReasoningEffort("deepseek", "deepseek-flash", "ultra"),
     ).toBe("max");
     // Unknown values fall back to the model's default.
     expect(
-      registry.resolveReasoningEffort("deepseek", "deepseek-v4-flash", "bogus"),
+      registry.resolveReasoningEffort("deepseek", "deepseek-flash", "bogus"),
     ).toBe("high");
     // Missing request is passed through (no effort to resolve).
     expect(
-      registry.resolveReasoningEffort(
-        "deepseek",
-        "deepseek-v4-flash",
-        undefined,
-      ),
+      registry.resolveReasoningEffort("deepseek", "deepseek-flash", undefined),
     ).toBeUndefined();
   });
 

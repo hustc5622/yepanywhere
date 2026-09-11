@@ -104,6 +104,8 @@ const DEFAULT_GATEWAY_MODEL_PREFIXES = [
   "kimi-k3",
   "minimax-m3",
   "deepseek-v4",
+  // DeepSeek-V4.1-Flash ships under the un-versioned `deepseek-flash` slug.
+  "deepseek-flash",
 ];
 
 const CHANNEL_ID_PATTERN = /^[a-z0-9][a-z0-9_-]*$/;
