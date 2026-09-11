@@ -95,6 +95,54 @@ describe("Codex streaming reader windows", () => {
     expect(loaded?.pagination?.rolloutRevision).toBeTruthy();
   });
 
+  it("reports the latest model in summaries and bounded session reads", async () => {
+    const entries = [
+      meta(sessionId),
+      { type: "turn_context", payload: { model: "gpt-5.6-sol" } },
+      message("user", "first", 1),
+      message("assistant", "first reply", 2),
+      {
+        type: "turn_context",
+        payload: { model: "gpt-6-astra", effort: "high" },
+      },
+      message("user", "continue", 3),
+      message("assistant", "second reply", 4),
+    ];
+    await writeFile(
+      join(sessionsDir, `rollout-${sessionId}.jsonl`),
+      `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+    );
+    const reader = new CodexSessionReader({ sessionsDir });
+    expect(await reader.getSessionSummary(sessionId, projectId)).toMatchObject({
+      model: "gpt-6-astra",
+      reasoningEffort: "high",
+    });
+    expect(
+      await reader.getSession(sessionId, projectId, undefined, {
+        maxMessages: 1,
+      }),
+    ).toMatchObject({ summary: { model: "gpt-6-astra" } });
+
+    // A rolled-back model switch must not become the resume model. This also
+    // exercises the full branch-aware summary path instead of the stream scan.
+    entries.push(
+      message("user", "discard this turn", 5),
+      { type: "turn_context", payload: { model: "gpt-5.6-sol" } },
+      message("assistant", "discard this reply", 6),
+      {
+        type: "event_msg",
+        payload: { type: "thread_rolled_back", num_turns: 1 },
+      },
+    );
+    await writeFile(
+      join(sessionsDir, `rollout-${sessionId}.jsonl`),
+      `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+    );
+    expect(await reader.getSessionSummary(sessionId, projectId)).toMatchObject({
+      model: "gpt-6-astra",
+    });
+  });
+
   it("rejects a cursor from a replaced rollout revision", async () => {
     const reader = new CodexSessionReader({ sessionsDir });
     const first = await reader.getSession(sessionId, projectId, undefined, {

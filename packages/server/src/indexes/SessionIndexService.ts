@@ -103,12 +103,14 @@ export interface SessionIndexState {
   // v12 persists question coverage so a bounded Codex summary cannot be
   // mistaken for a complete directory. It also rebuilds v11 entries whose
   // question ids were already byte-offset stable but lacked this field.
-  version: 13;
+  version: 14;
   projectId: string;
   sessions: Record<string, CachedSessionSummary>;
 }
 
-const CURRENT_VERSION = 13;
+// Rebuild persisted summaries that recorded the first Codex model instead of
+// the latest one; they are now used to restore the model on resume.
+const CURRENT_VERSION = 14;
 
 function needsPiTurnStatusMigration(index: SessionIndexState): boolean {
   return Object.values(index.sessions).some(

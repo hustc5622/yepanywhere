@@ -1060,7 +1060,8 @@ function projectSystemNotice(
       id: messageId,
       kind: "warning",
       message: boundedText(
-        typeof message.content === "string" ? message.content : "Warning",
+        getTextContent(message.message?.content ?? message.content) ||
+          "Warning",
       ),
       ...(timestamp ? { timestamp } : {}),
     };

@@ -11,6 +11,7 @@ import {
 } from "../../../client/src/lib/preprocessMessages.ts";
 import type { Message as ClientMessage } from "../../../client/src/types.ts";
 import type { RenderItem } from "../../../client/src/types/renderItems.ts";
+import { compactDisplayMessage } from "../../src/display/SessionDisplayService.js";
 import {
   buildSessionDisplayProjection,
   decodeSessionDisplayDetailRef,
@@ -28,6 +29,50 @@ function visibleOracle(messages: readonly Message[]): RenderItem[] {
     (item) => !isSessionInspectorOnlyItem(item),
   );
 }
+
+it.each(["string", "blocks"])(
+  "preserves %s warning text through compact display and legacy rendering",
+  (format) => {
+    const text =
+      "This session was recorded with model `gpt-6-astra` but is resuming with `gpt-5.6-sol`.";
+    const raw = {
+      uuid: "model-warning",
+      type: "system",
+      subtype: "warning",
+      content: format === "string" ? text : [{ type: "text", text }],
+    };
+    const compact = compactDisplayMessage(raw) as unknown as Message;
+    // Live display compaction moves the body to message.content.
+    expect(compact.content).toBeUndefined();
+    for (const warning of [raw as Message, compact]) {
+      const projection = buildSessionDisplayProjection({
+        sessionId: "warning-session",
+        revision: "warning-revision",
+        messages: [
+          { uuid: "user", type: "user", content: "continue" },
+          warning,
+        ],
+        questionCoverage: "complete",
+      });
+      expect(
+        projection.page.turns.flatMap((turn) => turn.segments),
+      ).toContainEqual(
+        expect.objectContaining({
+          type: "notice",
+          kind: "warning",
+          message: text,
+        }),
+      );
+      expect(visibleOracle([warning])).toContainEqual(
+        expect.objectContaining({
+          type: "system",
+          subtype: "warning",
+          content: text,
+        }),
+      );
+    }
+  },
+);
 
 function projectedText(messages: readonly Message[]): string[] {
   const projection = buildSessionDisplayProjection({

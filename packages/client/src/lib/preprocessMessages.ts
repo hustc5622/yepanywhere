@@ -652,6 +652,19 @@ function processMessage(
       subtype === "turn_aborted" ||
       subtype === "warning"
     ) {
+      const content = msg.message?.content ?? msg.content;
+      const text =
+        typeof content === "string"
+          ? content
+          : Array.isArray(content)
+            ? content
+                .flatMap((block) =>
+                  block.type === "text" && typeof block.text === "string"
+                    ? [block.text]
+                    : [],
+                )
+                .join("\n")
+            : "";
       const systemItem: SystemItem = {
         type: "system",
         id: msgId,
@@ -659,11 +672,7 @@ function processMessage(
         content:
           subtype === "turn_aborted"
             ? CODEX_TURN_ABORTED_DISPLAY_TEXT
-            : typeof msg.content === "string"
-              ? msg.content
-              : subtype === "warning"
-                ? "Warning"
-                : "Context compacted",
+            : text || (subtype === "warning" ? "Warning" : "Context compacted"),
         sourceMessages: [msg],
       };
       items.push(systemItem);

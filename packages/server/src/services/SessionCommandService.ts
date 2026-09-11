@@ -967,7 +967,11 @@ export class SessionCommandService {
 
     let sessionSummary: SessionSummary | null = null;
     let providerName = metadataProvider ?? body.provider;
-    if (!providerName || !parsedReasoningEffort.reasoningEffort) {
+    if (
+      !providerName ||
+      providerName === "codex" ||
+      !parsedReasoningEffort.reasoningEffort
+    ) {
       const sessionSummaryResult = await findSessionSummaryAcrossProviders(
         project,
         sessionId,
@@ -991,7 +995,13 @@ export class SessionCommandService {
       );
     }
 
-    const model = resolveSessionModel(body.model, providerName);
+    // Codex treats provider/effort overrides as model overrides too, disabling
+    // native history restoration. Pin the last recorded model on ordinary
+    // resume, while preserving an explicit model selection. The UI's "default"
+    // token means no named model was selected, not a switch to global defaults.
+    const model =
+      resolveSessionModel(body.model, providerName) ??
+      (providerName === "codex" ? sessionSummary?.model : undefined);
     let effectiveCodexForkExcludedTurns = parsedRollbackNumTurns.value;
     if (
       providerName === "codex" &&

@@ -837,7 +837,7 @@ export class CodexSessionReader implements ISessionReader {
       if (entry.type === "turn_context") {
         firstTurnContext ??= entry;
         latestTurnContext = entry;
-        if (!model && entry.payload.model) model = entry.payload.model;
+        if (entry.payload.model) model = entry.payload.model;
         continue;
       }
 
@@ -2768,9 +2768,10 @@ export class CodexSessionReader implements ISessionReader {
   private extractModel(
     entries: readonly CodexSessionEntry[],
   ): string | undefined {
-    // Find first turn_context entry with a model
-    for (const entry of entries) {
-      if (entry.type === "turn_context" && entry.payload.model) {
+    // Resume uses the latest model, including deliberate switches mid-session.
+    for (let i = entries.length - 1; i >= 0; i--) {
+      const entry = entries[i];
+      if (entry?.type === "turn_context" && entry.payload.model) {
         return entry.payload.model;
       }
     }

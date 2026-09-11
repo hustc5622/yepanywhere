@@ -12,6 +12,7 @@ import type {
   RuntimeSessionSubscription,
 } from "../../src/runtime/types.js";
 import { SessionCommandService } from "../../src/services/SessionCommandService.js";
+import type { CodexSessionReader } from "../../src/sessions/codex-reader.js";
 import type { ISessionReader } from "../../src/sessions/types.js";
 import type { Project } from "../../src/supervisor/types.js";
 
@@ -76,6 +77,77 @@ function createService(
 }
 
 describe("SessionCommandService runtime boundary", () => {
+  it.each([
+    [undefined, undefined, "gpt-6-astra"],
+    [undefined, "high", "gpt-6-astra"],
+    ["default", "high", "gpt-6-astra"],
+    ["gpt-5.6-sol", "high", "gpt-5.6-sol"],
+  ] as const)(
+    "resumes Codex with model %s and effort %s as %s",
+    async (model, reasoningEffort, expectedModel) => {
+      const projectPath = mkdtempSync(join(tmpdir(), "session-resume-model-"));
+      try {
+        const projectId = encodeProjectId(projectPath);
+        const project = {
+          id: projectId,
+          path: projectPath,
+          provider: "codex",
+        } as Project;
+        const getSessionSummary = vi.fn(async () => ({
+          id: "thread-model",
+          provider: "codex",
+          model: "gpt-6-astra",
+          reasoningEffort: "xhigh",
+          codexModelProvider: "openai",
+        }));
+        const resumeSession = vi.fn(async () => ({
+          id: "process-model",
+          sessionId: "thread-model",
+          provider: "codex",
+          permissionMode: "default",
+          modeVersion: 0,
+        }));
+        const service = new SessionCommandService({
+          runtimeController: { resumeSession } as unknown as RuntimeController,
+          scanner: {
+            getOrCreateProject: vi.fn(async () => project),
+          } as unknown as ProjectScanner,
+          readerFactory: () => ({}) as ISessionReader,
+          codexReaderFactory: () =>
+            ({ getSessionSummary }) as unknown as CodexSessionReader,
+          sessionInteractionService: interactionService(),
+        });
+        await expect(
+          service.resume({
+            projectId,
+            sessionId: "thread-model",
+            body: {
+              message: "continue",
+              provider: "codex",
+              model,
+              reasoningEffort,
+            },
+          }),
+        ).resolves.toMatchObject({ ok: true });
+        expect(getSessionSummary).toHaveBeenCalledWith(
+          "thread-model",
+          projectId,
+        );
+        expect(resumeSession).toHaveBeenCalledWith(
+          expect.objectContaining({
+            modelSettings: expect.objectContaining({
+              model: expectedModel,
+              reasoningEffort: reasoningEffort ?? "xhigh",
+              codexModelProvider: "openai",
+            }),
+          }),
+        );
+      } finally {
+        rmSync(projectPath, { recursive: true, force: true });
+      }
+    },
+  );
+
   it.each([
     ["start", "priority"],
     ["start", "default"],
