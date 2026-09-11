@@ -52,8 +52,16 @@ import type {
   FeishuSkillSelectionManager,
 } from "./skill-selection-manager.js";
 import type { FeishuStatusRegistry } from "./status.js";
+import { buildFeishuAuthorizationCard } from "./user-auth/card.js";
+import {
+  type FeishuMcpGateway,
+  disabledFeishuMcpConfig,
+} from "./user-auth/mcp-gateway.js";
+import type { FeishuUserAuthService } from "./user-auth/service.js";
 
 export interface FeishuInboundProcessorOptions {
+  userAuth?: FeishuUserAuthService;
+  mcpGateway?: FeishuMcpGateway;
   sessionCommandService: SessionCommandService;
   bindingStore: FeishuBindingStore;
   inbox: FeishuDurableInbox;
@@ -85,6 +93,7 @@ export interface FeishuInboundOutcome {
 }
 
 export type FeishuCommandName =
+  | "auth"
   | "help"
   | "new"
   | "reset"
@@ -135,6 +144,14 @@ interface FeishuUsageLimitModelPolicy {
 type FeishuCommandPermissionMode = "default" | "plan" | "acceptEdits";
 
 export class FeishuInboundProcessor {
+  private readonly userAuth?: FeishuUserAuthService;
+  private readonly mcpGateway?: FeishuMcpGateway;
+  private readonly authorizationTargets = new Map<string, AcceptedMessage>();
+  private readonly authorizationNotices = new Map<string, string>();
+  private readonly authorizationCards = new Map<
+    string,
+    { cardId: string; sequence: number }
+  >();
   private readonly sessionCommandService: SessionCommandService;
   private readonly bindingStore: FeishuBindingStore;
   private readonly inbox: FeishuDurableInbox;
@@ -155,6 +172,8 @@ export class FeishuInboundProcessor {
   private shuttingDown = false;
 
   constructor(options: FeishuInboundProcessorOptions) {
+    this.userAuth = options.userAuth;
+    this.mcpGateway = options.mcpGateway;
     this.sessionCommandService = options.sessionCommandService;
     this.bindingStore = options.bindingStore;
     this.inbox = options.inbox;
@@ -176,6 +195,52 @@ export class FeishuInboundProcessor {
       onMessageBatch: (scopeKey, messages) =>
         this.dispatchMessageBatchWithOutcome(scopeKey, messages),
     });
+  }
+
+  async notifyAuthorization(
+    accountId: string,
+    user: string,
+    url?: string,
+  ): Promise<boolean> {
+    const key = `${accountId}:${user}`;
+    const target = this.authorizationTargets.get(key);
+    if (!target || !this.replyManager) return false;
+    if (url && this.authorizationNotices.get(key) === url) return true;
+    if (url) this.authorizationNotices.set(key, url);
+    else this.authorizationNotices.delete(key);
+    if (hasFeishuInteractionApi(target.api)) {
+      try {
+        const card = this.authorizationCards.get(key);
+        if (card) {
+          await target.api.updateInputCard(
+            card.cardId,
+            buildFeishuAuthorizationCard(url),
+            ++card.sequence,
+          );
+        } else {
+          const created = await target.api.createInputCard(
+            createReplyTarget(target.scope, target.normalized.messageId),
+            buildFeishuAuthorizationCard(url),
+          );
+          this.authorizationCards.set(key, {
+            cardId: created.cardId,
+            sequence: 1,
+          });
+        }
+        if (!url) this.authorizationCards.delete(key);
+        return true;
+      } catch {
+        this.authorizationCards.delete(key);
+      }
+    }
+    await this.replyManager.sendCommandResult(
+      target.api,
+      createReplyTarget(target.scope, target.normalized.messageId),
+      url
+        ? `需要连接你的飞书账号才能继续。请使用当前账号打开授权链接：\n${url}\n授权完成后，仍在等待的工具会继续；已结束的任务请回复“继续”。`
+        : "飞书授权已完成。仍在等待的工具会继续；如果原任务已结束，请回复“继续”。",
+    );
+    return true;
   }
 
   /**
@@ -562,6 +627,31 @@ export class FeishuInboundProcessor {
       // the real thread ID. The durable inbox tempId is an opaque, path-safe
       // staging scope; it is never persisted as a Feishu session binding.
       binding ??= this.buildBinding(first, project, first.record.tempId);
+      if (first.account.userAuth?.enabled) {
+        const senders = new Set(
+          messages.map((message) => message.normalized.senderId),
+        );
+        if (
+          senders.size !== 1 ||
+          (binding.userAuthOwnerOpenId &&
+            binding.userAuthOwnerOpenId !== first.normalized.senderId)
+        ) {
+          await this.replyManager?.sendCommandResult(
+            first.api,
+            createReplyTarget(first.scope, first.normalized.messageId),
+            "当前会话已绑定另一位用户的飞书身份。请由原用户继续，或明确使用 /new 创建自己的会话。",
+          );
+          throw new FeishuDispatchError("SESSION_COMMAND_FAILED");
+        }
+        binding = {
+          ...binding,
+          userAuthOwnerOpenId: first.normalized.senderId,
+        };
+      }
+      this.authorizationTargets.set(
+        `${first.account.id}:${first.normalized.senderId}`,
+        first,
+      );
       const activeModel = binding.model;
       const modelPolicy = await this.resolveUsageLimitModelPolicy(
         first.account,
@@ -630,6 +720,17 @@ export class FeishuInboundProcessor {
         createdBy: "channel" as const,
         originChannel: "feishu" as const,
         codexEventAccountId: first.account.id,
+        ...(this.mcpGateway
+          ? {
+              feishuMcpConfig: first.account.userAuth?.enabled
+                ? await this.mcpGateway.connectorConfig(
+                    first.account.id,
+                    first.normalized.senderId,
+                    project.projectPath,
+                  )
+                : disabledFeishuMcpConfig(),
+            }
+          : {}),
       };
       const body = {
         message: prompt,
@@ -793,6 +894,42 @@ export class FeishuInboundProcessor {
       let text: string;
 
       switch (command.name) {
+        case "auth": {
+          this.authorizationTargets.set(
+            `${account.id}:${message.normalized.senderId}`,
+            message,
+          );
+          if (!this.userAuth) {
+            text = "飞书授权服务不可用。";
+            break;
+          }
+          try {
+            if (command.argument === "cancel") {
+              await this.userAuth.cancel(
+                account.id,
+                message.normalized.senderId,
+              );
+              text = "已取消本次飞书授权。";
+            } else {
+              const status = await this.userAuth.status(
+                account.id,
+                message.normalized.senderId,
+              );
+              if (command.argument === "status")
+                text = `飞书用户授权：${status.status}${status.lastError ? `\n${status.lastError}` : ""}`;
+              else {
+                const pending = await this.userAuth.begin(
+                  account.id,
+                  message.normalized.senderId,
+                );
+                text = `请使用当前飞书账号完成授权：\n${pending.authorizationUrl}\n完成后返回原会话继续。`;
+              }
+            }
+          } catch (error) {
+            text = `无法发起飞书授权：${error instanceof Error ? error.message : String(error)}`;
+          }
+          break;
+        }
         case "help": {
           text = FEISHU_COMMAND_HELP;
           break;
@@ -825,6 +962,12 @@ export class FeishuInboundProcessor {
           break;
         }
         case "stop": {
+          await this.userAuth
+            ?.cancel(
+              account.id,
+              binding?.userAuthOwnerOpenId ?? message.normalized.senderId,
+            )
+            .catch(() => undefined);
           if (!binding) {
             text = "当前没有可停止的会话。";
             break;
@@ -955,8 +1098,19 @@ export class FeishuInboundProcessor {
           const runtime = await this.sessionCommandService
             .getRuntimeStatus()
             .catch(() => null);
+          const userAuthorization =
+            account.userAuth?.enabled && this.userAuth
+              ? await this.userAuth
+                  .status(account.id, message.normalized.senderId)
+                  .then(
+                    (view) =>
+                      `${view.status}${view.lastError ? ` (${view.lastError})` : ""}`,
+                  )
+                  .catch(() => "授权存储不可用")
+              : "未启用，请在 Yep 设置中配置";
           text = [
             "飞书连接：正常（已收到当前事件）",
+            `用户授权：${userAuthorization}`,
             `账号策略：${account.allowedUsers.length + account.adminUsers.length > 0 ? "已配置" : "未配置"}`,
             `Workspace：${account.allowedWorkspaceRoots.length > 0 ? "已限制" : "未配置"}`,
             `CardKit：${hasFeishuInteractionApi(message.api) ? "可用" : "不可用，将降级"}`,
@@ -1395,7 +1549,7 @@ function parseRawFeishuCommand(
 function parseFeishuCommand(content: string): FeishuCommand | undefined {
   const trimmed = content.trim();
   const match = trimmed.match(
-    /^\/(help|new|reset|status|stop|project|mode|doctor|codex)(?:\s+([\s\S]+))?$/i,
+    /^\/(help|new|reset|status|stop|project|mode|doctor|codex|auth)(?:\s+([\s\S]+))?$/i,
   );
   if (!match?.[1]) return undefined;
   return {
@@ -1487,6 +1641,7 @@ function parseCommandPermissionMode(
 }
 
 const FEISHU_COMMAND_HELP = [
+  "/auth [status|cancel] — 连接飞书用户授权、查看状态或取消授权",
   "可用命令：",
   "/status — 当前项目、Session、模型与状态",
   "/new — 创建新 Session，保留旧历史",

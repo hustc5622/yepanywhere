@@ -18,6 +18,7 @@ import type {
   PendingInputType,
   SessionRetryStatus,
 } from "@yep-anywhere/shared";
+import type { FeishuMcpConfig } from "../channels/feishu/user-auth/mcp-gateway.js";
 import { getLogger } from "../logging/logger.js";
 import { getProvider } from "../sdk/providers/index.js";
 import { isProviderEnabled } from "../sdk/providers/policy.js";
@@ -90,6 +91,8 @@ export interface ModelSettings {
   codexModelProvider?: string;
   /** Stable non-secret channel account key for Codex event-spine rollout. */
   codexEventAccountId?: string;
+  /** Trusted, channel-issued MCP configuration; never accepted from a request body. */
+  feishuMcpConfig?: FeishuMcpConfig;
   /** Managed LLM gateway configuration. */
   llmGatewayConfig?: LlmGatewaySessionConfig;
   /** Provider to use for this session. undefined = use the runtime default. */
@@ -195,6 +198,10 @@ export interface SupervisorOptions {
 
 export class Supervisor {
   private processes: Map<string, Process> = new Map();
+  private readonly feishuMcpConfigs = new Map<
+    string,
+    NonNullable<ModelSettings["feishuMcpConfig"]>
+  >();
   private sessionToProcess: Map<string, string> = new Map(); // sessionId -> processId
   private everOwnedSessions: Set<string> = new Set(); // Sessions we've ever owned (for orphan detection)
   private terminatedProcesses: ProcessInfo[] = []; // Recently terminated processes
@@ -484,6 +491,7 @@ export class Supervisor {
       codexMcpMode: modelSettings?.codexMcpMode,
       codexModelProvider: modelSettings?.codexModelProvider,
       codexEventAccountId: modelSettings?.codexEventAccountId,
+      feishuMcpConfig: modelSettings?.feishuMcpConfig,
       codexEventProjectId: projectId,
       llmGatewayConfig: modelSettings?.llmGatewayConfig,
       executor: modelSettings?.executor,
@@ -579,6 +587,8 @@ export class Supervisor {
 
     const process = new Process(iterator, options);
     processHolder.process = process;
+    if (modelSettings?.feishuMcpConfig)
+      this.feishuMcpConfigs.set(process.id, modelSettings.feishuMcpConfig);
 
     // Wait for the real session ID from the provider
     try {
@@ -667,6 +677,7 @@ export class Supervisor {
       codexMcpMode: modelSettings?.codexMcpMode,
       codexModelProvider: modelSettings?.codexModelProvider,
       codexEventAccountId: modelSettings?.codexEventAccountId,
+      feishuMcpConfig: modelSettings?.feishuMcpConfig,
       codexEventProjectId: projectId,
       llmGatewayConfig: modelSettings?.llmGatewayConfig,
       executor: modelSettings?.executor,
@@ -759,6 +770,8 @@ export class Supervisor {
 
     const process = new Process(iterator, options);
     processHolder.process = process;
+    if (modelSettings?.feishuMcpConfig)
+      this.feishuMcpConfigs.set(process.id, modelSettings.feishuMcpConfig);
 
     // Add the initial user message to history with the same UUID we passed to provider.
     process.addInitialUserMessage(message, messageUuid, message.tempId);
@@ -878,6 +891,15 @@ export class Supervisor {
       if (existingProcess) {
         // Check if process is terminated - if so, start a fresh one
         if (existingProcess.isTerminated) {
+          this.unregisterProcess(existingProcess);
+        } else if (
+          modelSettings?.feishuMcpConfig &&
+          JSON.stringify(modelSettings.feishuMcpConfig) !==
+            JSON.stringify(this.feishuMcpConfigs.get(existingProcess.id))
+        ) {
+          if (existingProcess.state.type !== "idle")
+            return { error: "immediate_start_unavailable" };
+          await existingProcess.abort();
           this.unregisterProcess(existingProcess);
         } else if (rewind.hasRewind) {
           getLogger().info(
@@ -1100,7 +1122,7 @@ export class Supervisor {
     projectPath: string,
     message: UserMessage,
     permissionMode?: PermissionMode,
-    modelSettings?: ModelSettings,
+    requestedModelSettings?: ModelSettings,
     admission?: {
       requireImmediate?: boolean;
       allowSteer?: boolean;
@@ -1120,6 +1142,40 @@ export class Supervisor {
 
     if (process.isTerminated) {
       return { success: false, error: "Process terminated" };
+    }
+
+    const managedConfig = this.feishuMcpConfigs.get(process.id);
+    const modelSettings =
+      !requestedModelSettings?.feishuMcpConfig && managedConfig
+        ? { ...requestedModelSettings, feishuMcpConfig: managedConfig }
+        : requestedModelSettings;
+    if (
+      modelSettings?.feishuMcpConfig &&
+      JSON.stringify(modelSettings.feishuMcpConfig) !==
+        JSON.stringify(managedConfig)
+    ) {
+      if (process.state.type !== "idle")
+        return {
+          success: false,
+          error:
+            "Finish the current task before changing Feishu authorization.",
+        };
+      await process.abort();
+      this.unregisterProcess(process);
+      const next = await this.resumeSession(
+        sessionId,
+        projectPath,
+        message,
+        permissionMode,
+        modelSettings,
+        admission,
+      );
+      return "id" in next
+        ? { success: true, process: next, restarted: true }
+        : {
+            success: false,
+            error: "Unable to apply Feishu MCP configuration immediately.",
+          };
     }
 
     // Check if thinking/effort settings changed
@@ -1571,6 +1627,7 @@ export class Supervisor {
     this.addTerminatedProcess(terminatedInfo);
 
     this.processes.delete(process.id);
+    this.feishuMcpConfigs.delete(process.id);
 
     // Delete all session ID mappings that point to this process
     // This handles both temp and real session IDs

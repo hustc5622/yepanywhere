@@ -18,6 +18,7 @@ import {
   isUrlProjectId,
   thinkingOptionToConfig,
 } from "@yep-anywhere/shared";
+import type { FeishuMcpConfig } from "../channels/feishu/user-auth/mcp-gateway.js";
 import type {
   RespondToInputOptions,
   SessionInputResponseBody,
@@ -160,6 +161,7 @@ export interface ResumeCodexControlCommandInput {
 }
 
 export interface QueueSessionMessageCommandInput {
+  origin?: SessionCommandOrigin;
   sessionId: string;
   body: QueueSessionMessageBody;
   /** Reject atomically if accepting this message requires a queued restart. */
@@ -188,6 +190,8 @@ export interface SessionCommandOrigin {
   originChannel?: SessionOriginChannel;
   /** Stable, non-secret channel account key used only for Codex event rollout. */
   codexEventAccountId?: string;
+  /** Trusted, channel-issued MCP configuration; never accepted from a request body. */
+  feishuMcpConfig?: FeishuMcpConfig;
 }
 
 export interface StartSessionBody {
@@ -774,6 +778,7 @@ export class SessionCommandService {
       modelSettings: {
         ...prepared.modelSettings,
         codexEventAccountId: input.origin?.codexEventAccountId,
+        feishuMcpConfig: input.origin?.feishuMcpConfig,
       },
       requireImmediate: input.requireImmediate,
     });
@@ -828,6 +833,7 @@ export class SessionCommandService {
       modelSettings: {
         ...prepared.modelSettings,
         codexEventAccountId: input.origin?.codexEventAccountId,
+        feishuMcpConfig: input.origin?.feishuMcpConfig,
       },
       requireImmediate: input.requireImmediate,
     });
@@ -1177,6 +1183,7 @@ export class SessionCommandService {
             : undefined,
         codexModelProvider: resumeCodexModelProvider,
         codexEventAccountId: input.origin?.codexEventAccountId,
+        feishuMcpConfig: input.origin?.feishuMcpConfig,
         llmGatewayConfig,
         executor,
         globalInstructions:
@@ -1589,6 +1596,8 @@ export class SessionCommandService {
       allowSteer: input.allowSteer,
       interruptBeforeSend: body.interruptBeforeSend,
       modelSettings: {
+        feishuMcpConfig: input.origin?.feishuMcpConfig,
+        codexEventAccountId: input.origin?.codexEventAccountId,
         model,
         thinking,
         effort,
@@ -1672,6 +1681,7 @@ export class SessionCommandService {
       );
     if (process && process.state !== "terminated") {
       return this.queue({
+        origin: input.origin,
         sessionId: input.sessionId,
         body: input.body,
         requireImmediate: input.requireImmediate,

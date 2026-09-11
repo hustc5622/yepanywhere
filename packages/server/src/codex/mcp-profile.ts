@@ -9,6 +9,7 @@ export const CODEX_STANDARD_ENABLED_MCP_SERVER_IDS = [
   "node_repl",
   "lark",
   "feishu-mcp",
+  "yep-feishu",
 ] as const;
 
 const CODEX_STANDARD_ENABLED_MCP_SERVER_ID_SET = new Set<string>(
@@ -298,6 +299,30 @@ export function resolveCodexMcpThreadProfile(
     }
   }
 
+  // A managed connector must not reactivate an old compatibility alias when
+  // the 4510 bridge reapplies the MCP profile on resume/fork.
+  for (const name of ["yep-feishu", "lark"]) {
+    const managed = threadConfig.mcp_servers[name];
+    const args = managed?.args ?? asRecord(effectiveServers?.[name])?.args;
+    if (
+      !Array.isArray(args) ||
+      !args.some(
+        (arg) =>
+          typeof arg === "string" &&
+          /[/\\]feishu[/\\]connector\.mjs$/.test(arg),
+      )
+    )
+      continue;
+    if (managed && asRecord(existingServers?.[name])?.enabled === false)
+      managed.enabled = false;
+    for (const legacy of name === "yep-feishu"
+      ? ["lark", "feishu-mcp"]
+      : ["feishu-mcp"]) {
+      const entry = threadConfig.mcp_servers[legacy];
+      if (entry) entry.enabled = false;
+    }
+    break;
+  }
   return {
     threadConfig,
     configuredServerIds: entries.map((entry) => entry.name),
@@ -313,7 +338,10 @@ export function resolveCodexMcpThreadProfile(
         );
         const clientExpectedEnabled =
           existingEnabled ?? effectiveEnabled ?? true;
-        return clientExpectedEnabled && !isServerEnabled(mode, entry.name);
+        return (
+          clientExpectedEnabled &&
+          threadConfig.mcp_servers[entry.name]?.enabled === false
+        );
       })
       .map((entry) => entry.name),
   };

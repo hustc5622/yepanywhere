@@ -24,6 +24,7 @@ import type {
 import { FeishuReplyManager } from "../../../src/channels/feishu/reply-manager.js";
 import { FeishuSkillSelectionManager } from "../../../src/channels/feishu/skill-selection-manager.js";
 import { FeishuStatusRegistry } from "../../../src/channels/feishu/status.js";
+import type { FeishuUserAuthService } from "../../../src/channels/feishu/user-auth/service.js";
 import { encodeProjectId } from "../../../src/projects/paths.js";
 import type { CodexNativeControlRequest } from "../../../src/sdk/providers/codex-controls.js";
 import type { SessionCommandService } from "../../../src/services/SessionCommandService.js";
@@ -32,6 +33,39 @@ describe("FeishuInboundProcessor", () => {
   const dataDirs: string[] = [];
   const processors: FeishuInboundProcessor[] = [];
   const replyManagers: FeishuReplyManager[] = [];
+
+  it("handles /auth in the channel without sending it to the model", async () => {
+    const fixture = await createFixture(dataDirs);
+    const outcomes: FeishuInboundOutcome[] = [];
+    const begin = vi.fn(async () => ({
+      authorizationUrl: "https://accounts.feishu.cn/authorize",
+    }));
+    const processor = new FeishuInboundProcessor({
+      sessionCommandService:
+        fixture.commands as unknown as SessionCommandService,
+      bindingStore: fixture.bindings,
+      inbox: fixture.inbox,
+      debounceMs: 0,
+      userAuth: {
+        status: async () => ({ status: "not_connected" }),
+        begin,
+      } as unknown as FeishuUserAuthService,
+      onOutcome: (outcome) => {
+        outcomes.push(outcome);
+      },
+    });
+    processors.push(processor);
+    await processor.accept({
+      account: fixture.account,
+      event: makeEvent("om_authorize", "/auth"),
+      botIdentity: BOT,
+    });
+    await eventually(() => expect(outcomes).toHaveLength(1));
+    expect(outcomes[0]).toMatchObject({ type: "command", command: "auth" });
+    expect(begin).toHaveBeenCalledWith(fixture.account.id, "ou_user");
+    expect(fixture.commands.start).not.toHaveBeenCalled();
+    expect(fixture.commands.send).not.toHaveBeenCalled();
+  });
 
   it("includes opaque extraction artifacts and bounded warnings in the prompt manifest", () => {
     const manifest: FeishuAttachmentManifest = {

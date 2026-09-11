@@ -634,6 +634,9 @@ const explicitPublicServerUrl =
   undefined;
 const feishuChannelRuntime = new FeishuChannelRuntime({
   dataDir: config.dataDir,
+  localServerUrl:
+    process.env.YEP_FEISHU_MCP_SERVER_URL?.trim() ||
+    `${config.httpsSelfSigned ? "https" : "http"}://127.0.0.1:${config.port}${config.basePath}`,
   maxUploadSizeBytes: config.maxUploadSizeBytes,
   ...(codexBridgeService?.getUsage
     ? {

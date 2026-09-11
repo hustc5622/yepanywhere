@@ -77,6 +77,40 @@ function createService(
 }
 
 describe("SessionCommandService runtime boundary", () => {
+  it("preserves trusted Feishu MCP configuration when sending into a resident process", async () => {
+    const queueMessage = vi.fn(async () => ({
+      success: true,
+      process: { id: "process-1" },
+      restarted: false,
+    }));
+    const service = createService({
+      getProcessSnapshotForSession: vi.fn(async () => processSnapshot()),
+      queueMessage,
+    });
+    const feishuMcpConfig = {
+      command: "node",
+      args: ["/server/resources/feishu/connector.mjs", "/private/client.json"],
+      env: {},
+      enabled: true,
+      tool_timeout_sec: 240,
+    };
+    const result = await service.send({
+      projectId: "project-1",
+      sessionId: "session-1",
+      body: { message: "Read the document" },
+      origin: {
+        originChannel: "feishu",
+        codexEventAccountId: "bot",
+        feishuMcpConfig,
+      },
+    });
+    expect(result.ok).toBe(true);
+    expect(queueMessage).toHaveBeenCalledWith(
+      expect.objectContaining({
+        modelSettings: expect.objectContaining({ feishuMcpConfig }),
+      }),
+    );
+  });
   it.each([
     [undefined, undefined, "gpt-6-astra"],
     [undefined, "high", "gpt-6-astra"],

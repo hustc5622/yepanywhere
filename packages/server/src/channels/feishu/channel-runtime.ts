@@ -22,6 +22,7 @@ export type FeishuChannelRuntimeDiagnosticCode =
 
 export interface FeishuChannelRuntimeOptions {
   dataDir: string;
+  localServerUrl?: string;
   maxUploadSizeBytes?: number;
   /** Explicit externally reachable Yep base URL; local/default URLs are rejected downstream. */
   publicBaseUrl?: string;
@@ -80,7 +81,11 @@ export class FeishuChannelRuntime {
   constructor(options: FeishuChannelRuntimeOptions) {
     this.dataDir = options.dataDir;
     this.service =
-      options.service ?? new FeishuChannelService({ dataDir: options.dataDir });
+      options.service ??
+      new FeishuChannelService({
+        dataDir: options.dataDir,
+        localServerUrl: options.localServerUrl,
+      });
     this.bindingStore =
       options.bindingStore ??
       new FeishuBindingStore({ dataDir: options.dataDir });
@@ -231,6 +236,8 @@ export class FeishuChannelRuntime {
     });
     const mediaDownloader = new FeishuMediaDownloader({ uploadManager });
     const inboundProcessor = new FeishuInboundProcessor({
+      userAuth: this.service.userAuth,
+      mcpGateway: this.service.mcpGateway,
       sessionCommandService: input.sessionCommandService,
       bindingStore: this.bindingStore,
       inbox: this.inbox,
@@ -245,6 +252,9 @@ export class FeishuChannelRuntime {
     this.interactionManager = interactionManager;
     this.replyManager = replyManager;
     this.inboundProcessor = inboundProcessor;
+    this.service.setAuthorizationHandler((accountId, user, url) =>
+      inboundProcessor.notifyAuthorization(accountId, user, url),
+    );
 
     await this.service.setInboundHandler(async (envelope) => {
       await inboundProcessor.accept(envelope);
@@ -312,6 +322,7 @@ export class FeishuChannelRuntime {
   }
 
   private async doShutdown(): Promise<void> {
+    await this.service.userAuth.shutdown();
     await this.prepareTask?.catch(() => undefined);
     await this.startTask?.catch(() => undefined);
     await this.bindingRemapChain.catch(() => undefined);

@@ -2985,6 +2985,15 @@ export class CodexProvider implements AgentProvider {
       const mcpProfile = resolveCodexMcpThreadProfile(
         options.codexMcpMode,
         configRead.config,
+        options.feishuMcpConfig
+          ? {
+              mcp_servers: {
+                "yep-feishu": {
+                  ...options.feishuMcpConfig,
+                },
+              },
+            }
+          : undefined,
       );
 
       const policy = this.mapPermissionModeToThreadPolicy(

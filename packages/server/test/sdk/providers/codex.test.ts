@@ -3137,6 +3137,60 @@ process.stdin.on("data", (chunk) => {
       }
     });
 
+    it("injects an independent Yep Feishu transport without null overrides or old MCP processes", async () => {
+      const tempDir = mkdtempSync(
+        join(require("node:os").tmpdir(), "codex-yep-feishu-"),
+      );
+      const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+      const capturePath = join(tempDir, "capture.json");
+      const previousCapture = process.env.CODEX_FAKE_CAPTURE;
+      const previousServers = process.env.CODEX_FAKE_MCP_SERVERS;
+      process.env.CODEX_FAKE_CAPTURE = capturePath;
+      process.env.CODEX_FAKE_MCP_SERVERS = JSON.stringify([
+        "lark",
+        "feishu-mcp",
+        "node_repl",
+      ]);
+      let session:
+        | Awaited<ReturnType<CodexProvider["startSession"]>>
+        | undefined;
+      try {
+        const native = {
+          command: process.execPath,
+          args: ["/yep/resources/feishu/connector.mjs", "/yep/client.json"],
+          env: {},
+          enabled: true,
+          tool_timeout_sec: 240,
+        };
+        session = await new CodexProvider({
+          codexPath: fakeCodexPath,
+        }).startSession({
+          cwd: tempDir,
+          resumeSessionId: "thread-existing",
+          feishuMcpConfig: native,
+        });
+        await session.iterator.next();
+        const capture = JSON.parse(readFileSync(capturePath, "utf8"));
+        expect(capture.params.config.mcp_servers).toMatchObject({
+          "yep-feishu": native,
+          lark: { enabled: false },
+          "feishu-mcp": { enabled: false },
+          node_repl: { enabled: true },
+        });
+        expect(
+          capture.params.config.mcp_servers["yep-feishu"],
+        ).not.toHaveProperty("url");
+        expect(
+          capture.params.config.mcp_servers["yep-feishu"],
+        ).not.toHaveProperty("http_headers");
+      } finally {
+        session?.abort();
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapture);
+        restoreEnv("CODEX_FAKE_MCP_SERVERS", previousServers);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    });
+
     it("uses full Codex MCP profile with all configured MCP enabled", async () => {
       const tempDir = mkdtempSync(
         join(require("node:os").tmpdir(), "codex-app-server-"),
