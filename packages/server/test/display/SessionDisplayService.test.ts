@@ -57,6 +57,52 @@ function fixture(pollMs = 60_000) {
   };
 }
 describe("SessionDisplayService", () => {
+  it.each(["completed", "failed", "interrupted"])(
+    "does not replay compaction progress after a %s turn",
+    async (outcome) => {
+      const { service, source, push } = fixture();
+      await service.subscribe(selection, vi.fn());
+      push("message", {
+        type: "system",
+        subtype: "status",
+        status: "compacting",
+        uuid: "compact-turn",
+        codexTurnId: "turn",
+      });
+      expect((await service.snapshot(selection)).activity.isCompacting).toBe(
+        true,
+      );
+      source.read.mockResolvedValue({
+        provider: "codex",
+        messages: [],
+        activity: outcome as "completed" | "failed" | "interrupted",
+        stamp: "2",
+        turnStatuses: {
+          turn: outcome as "completed" | "failed" | "interrupted",
+        },
+      });
+      source.stamp.mockResolvedValue("2");
+      push("message", {
+        type: "system",
+        subtype: "turn_complete",
+        codexTurnId: "turn",
+        turnStatus: outcome,
+      });
+      await vi.waitFor(async () => {
+        expect(
+          (await service.snapshot(selection)).activity.isCompacting,
+        ).not.toBe(true);
+      });
+      const emit = vi.fn();
+      await service.subscribe(selection, emit);
+      expect(
+        emit.mock.calls.some(
+          ([type, data]) => type === "message" && data.status === "compacting",
+        ),
+      ).toBe(false);
+    },
+  );
+
   it.each([11, 55])(
     "reads all %i closed-group steps from the displayed index despite reordered history",
     async (count) => {

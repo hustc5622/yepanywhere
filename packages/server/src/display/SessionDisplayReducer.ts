@@ -120,6 +120,7 @@ export class SessionDisplayReducer {
   private currentGroup: string | undefined;
   private streamingId: string | undefined;
   private runtime: SessionDisplayActivity["state"] = "unknown";
+  private compactionRun: string | undefined;
   private seq = 0;
 
   constructor(
@@ -157,6 +158,8 @@ export class SessionDisplayReducer {
   }
 
   setRuntime(state: SessionDisplayActivity["state"]): void {
+    if (["completed", "interrupted", "failed"].includes(state))
+      this.compactionRun = undefined;
     const last = this.nodes.at(-1);
     this.runtime =
       state === "running" &&
@@ -186,6 +189,8 @@ export class SessionDisplayReducer {
   }
 
   private closeRun(runId: string, status: SessionDisplayTurnStatus): void {
+    if (this.compactionRun === runId && status !== "running")
+      this.compactionRun = undefined;
     for (const group of this.groups.values())
       if (group.runId === runId) group.closed = true;
     for (const tool of this.tools.values()) {
@@ -464,6 +469,21 @@ export class SessionDisplayReducer {
         : `text:${string(nested?.id) ?? id}:${index}`;
     };
 
+    if (message.type === "system" && message.subtype === "status") {
+      this.compactionRun =
+        message.status === "compacting"
+          ? (runId ?? this.currentRun)
+          : undefined;
+      if (this.compactionRun) {
+        this.currentRun = this.compactionRun;
+        this.runtime = "running";
+      }
+      return;
+    }
+    if (message.type === "system" && message.subtype === "compact_boundary") {
+      this.compactionRun = undefined;
+    }
+
     if (message.type === "system" && message.subtype === "turn_complete") {
       const status = message.turnStatus;
       if (
@@ -478,7 +498,11 @@ export class SessionDisplayReducer {
     if (message.type === "result") {
       this.closeRun(
         runId ?? this.currentRun,
-        message.is_error === true ? "failed" : "completed",
+        message.turnStatus === "interrupted"
+          ? "interrupted"
+          : message.is_error === true
+            ? "failed"
+            : "completed",
       );
       return;
     }
@@ -776,6 +800,7 @@ export class SessionDisplayReducer {
           .slice(-SESSION_DISPLAY_LIVE_STEP_LIMIT)
           .map((t) => ({ ...t.step, preview: "" })),
         runningCount: running.length,
+        ...(this.compactionRun ? { isCompacting: true } : {}),
       },
       ...(olderCursor ? { olderCursor } : {}),
     };

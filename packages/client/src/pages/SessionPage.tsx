@@ -1028,6 +1028,10 @@ function SessionPageContent({
   });
 
   const requestCodexCompaction = async (): Promise<boolean> => {
+    if (isCompacting || isStartingCodexCompaction) {
+      showToast(t("codexCompactAlreadyRunning"), "info");
+      return false;
+    }
     if (status.owner === "external") {
       showToast(t("codexCompactExternalSessionRequired"), "error");
       return false;
@@ -1040,12 +1044,9 @@ function SessionPageContent({
       showToast(t("codexCompactActiveSessionRequired"), "error");
       return false;
     }
-    if (isCompacting || isStartingCodexCompaction) {
-      showToast(t("codexCompactAlreadyRunning"), "info");
-      return false;
-    }
 
     setIsStartingCodexCompaction(true);
+    setScrollTrigger((prev) => prev + 1);
     try {
       if (status.owner === "self" && status.processId) {
         await api.executeCodexControl(actualSessionId ?? sessionId, {
@@ -1067,7 +1068,6 @@ function SessionPageContent({
           },
         );
         setStatus({ owner: "self", processId: result.processId });
-        setProcessState("idle");
       }
       showToast(t("sessionCompactionStarted"), "success");
       return true;
@@ -2512,7 +2512,7 @@ function SessionPageContent({
                       status.owner === "self" && processState === "in-turn"
                     }
                     lastActivityAt={lastStreamActivityAt}
-                    isCompacting={isCompacting}
+                    isCompacting={isCompacting || isStartingCodexCompaction}
                     scrollTrigger={scrollTrigger + activeWindowTrimRevision}
                     pendingMessages={pendingMessages}
                     deferredMessages={deferredMessages}

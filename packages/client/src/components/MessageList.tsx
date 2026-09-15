@@ -1046,13 +1046,21 @@ export const MessageList = memo(function MessageList({
       case "compacting":
         // Shown when context is being compressed
         return (
-          <div className="system-message system-message-compacting">
+          <div
+            className="system-message system-message-compacting"
+            role="status"
+            aria-live="polite"
+          >
             <span className="system-message-icon spinning">⟳</span>
-            <span className="system-message-text">Compacting context...</span>
+            <span className="system-message-text">
+              {i18n?.t("sessionCompactingContext") ?? "Compacting context..."}
+            </span>
           </div>
         );
       case "processing":
-        return <ProcessingIndicator isProcessing={isProcessing} />;
+        return (
+          <ProcessingIndicator isProcessing={isProcessing && !isCompacting} />
+        );
     }
   };
 

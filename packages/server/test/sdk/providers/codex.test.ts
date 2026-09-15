@@ -600,6 +600,20 @@ function handle(message) {
       sendError(message.id, -32602, "synthetic invalid parameters");
       return;
     }
+    if (message.method === "thread/compact/start" && process.env.CODEX_FAKE_COMPACTION) {
+      const threadId = message.params.threadId;
+      const turnId = "compact-turn";
+      const item = { id: "compact-item", type: "contextCompaction" };
+      send(message.id, {});
+      notify("turn/started", { threadId, turn: { id: turnId, status: "inProgress", items: [], error: null } });
+      notify("item/started", { threadId, turnId, item });
+      setTimeout(() => {
+        const status = process.env.CODEX_FAKE_COMPACTION;
+        if (status === "completed") notify("item/completed", { threadId, turnId, item });
+        notify("turn/completed", { threadId, turn: { id: turnId, status, items: [], error: status === "failed" ? { message: "Compaction failed" } : null } });
+      }, 20);
+      return;
+    }
     if (message.method === "skills/list") {
       send(message.id, { data: [] });
       return;
@@ -2543,6 +2557,85 @@ process.stdin.on("data", (chunk) => {
         rmSync(tempDir, { recursive: true, force: true });
       }
     });
+
+    it.each([
+      ["completed", "legacy"],
+      ["failed", "legacy"],
+      ["interrupted", "legacy"],
+      ["completed", "primary"],
+      ["failed", "primary"],
+      ["interrupted", "primary"],
+    ] as const)(
+      "streams idle native compaction through %s (%s) and accepts the next prompt",
+      async (outcome, mode) => {
+        const tempDir = mkdtempSync(
+          join(require("node:os").tmpdir(), "codex-compact-"),
+        );
+        const fakeCodexPath = writeFakeCodexAppServer(tempDir);
+        const previous = process.env.CODEX_FAKE_COMPACTION;
+        const previousCapture = process.env.CODEX_FAKE_CAPTURE;
+        process.env.CODEX_FAKE_CAPTURE = join(tempDir, "capture.json");
+        process.env.CODEX_FAKE_COMPACTION = outcome;
+        let session:
+          | Awaited<ReturnType<CodexProvider["startSession"]>>
+          | undefined;
+        try {
+          session = await new CodexProvider({
+            codexPath: fakeCodexPath,
+            eventSpine: {
+              defaultMode: mode,
+              store: new InMemoryCodexEventStore(),
+            },
+          }).startSession({ cwd: tempDir });
+          await session.iterator.next();
+          const progress = session.iterator.next();
+          await expect(
+            session.codexControls?.invoke({ control: "thread/compact/start" }),
+          ).resolves.toMatchObject({ ok: true });
+          await expect(progress).resolves.toMatchObject({
+            value: {
+              type: "system",
+              subtype: "status",
+              status: "compacting",
+              codexTurnId: "compact-turn",
+            },
+          });
+          const messages: SDKMessage[] = [];
+          while (true) {
+            const next = await session.iterator.next();
+            if (next.done)
+              throw new Error("Compaction unexpectedly closed the session");
+            messages.push(next.value);
+            if (next.value.type === "result") break;
+          }
+          expect(messages.some((m) => m.subtype === "compact_boundary")).toBe(
+            outcome === "completed",
+          );
+          expect(messages.some((m) => m.type === "error")).toBe(
+            outcome === "failed",
+          );
+          expect(messages).toContainEqual(
+            expect.objectContaining({
+              subtype: "turn_complete",
+              turnStatus: outcome,
+            }),
+          );
+          const echo = session.iterator.next();
+          session.queue?.push({
+            text: "Continue after compact",
+            uuid: "after-compact",
+          });
+          await expect(echo).resolves.toMatchObject({
+            value: { type: "user", uuid: "after-compact" },
+          });
+        } finally {
+          session?.abort();
+          restoreEnv("CODEX_FAKE_COMPACTION", previous);
+          restoreEnv("CODEX_FAKE_CAPTURE", previousCapture);
+          rmSync(tempDir, { recursive: true, force: true });
+        }
+      },
+    );
 
     it("maps stable native controls to synchronized request contracts", async () => {
       const tempDir = mkdtempSync(

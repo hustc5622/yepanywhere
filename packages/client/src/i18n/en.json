@@ -363,6 +363,7 @@
   "sessionReadFailed": "Failed to update read status",
   "sessionTerminated": "Session terminated",
   "sessionCompacted": "Session context compacted",
+  "sessionCompactingContext": "Compacting context…",
   "sessionCompactionStarted": "Context compaction started",
   "sessionCompactFailed": "Failed to compact session: {message}",
   "codexCompactBareCommandRequired": "The Codex /compact command does not accept arguments. Send /compact by itself.",

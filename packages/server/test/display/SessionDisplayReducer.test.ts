@@ -66,6 +66,60 @@ function facts(snapshot: SessionDisplaySnapshot) {
   );
 }
 describe("SessionDisplayReducer", () => {
+  it.each(["completed", "failed", "interrupted"])(
+    "projects compaction progress and clears it on %s",
+    (outcome) => {
+      const model = new SessionDisplayReducer(view, "codex");
+      model.message(prompt);
+      const progress = compactDisplayMessage({
+        type: "system",
+        subtype: "status",
+        status: "compacting",
+        uuid: "compact-turn",
+        codexTurnId: "turn",
+      });
+      model.message(progress);
+      expect(model.snapshot().activity).toMatchObject({
+        state: "running",
+        isCompacting: true,
+      });
+      expect(
+        SessionDisplaySnapshotSchema.safeParse(model.snapshot()).success,
+      ).toBe(true);
+      const replay = new SessionDisplayReducer(view, "codex");
+      replay.restore([prompt, progress] as Message[]);
+      expect(replay.snapshot().activity.isCompacting).toBe(true);
+      if (outcome === "completed") {
+        model.message({
+          type: "system",
+          subtype: "compact_boundary",
+          uuid: "compact-turn",
+          codexTurnId: "turn",
+          content: "Context compacted",
+        });
+        expect(model.snapshot().activity.isCompacting).not.toBe(true);
+        expect(model.snapshot().nodes).toContainEqual(
+          expect.objectContaining({
+            type: "segment",
+            segment: expect.objectContaining({
+              type: "notice",
+              kind: "compaction",
+            }),
+          }),
+        );
+      }
+      model.message({ ...terminal, turnStatus: outcome });
+      model.message({
+        type: "result",
+        codexTurnId: "turn",
+        turnStatus: outcome,
+        is_error: outcome === "failed",
+      });
+      expect(model.snapshot().activity).toMatchObject({ state: outcome });
+      expect(model.snapshot().activity.isCompacting).not.toBe(true);
+    },
+  );
+
   it("keeps async questions running across replay and allows later tools", () => {
     const question = {
       ...reply("question", "Which address?", "final_answer"),

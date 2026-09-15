@@ -638,6 +638,7 @@ export function useSession(
   useEffect(() => {
     hasHandledConnectedEventRef.current = false;
     setLastStreamActivityAt(null);
+    setIsCompacting(false);
     setTurnHealth(null);
     setHistoryRewriteRequest(null);
     if (historyRewriteTimerRef.current) {
@@ -1755,7 +1756,10 @@ export function useSession(
         setLastStreamActivityAt(new Date().toISOString());
         const { eventType, ...payload } = data;
         handleDisplayEvent(eventType, payload);
-        const activity = payload.activity as { state?: string } | undefined;
+        const activity = payload.activity as
+          | { state?: string; isCompacting?: boolean }
+          | undefined;
+        if (activity) setIsCompacting(activity.isCompacting === true);
         if (activity?.state === "running" || activity?.state === "finishing")
           setProcessState("in-turn");
         else if (activity?.state === "hold") setProcessState("hold");
@@ -1886,6 +1890,16 @@ export function useSession(
           }
         }
 
+        if (
+          sdkMessage.isSubagent !== true &&
+          sdkMessage.isSidechain !== true &&
+          (msgType === "result" ||
+            (msgType === "error" && sdkMessage.willRetry !== true) ||
+            (msgType === "system" && sdkMessage.subtype === "turn_complete"))
+        ) {
+          setIsCompacting(false);
+        }
+
         // Handle status messages (compacting indicator)
         if (msgType === "system" && sdkMessage.subtype === "status") {
           const status = sdkMessage.status as "compacting" | null;
@@ -1985,6 +1999,7 @@ export function useSession(
         };
         setDeferredMessages(deferredData.messages ?? []);
       } else if (data.eventType === "complete") {
+        setIsCompacting(false);
         clearStreamingPlaceholders({ main: true, allAgents: true });
         setProcessState("idle");
         setStatus({ owner: "none" });
@@ -1992,6 +2007,7 @@ export function useSession(
         setDeferredMessages([]);
         scheduleAuthoritativeSnapshotRefresh();
       } else if (data.eventType === "error") {
+        setIsCompacting(false);
         clearStreamingPlaceholders({ main: true, allAgents: true });
       } else if (data.eventType === "connected") {
         // Sync state and permission mode from connected event
@@ -2299,7 +2315,9 @@ export function useSession(
     status,
     processState,
     turnHealth, // Bridge-reported retry/failure state of the latest turn
-    isCompacting, // True when context is being compressed
+    isCompacting: displayActivity
+      ? displayActivity.isCompacting === true
+      : isCompacting,
     isHeld: processState === "hold", // Derived from process state
     pendingInputRequest,
     actualSessionId, // Real session ID from server (may differ from URL during temp→real transition)

@@ -2341,6 +2341,16 @@ export class Process {
           }
         }
 
+        if (
+          this.provider === "codex" &&
+          message.type === "system" &&
+          message.subtype === "status" &&
+          message.status === "compacting" &&
+          this._state.type === "idle"
+        ) {
+          this.setState({ type: "in-turn" });
+        }
+
         // Handle special message types
         if (message.type === "system" && message.subtype === "input_request") {
           // Legacy mock SDK behavior - handle input_request message

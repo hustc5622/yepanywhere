@@ -349,6 +349,7 @@ export const SessionDisplayActivitySchema = z
     ]),
     tools: z.array(SessionDisplayToolStepSchema),
     runningCount: z.number().int().nonnegative(),
+    isCompacting: z.boolean().optional(),
   })
   .strict();
 export const SessionDisplaySnapshotSchema = z

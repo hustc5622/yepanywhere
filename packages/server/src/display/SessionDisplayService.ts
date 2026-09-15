@@ -118,6 +118,7 @@ export function compactDisplayMessage(message: RecordValue): RecordValue {
     "codexMessagePhase",
     "codexAsyncMessage",
     "subtype",
+    "status",
     "turnStatus",
     "is_error",
     "willRetry",
@@ -385,6 +386,33 @@ export class SessionDisplayService {
           this.emit(entry, "display-sync", { state: "retrying" }),
         );
         return;
+      }
+      if (
+        message.subtype === "compact_boundary" ||
+        message.subtype === "turn_complete" ||
+        message.type === "result" ||
+        (message.type === "error" && message.willRetry !== true)
+      ) {
+        // A failed/interrupted compaction has no completed item to replace its
+        // started overlay. Retire the transient status before history refresh
+        // so replay cannot resurrect a spinner after the turn has settled.
+        const turnId = message.codexTurnId ?? message.turnId;
+        for (const [id, pending] of entry.overlay) {
+          if (
+            pending.subtype === "status" &&
+            pending.status === "compacting" &&
+            (!turnId || (pending.codexTurnId ?? pending.turnId) === turnId)
+          ) {
+            entry.overlay.delete(id);
+          }
+        }
+        const status = asRecord(entry.controls.get("message:status"));
+        if (
+          status?.status === "compacting" &&
+          (!turnId || (status.codexTurnId ?? status.turnId) === turnId)
+        ) {
+          entry.controls.set("message:status", { ...status, status: null });
+        }
       }
       let compact: RecordValue;
       if (message.type === "stream_event") {

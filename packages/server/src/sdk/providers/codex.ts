@@ -3468,10 +3468,100 @@ export class CodexProvider implements AgentProvider {
       let isFirstMessage = !options.resumeSessionId || forkStartedFresh;
       startupStage = "turn-runtime";
 
-      for await (const message of messageGen) {
-        if (signal.aborted) {
-          break;
+      // Native controls (including /compact) start turns without enqueuing a
+      // user prompt. Keep consuming notifications while waiting for input.
+      // Retain the losing read: a second nextNotification would steal an event
+      // from the active turn after the input side wins the race.
+      const notificationClient = appServer;
+      let pendingInput: ReturnType<typeof messageGen.next> | undefined;
+      let pendingNotification: Promise<JsonRpcNotification> | undefined;
+      const nextNotification = async () => {
+        const next =
+          pendingNotification ?? notificationClient.nextNotification(signal);
+        pendingNotification = undefined;
+        return await next;
+      };
+      while (!signal.aborted) {
+        pendingInput ??= messageGen.next();
+        pendingNotification ??= appServer.nextNotification(signal);
+        const notificationReady = pendingNotification.then((notification) => ({
+          kind: "notification" as const,
+          notification,
+        }));
+        const next = runtimeState.activeTurnId
+          ? await notificationReady
+          : await Promise.race([
+              pendingInput.then((input) => ({ kind: "input" as const, input })),
+              notificationReady,
+            ]);
+        if (next.kind === "notification") {
+          pendingNotification = undefined;
+          const raw = next.notification;
+          if (appServer.isClosed) queue.close();
+          const event =
+            raw.canonicalEvent ??
+            (await activeEventIngress.ingestNotification(raw));
+          if (event.threadId && event.threadId !== sessionId) continue;
+          const notification =
+            projectionMode === "primary"
+              ? activeEventIngress.notificationFromEvent(event)
+              : raw;
+          const params = asRecord(notification.params);
+          if (notification.method === "turn/started") {
+            const turn = asRecord(params?.turn);
+            if (typeof turn?.id === "string")
+              runtimeState.activeTurnId = turn.id;
+          }
+          if (notification.method === "thread/tokenUsage/updated") {
+            const usage = this.extractTurnUsage(notification.params);
+            if (usage) usageByTurnId.set(usage.turnId, usage.snapshot);
+          }
+          const messages = this.convertNotificationToSDKMessages(
+            notification,
+            sessionId,
+            usageByTurnId,
+            customToolContexts,
+            commandOutputBuffers,
+            true,
+            projectionMode === "primary",
+            projectionMode === "primary"
+              ? canonicalRetryableErrorsByTurnId
+              : legacyRetryableErrorsByTurnId,
+            options.cwd,
+          );
+          const projectedMessages =
+            projectionMode === "primary"
+              ? this.attachCanonicalCodexItem(messages, event, sessionId)
+              : messages;
+          for (const message of projectedMessages) yield logMessage(message);
+          if (
+            runtimeState.activeTurnId &&
+            this.isTurnTerminalNotification(
+              notification,
+              runtimeState.activeTurnId,
+            )
+          ) {
+            const turnId = runtimeState.activeTurnId;
+            runtimeState.activeTurnId = null;
+            const turnStatus =
+              notification.method === "error"
+                ? "failed"
+                : this.asTurnCompletedNotification(notification.params)?.turn
+                    .status;
+            yield logMessage({
+              type: "result",
+              session_id: sessionId,
+              turnId,
+              codexTurnId: turnId,
+              turnStatus,
+              is_error: turnStatus === "failed",
+            } as SDKMessage);
+          }
+          continue;
         }
+        pendingInput = undefined;
+        if (next.input.done) break;
+        const message = next.input.value;
 
         let { internalPrompt, publicPrompt } = getUserPromptProjection(message);
         if (!internalPrompt) {
@@ -3645,7 +3735,7 @@ export class CodexProvider implements AgentProvider {
         let emittedTurnError = false;
 
         while (!turnComplete && !signal.aborted) {
-          const rawNotification = await appServer.nextNotification(signal);
+          const rawNotification = await nextNotification();
           // A synthetic transport error is terminal for the input consumer,
           // unlike a failed model turn on an otherwise healthy connection.
           if (appServer.isClosed) queue.close();
@@ -4723,6 +4813,24 @@ export class CodexProvider implements AgentProvider {
             ? this.asItemStartedNotification(notification.params)
             : this.asItemCompletedNotification(notification.params);
         if (!params) return [];
+
+        if (params.item.type === "contextCompaction") {
+          return [
+            withCodexTimestamp({
+              type: "system",
+              uuid: `${params.item.id}-${params.turnId}`,
+              session_id: sessionId,
+              turnId: params.turnId,
+              codexTurnId: params.turnId,
+              ...(notification.method === "item/started"
+                ? { subtype: "status", status: "compacting" }
+                : {
+                    subtype: "compact_boundary",
+                    content: "Context compacted",
+                  }),
+            } as SDKMessage),
+          ];
+        }
 
         // A steer response only admits input to Codex's pending queue. The
         // userMessage lifecycle is emitted when that input enters the turn's
