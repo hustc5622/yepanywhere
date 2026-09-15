@@ -81,7 +81,9 @@ export const ThinkingBlock = memo(function ThinkingBlock({
   const hasFullBody = loaded?.key === detailKey;
   const body = hasFullBody ? loaded.content : thinking;
   const isPartialBody = detail?.truncated === true && !hasFullBody;
-  const summaryPreview = detail ? previewLine(thinking) : undefined;
+  // The preview is the reasoning text itself, so it stands in for the label on
+  // collapsed rows; a literal "Thinking" prefix reads as part of the thought.
+  const summaryPreview = previewLine(thinking);
   const visibleError = failedKey === detailKey ? error : null;
   const className = [
     "thinking-block",
@@ -103,8 +105,13 @@ export const ThinkingBlock = memo(function ThinkingBlock({
       }}
     >
       <summary className="collapsible__summary">
-        <span>{isStreaming ? "Thinking..." : "Thinking"}</span>
-        {summaryPreview && !isExpanded && (
+        {isExpanded || !summaryPreview ? (
+          <span className="thinking-block__label">
+            {isStreaming
+              ? t("sessionThinkingStreaming")
+              : t("sessionThinkingLabel")}
+          </span>
+        ) : (
           <span className="thinking-block__preview">{summaryPreview}</span>
         )}
         <span className="collapsible__icon">▸</span>

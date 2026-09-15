@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useI18n } from "../../../i18n";
 import type { ContentBlock, ContentRenderer, RenderContext } from "../types";
 
 interface ThinkingBlock extends ContentBlock {
@@ -19,6 +20,7 @@ function ThinkingRendererComponent({
 }) {
   const thinking = block.thinking || "";
   const [isExpanded, setIsExpanded] = useState(false);
+  const { t } = useI18n();
 
   if (isExpanded) {
     // Expanded: whole block is clickable to collapse
@@ -30,7 +32,7 @@ function ThinkingRendererComponent({
         aria-expanded={true}
       >
         <div className="thinking-toggle-expanded">
-          <span className="thinking-label">Thinking</span>
+          <span className="thinking-label">{t("sessionThinkingLabel")}</span>
           <span className="thinking-icon">▲</span>
         </div>
         <div className="thinking-content">{thinking}</div>
@@ -52,7 +54,9 @@ function ThinkingRendererComponent({
         aria-expanded={false}
       >
         <span className="thinking-label">
-          {context.isStreaming ? "Thinking..." : "Thinking"}
+          {context.isStreaming
+            ? t("sessionThinkingStreaming")
+            : t("sessionThinkingLabel")}
         </span>
         <span className="thinking-icon">▼</span>
       </button>

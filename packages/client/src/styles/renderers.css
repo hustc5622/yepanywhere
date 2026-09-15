@@ -701,8 +701,16 @@ details[open] .collapsible__icon {
   overflow: hidden;
   color: var(--text-subtle, var(--text-muted));
   font-size: var(--font-size-sm);
+  font-style: italic;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+/* Shown only when there is no preview text to speak for the row. */
+.thinking-block__label {
+  flex: 0 0 auto;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
 }
 
 .thinking-block__state {
