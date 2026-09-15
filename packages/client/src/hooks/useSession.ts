@@ -873,7 +873,8 @@ export function useSession(
     };
   }, [historyRewriteRequest, historyRewriteSignal, refreshSessionMessages]);
 
-  // Optimistic pending-message queue, reconciled against `messages` inside the hook.
+  // Reconcile optimistic messages against accepted prompts and the server queue,
+  // including queue snapshots restored by the connected event.
   const acceptedPrompts = useMemo(
     () =>
       displayPage
@@ -908,7 +909,7 @@ export function useSession(
     addPendingMessage,
     removePendingMessage,
     updatePendingMessage,
-  } = usePendingMessages(acceptedPrompts);
+  } = usePendingMessages(acceptedPrompts, deferredMessages);
 
   const messagesRef = useRef(messages);
   useEffect(() => {

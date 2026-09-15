@@ -107,11 +107,14 @@ export interface UsePendingMessagesResult {
 
 /**
  * Owns the optimistic pending-message queue and its reconciliation against the
- * authoritative message list. Extracted from useSession to shrink that hook and
- * isolate a self-contained concern.
+ * authoritative message list and server-side deferred queue. Queue acceptance
+ * confirms submission even before the message appears in the transcript or the
+ * HTTP request finishes. Match queue entries by tempId only: repeated text may
+ * belong to separate submissions with different attachments.
  */
 export function usePendingMessages(
   messages: Message[],
+  deferredMessages?: ReadonlyArray<{ tempId?: string }>,
 ): UsePendingMessagesResult {
   const [pendingMessages, setPendingMessages] = useState<PendingMessage[]>([]);
   const messagesRef = useRef(messages);
@@ -119,8 +122,17 @@ export function usePendingMessages(
   const visibleAtSubmission = useRef(new Map<string, Set<string>>());
 
   useEffect(() => {
+    const queuedTempIds = new Set(
+      deferredMessages?.flatMap((message) =>
+        message.tempId ? [message.tempId] : [],
+      ),
+    );
     setPendingMessages((prev) => {
       const next = prev.filter((pending) => {
+        if (queuedTempIds.has(pending.tempId)) {
+          visibleAtSubmission.current.delete(pending.tempId);
+          return false;
+        }
         const baseline = visibleAtSubmission.current.get(pending.tempId);
         const eligible = baseline
           ? messages.filter((message) => {
@@ -140,7 +152,7 @@ export function usePendingMessages(
       });
       return next.length === prev.length ? prev : next;
     });
-  }, [messages]);
+  }, [messages, deferredMessages]);
 
   // Add a message to the pending queue.
   // Generates a tempId that will be sent to the server and echoed back in stream.
