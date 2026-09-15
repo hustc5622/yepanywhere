@@ -94,8 +94,8 @@ function renderLocalMediaLink(
 
 /**
  * Render a local text file link without routing it through the media endpoint.
- * The client maps project-local paths to FileViewer and can fetch configured
- * local text files through /api/local-file.
+ * The client maps project-local paths to FileViewer and can fetch other
+ * local text files through /api/local-file without a project or session scope.
  */
 function renderLocalTextFileLink(
   rawPath: string,

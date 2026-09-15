@@ -267,8 +267,6 @@ export interface AppOptions {
   voiceInputEnabled?: boolean;
   /** Allowed directory prefixes for serving local images. Default: ["/tmp"] */
   allowedImagePaths?: string[];
-  /** Allowed directory prefixes for serving local markdown/text files. */
-  allowedLocalFilePaths?: string[];
   /** Directory containing Markdown report documents for the Reports page. */
   reportsDir?: string;
   /**
@@ -1648,18 +1646,8 @@ export function createApp(options: AppOptions): AppResult {
     );
   }
 
-  // Local markdown/text file serving (opt-in, restricted to allowed paths)
-  if (
-    options.allowedLocalFilePaths &&
-    options.allowedLocalFilePaths.length > 0
-  ) {
-    app.route(
-      "/api/local-file",
-      createLocalFileRoutes({
-        allowedPaths: options.allowedLocalFilePaths,
-      }),
-    );
-  }
+  // Local document previews are available across projects and sessions.
+  app.route("/api/local-file", createLocalFileRoutes());
 
   // Push notification routes
   if (options.pushService) {

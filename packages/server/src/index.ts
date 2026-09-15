@@ -942,7 +942,6 @@ async function startServer() {
     voiceInputEnabled: config.voiceInputEnabled,
     maxUploadSizeBytes: config.maxUploadSizeBytes,
     allowedImagePaths: config.allowedImagePaths,
-    allowedLocalFilePaths: config.allowedLocalFilePaths,
     basePath: config.basePath,
     runtimeController: configuredRuntimeController,
     interactionBroker,

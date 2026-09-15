@@ -1,11 +1,10 @@
 import { readFile, realpath, stat } from "node:fs/promises";
-import { extname, sep } from "node:path";
+import { extname } from "node:path";
 import { parseLineColumn } from "@yep-anywhere/shared";
 import { Hono } from "hono";
 import { renderMarkdownToHtml } from "../augments/markdown-augments.js";
 
 interface LocalFileDeps {
-  allowedPaths: string[];
   maxInlineSizeBytes?: number;
 }
 
@@ -22,41 +21,15 @@ function isMarkdownPath(path: string): boolean {
   return ext === ".md" || ext === ".markdown";
 }
 
-function isWithinAllowedPath(filePath: string, allowedPath: string): boolean {
-  const prefix =
-    allowedPath.endsWith(sep) && allowedPath !== sep
-      ? allowedPath.slice(0, -1)
-      : allowedPath;
-  return filePath === prefix || filePath.startsWith(`${prefix}${sep}`);
-}
-
 /**
- * Create routes for serving small local text files from explicit safe roots.
+ * Serve small local text files readable by the server, regardless of project
+ * or session. This route uses the application's normal API authentication.
  *
- * Security: This route intentionally supports only .md/.markdown/.txt files,
- * requires an absolute path under an allowed directory, resolves symlinks, and
- * refuses large files. Project-local source files should continue to use the
- * project file API, which is scoped by project id.
+ * Supports .md/.markdown/.txt files at absolute paths and refuses large files.
  */
-export function createLocalFileRoutes(deps: LocalFileDeps) {
+export function createLocalFileRoutes(deps: LocalFileDeps = {}) {
   const routes = new Hono();
   const maxInlineSizeBytes = deps.maxInlineSizeBytes ?? MAX_INLINE_SIZE;
-
-  let resolvedAllowedPaths: string[] | null = null;
-  async function getAllowedPaths(): Promise<string[]> {
-    if (!resolvedAllowedPaths) {
-      resolvedAllowedPaths = await Promise.all(
-        deps.allowedPaths.map(async (p) => {
-          try {
-            return await realpath(p);
-          } catch {
-            return p;
-          }
-        }),
-      );
-    }
-    return resolvedAllowedPaths;
-  }
 
   routes.get("/", async (c) => {
     const rawPath = c.req.query("path");
@@ -80,15 +53,6 @@ export function createLocalFileRoutes(deps: LocalFileDeps) {
       resolvedPath = await realpath(filePath);
     } catch {
       return c.json({ error: "File not found" }, 404);
-    }
-
-    const allowed = await getAllowedPaths();
-    if (
-      !allowed.some((allowedPath) =>
-        isWithinAllowedPath(resolvedPath, allowedPath),
-      )
-    ) {
-      return c.json({ error: "Path not in allowed directories" }, 403);
     }
 
     const stats = await stat(resolvedPath);
