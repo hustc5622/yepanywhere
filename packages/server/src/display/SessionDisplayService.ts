@@ -887,15 +887,11 @@ export class SessionDisplayService {
     cursor?: string,
   ): Promise<SessionDisplayGroupPage> {
     const entry = await this.get(selection);
+    // Closed groups still retain their lightweight index. Use the same group
+    // membership as the displayed snapshot, including when paginating: history
+    // may record long-running tools in completion order across text boundaries.
+    // Only groups outside this projection need to be reconstructed from history.
     let steps = entry.model?.groupSteps(groupId);
-    const group = entry.snapshot?.nodes.find((n) => n.id === groupId);
-    if (
-      cursor ||
-      (group?.type === "segment" &&
-        group.segment.type === "tool_group" &&
-        group.segment.displayMode === "summary")
-    )
-      steps = null;
     if (!steps) {
       const locator = decodeDisplayToolId(groupId.replace(/^dg2\./, "dt2."));
       if (!locator) throw new Error("Invalid display group id");

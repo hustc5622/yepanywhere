@@ -57,6 +57,141 @@ function fixture(pollMs = 60_000) {
   };
 }
 describe("SessionDisplayService", () => {
+  it.each([11, 55])(
+    "reads all %i closed-group steps from the displayed index despite reordered history",
+    async (count) => {
+      const { service, source, push } = fixture();
+      await service.subscribe(selection, vi.fn());
+      const invocation = (id: string): Message => ({
+        uuid: `${id}-turn`,
+        type: "assistant",
+        codexTurnId: "turn",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id,
+              name: "Bash",
+              input: { command: `run ${id}` },
+            },
+          ],
+        },
+      });
+      const result = (id: string): Message => ({
+        uuid: `${id}-result`,
+        type: "user",
+        codexTurnId: "turn",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: id,
+              content: "RESULT_BODY_SHOULD_STAY_LAZY",
+            },
+          ],
+        },
+      });
+      const progress: Message = {
+        uuid: "progress-turn",
+        type: "assistant",
+        codexTurnId: "turn",
+        codexMessagePhase: "commentary",
+        message: { role: "assistant", content: "Checking progress" },
+      };
+      const fastCalls = Array.from({ length: count - 1 }, (_, i) =>
+        invocation(`fast-${i}`),
+      );
+      push("message", invocation("slow"));
+      for (const [index, call] of fastCalls.entries()) {
+        push("message", call);
+        push("message", result(`fast-${index}`));
+      }
+      push("message", progress);
+      push("message", invocation("later"));
+      // Persisted completion order moves the group's first tool past progress
+      // and into another group. Reconstructing the displayed group loses its ID.
+      source.detail.mockResolvedValue([
+        ...fastCalls,
+        progress,
+        invocation("later"),
+        invocation("slow"),
+        result("slow"),
+      ]);
+      const groupId = displayToolId("turn", "slow").replace("dt2.", "dg2.");
+      const snapshot = await service.snapshot(selection);
+      expect(snapshot.nodes.find((node) => node.id === groupId)).toMatchObject({
+        segment: { count, displayMode: "summary", runningCount: 1 },
+      });
+      const first = await service.group(selection, groupId);
+      expect(first.total).toBe(count);
+      expect(first.steps).toHaveLength(Math.min(50, count));
+      const earlier = first.nextCursor
+        ? await service.group(selection, groupId, first.nextCursor)
+        : undefined;
+      const steps = [...(earlier?.steps ?? []), ...first.steps];
+      expect(steps.map((step) => step.id)).toEqual([
+        displayToolId("turn", "slow"),
+        ...fastCalls.map((_, i) => displayToolId("turn", `fast-${i}`)),
+      ]);
+      expect(steps.every((step) => step.groupId === groupId)).toBe(true);
+      expect(steps[0]).toMatchObject({
+        status: "running",
+        summary: "run slow",
+      });
+      expect(earlier?.nextCursor).toBeUndefined();
+      expect(JSON.stringify(steps)).not.toContain(
+        "RESULT_BODY_SHOULD_STAY_LAZY",
+      );
+
+      push("message", result("slow"));
+      const updated = await service.group(
+        selection,
+        groupId,
+        String(count > 50 ? 5 : count),
+      );
+      expect(updated.steps[0]).toMatchObject({ status: "completed" });
+      expect(updated.total).toBe(count);
+      expect(source.detail).not.toHaveBeenCalled();
+      expect(source.read).toHaveBeenCalledTimes(1);
+    },
+  );
+  it("loads a group outside the current projection from history and paginates it", async () => {
+    const { service, source } = fixture();
+    const messages = Array.from(
+      { length: 55 },
+      (_, i): Message => ({
+        uuid: `old-${i}`,
+        type: "assistant",
+        codexTurnId: "older-turn",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: `old-${i}`,
+              name: "Bash",
+              input: { command: `old ${i}` },
+            },
+          ],
+        },
+      }),
+    );
+    source.detail.mockResolvedValue(messages);
+    const groupId = displayToolId("older-turn", "old-0").replace(
+      "dt2.",
+      "dg2.",
+    );
+    const page = await service.group(selection, groupId);
+    expect(page).toMatchObject({ total: 55, nextCursor: "5" });
+    expect(page.steps).toHaveLength(50);
+    const earlier = await service.group(selection, groupId, page.nextCursor);
+    expect(earlier.steps).toHaveLength(5);
+    expect(earlier.steps[0]?.id).toBe(displayToolId("older-turn", "old-0"));
+    expect(earlier.nextCursor).toBeUndefined();
+    expect(source.detail).toHaveBeenCalledWith(selection, "older-turn");
+  });
   it("retains per-call image previews in the compact live tool replay", () => {
     const message = {
       type: "assistant",
