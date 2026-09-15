@@ -160,6 +160,64 @@ describe("Settings Routes", () => {
       },
     );
 
+    it("accepts a non-Codex provider payload that nulls Codex-only fields", async () => {
+      // api.updateServerSettings serializes `undefined` as `null`, so a Pi save
+      // ships serviceTier/codexMcpMode as null instead of omitting them.
+      settings = {
+        ...settings,
+        newSessionDefaults: {
+          provider: "codex",
+          model: "gpt-6-astra",
+          serviceTier: "priority",
+          byProvider: {
+            codex: { model: "gpt-6-astra", serviceTier: "priority" },
+          },
+        },
+      };
+      const routes = createSettingsRoutes({
+        serverSettingsService: mockServerSettingsService,
+      });
+      const piDefaults = {
+        model: null,
+        thinking: "on:high",
+        reasoningEffort: "high",
+        serviceTier: null,
+        permissionMode: "bypassPermissions",
+        codexMcpMode: null,
+        codexModelProvider: null,
+      };
+
+      const response = await routes.request("/", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          newSessionDefaults: {
+            provider: "pi",
+            ...piDefaults,
+            byProvider: { pi: piDefaults },
+          },
+        }),
+      });
+
+      expect(response.status).toBe(200);
+      expect(settings.newSessionDefaults).toMatchObject({
+        provider: "pi",
+        thinking: "on:high",
+        reasoningEffort: "high",
+        permissionMode: "bypassPermissions",
+        byProvider: {
+          pi: {
+            thinking: "on:high",
+            reasoningEffort: "high",
+            permissionMode: "bypassPermissions",
+          },
+        },
+      });
+      expect(settings.newSessionDefaults?.byProvider?.pi).not.toHaveProperty(
+        "serviceTier",
+      );
+    });
+
     it("accepts Claude as the default provider", async () => {
       const routes = createSettingsRoutes({
         serverSettingsService: mockServerSettingsService,

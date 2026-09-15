@@ -310,7 +310,13 @@ function parseNewSessionProviderDefaults(
     }
   }
 
-  if (raw.serviceTier !== undefined) {
+  // Clients serialize "unset" as null (see api.updateServerSettings), so a
+  // null/empty tier must clear the field instead of failing validation.
+  if (
+    raw.serviceTier !== undefined &&
+    raw.serviceTier !== null &&
+    raw.serviceTier !== ""
+  ) {
     if (
       (raw.serviceTier !== "default" && raw.serviceTier !== "priority") ||
       (provider !== undefined && provider !== "codex")

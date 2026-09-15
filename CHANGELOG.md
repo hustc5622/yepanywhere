@@ -17,6 +17,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - 修复终端取消订阅 Codex 会话后 Yep 续聊误启独立 app-server、触发 `already has an active writer`：保留并持久化原 bridge profile；Codex 执行流退出后立即清理无效进程，入队失败展示具体原因。
 - 修复展开已折叠工具组或翻页时出现“无法加载工具列表”：优先复用生成当前展示的轻量工具索引，避免长任务迟到完成后历史重建顺序变化导致原分组找不到；工具正文继续按需加载。
 - 修复切换 ChatGPT 账号后 Codex bridge 继续复用旧登录状态而无法续聊：检测登录身份变化，在接收新轮次前等待旧 writer 进程退出并恢复原本地 session；保留正在执行的旧连接，空闲连接后续请求自动恢复，普通 token 续期不触发切换，已提交轮次不自动重放。
+- 修复非 Codex provider（Pi、Kimi 等）点击“设为默认”时返回 `Invalid newSessionDefaults setting`：客户端会把未设置的字段序列化为 `null`，服务端 `serviceTier` 校验此前未容忍 `null`，导致整份 newSessionDefaults 被判定非法。
 - 修复 Codex 续聊携带 provider/推理强度时意外回退到全局默认模型：未指定模型时沿用最近一轮的模型，更新历史摘要及索引缓存；修复警告经轻量展示转换后只显示“Warning”，保留完整正文。
 - 修复 Codex 查看图片时多个历史工具调用显示同一张截图：实时与历史预览按调用 ID 按需读取 rollout 中当次返回的图片，不再读取被覆盖的源文件；无法确定对应图片时明确提示不可用。本地可变图片接口取消一小时缓存。
 - 修复移动端键盘弹出后外层框架可被拖动、发送按钮随之滑到键盘下方的问题：导航文档与 APK iframe 外壳锁定为可视视口，跟随键盘高度更新，清除外层文档滚动偏移；仅消息区、输入框等内部区域保留滚动，消息滚动不再传递到外框。APK 外壳部分需更新 APK。
