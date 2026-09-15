@@ -609,10 +609,12 @@ export class CodexAppServerHistoryReader {
       }
       for (const entry of entries) {
         const itemType = (entry.item as { type?: unknown }).type;
+        // Titles need text from all turns, including those older than the
+        // bounded lifecycle metadata page; their timestamps/status are optional.
         if (
           typeof itemType !== "string" ||
           !KNOWN_THREAD_ITEM_TYPES.has(itemType) ||
-          !turnsById.has(entry.turnId)
+          (!options.titleProjection && !turnsById.has(entry.turnId))
         ) {
           throw new CodexHistoryParityError();
         }
@@ -626,7 +628,9 @@ export class CodexAppServerHistoryReader {
         (direction === "older" && !cursor) ||
           (direction === "newer" && !itemsPage.nextCursor),
         projectPath,
-        options.inspectorProjection ? "semantic-display" : "strict",
+        options.inspectorProjection || options.titleProjection
+          ? "semantic-display"
+          : "strict",
       );
       if (messages.length > messageLimit) {
         throw new CodexHistoryParityError();

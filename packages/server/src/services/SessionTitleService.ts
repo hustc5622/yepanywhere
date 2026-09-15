@@ -1061,6 +1061,9 @@ export class SessionTitleService {
                     "Required title language:",
                     requiredLanguage,
                     "",
+                    "First user message (original request):",
+                    normalizeForPrompt(input.userMessage),
+                    "",
                     "Session transcript at the time the user requested a title (tool calls and tool results omitted):",
                     formatSessionTitleTranscript(input.transcript),
                   ].join("\n")

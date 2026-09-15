@@ -35,6 +35,8 @@ export interface GetSessionOptions {
    * those bodies before responding; ordinary transcript reads remain strict.
    */
   inspectorProjection?: boolean;
+  /** Preserve conversation text for titles; media/tool artifacts may use placeholders. */
+  titleProjection?: boolean;
   /** Return only a bounded message window (Codex uses this before parsing). */
   maxMessages?: number;
   /** Number of compact boundaries to retain at the tail (Codex). */

@@ -1681,6 +1681,61 @@ describe("CodexAppServerHistoryReader", () => {
     ]);
   });
 
+  it("reads original title text and image placeholders beyond the recent turn metadata page", async () => {
+    const fake = client({
+      listItems: vi.fn(async () => ({
+        data: [
+          {
+            turnId: "inherited-turn-older-than-the-latest-100-turns",
+            item: {
+              type: "userMessage" as const,
+              id: "original-request",
+              clientId: null,
+              content: [
+                {
+                  type: "text" as const,
+                  text: "建立通用断言展示机制",
+                  text_elements: [],
+                },
+                {
+                  type: "localImage" as const,
+                  path: "/tmp/project/original.png",
+                },
+              ],
+            },
+          },
+        ],
+        nextCursor: null,
+        backwardsCursor: "newer-items",
+      })),
+    });
+    const reader = new CodexAppServerHistoryReader({ client: fake });
+    const result = await reader.getSession(
+      thread().id,
+      "project" as UrlProjectId,
+      "/tmp/project",
+      undefined,
+      {
+        titleProjection: true,
+        beforeMessageId: encodeCodexAppServerCursor("oldest-page", {
+          direction: "older",
+          sessionId: thread().id,
+        }),
+      },
+    );
+    expect(result.kind).toBe("loaded");
+    if (result.kind !== "loaded") throw new Error("Expected title history");
+    expect(result.session.projectedMessages?.[0]?.message?.content).toEqual([
+      { type: "text", text: "建立通用断言展示机制" },
+      {
+        type: "input_image",
+        file_path: "/tmp/project/original.png",
+        deferred: true,
+      },
+    ]);
+    expect(result.session.pagination?.hasOlderMessages).toBe(false);
+  });
+
   it("keeps a source-locked Inspector page readable when it contains a body-only native item", async () => {
     const fake = client({
       listItems: vi.fn(async () => ({

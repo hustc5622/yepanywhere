@@ -139,7 +139,6 @@ import {
 } from "./sessions/codex-session-manifest.js";
 import { GeminiSessionReader } from "./sessions/gemini-reader.js";
 import { KimiSessionReader } from "./sessions/kimi-reader.js";
-import { normalizeSession } from "./sessions/normalization.js";
 import { PI_SESSIONS_DIR } from "./sessions/pi-files.js";
 import { PiSessionReader } from "./sessions/pi-reader.js";
 import { normalizeProviderGroup } from "./sessions/provider-groups.js";
@@ -149,6 +148,7 @@ import {
   resolveSessionSources,
 } from "./sessions/provider-resolution.js";
 import { ClaudeSessionReader } from "./sessions/reader.js";
+import { loadSessionTitleContext } from "./sessions/session-title-context.js";
 import type { ISessionReader } from "./sessions/types.js";
 import { ZCODE_DB_PATH } from "./sessions/zcode-db.js";
 import { ZCodeSessionReader } from "./sessions/zcode-reader.js";
@@ -908,15 +908,29 @@ export function createApp(options: AppOptions): AppResult {
           },
           options.sessionMetadataService?.getProvider(sessionId),
         );
-        const loaded = await resolved?.source.reader.getSession(
+        if (!resolved) return null;
+        const session = await loadSessionTitleContext(
+          resolved.source.reader,
           sessionId,
           project.id,
-          undefined,
-          { includeOrphans: false },
+          codexAppServerHistoryReader &&
+            normalizeProviderGroup(resolved.summary.provider) === "codex"
+            ? {
+                getSession: async (id, pid, after, readOptions = {}) => {
+                  const result = await codexAppServerHistoryReader.getSession(
+                    id,
+                    pid,
+                    project.path,
+                    after,
+                    { ...readOptions, titleProjection: true },
+                  );
+                  return result.kind === "loaded" ? result.session : null;
+                },
+              }
+            : undefined,
         );
-        if (!loaded) return null;
+        if (!session) return null;
 
-        const session = normalizeSession(loaded);
         const metadata = options.sessionMetadataService?.getMetadata(sessionId);
         return {
           ...session,

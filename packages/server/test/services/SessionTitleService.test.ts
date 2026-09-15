@@ -6,6 +6,8 @@ import type { UrlProjectId } from "@yep-anywhere/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { SessionMetadataService } from "../../src/metadata/SessionMetadataService.js";
 import { SessionTitleService } from "../../src/services/SessionTitleService.js";
+import { loadSessionTitleContext } from "../../src/sessions/session-title-context.js";
+import type { LoadedSession } from "../../src/sessions/types.js";
 import type { Session } from "../../src/supervisor/types.js";
 import { EventBus } from "../../src/watcher/EventBus.js";
 
@@ -241,6 +243,80 @@ describe("SessionTitleService", () => {
         aiTitle: "手动生成完整会话标题",
       }),
     );
+  });
+
+  it("sends the original request from older pages to the title model before release progress", async () => {
+    const original = "建立通用失败证据采集与展示机制，不要逐个 Case 适配";
+    const makePage = (
+      messages: Session["messages"],
+      older: boolean,
+    ): LoadedSession => ({
+      summary: createSession({
+        provider: "codex",
+        title: "继续吧",
+        fullTitle: "继续吧",
+      }),
+      data: { provider: "codex", session: { entries: [] } },
+      projectedMessages: messages,
+      pagination: {
+        hasOlderMessages: older,
+        truncatedBeforeMessageId: older ? "cursor" : undefined,
+        totalMessageCount: 3,
+        returnedMessageCount: messages.length,
+        totalCompactions: 0,
+      },
+    });
+    const getSession = vi
+      .fn()
+      .mockResolvedValueOnce(
+        makePage(
+          [
+            { id: "continue", type: "user", content: "继续吧" },
+            {
+              id: "release",
+              type: "assistant",
+              content: "发布门禁通过，准备提交并打 tag",
+            },
+          ],
+          true,
+        ),
+      )
+      .mockResolvedValueOnce(
+        makePage([{ id: "first", type: "user", content: original }], false),
+      );
+    const fetchMock = vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            choices: [
+              { message: { content: '{"title":"通用失败证据采集与展示"}' } },
+            ],
+          }),
+        ),
+    );
+    const service = new SessionTitleService({
+      eventBus,
+      metadataService,
+      apiKey: "test-key",
+      fetchImpl: fetchMock,
+      loadSession: (sessionId, projectId) =>
+        loadSessionTitleContext({ getSession }, sessionId, projectId),
+    });
+
+    await service.generateTitleManually(
+      "session-1",
+      "project-1" as UrlProjectId,
+    );
+
+    const body = JSON.parse(String(fetchMock.mock.calls[0]?.[1]?.body));
+    const prompt = body.messages[1].content as string;
+    expect(prompt).toContain(
+      `First user message (original request):\n${original}`,
+    );
+    expect(prompt).toContain(`User input:\n${original}`);
+    expect(prompt).toContain("发布门禁通过，准备提交并打 tag");
+    expect(prompt.indexOf(original)).toBeLessThan(prompt.indexOf("继续吧"));
+    expect(getSession).toHaveBeenCalledTimes(2);
   });
 
   it("uses the session prompt summary when Codex history retains only tool-result user messages", async () => {
