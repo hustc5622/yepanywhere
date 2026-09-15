@@ -2107,6 +2107,21 @@ export class Process {
               new Error("Provider ended before returning a session ID"),
             );
           }
+          // Codex's resident iterator only ends when its transport is closed.
+          // Retain blocked drafts for recovery, but remove empty dead processes
+          // so a retry can resume the session instead of entering a closed queue.
+          if (
+            this.provider === "codex" &&
+            this.messageQueue &&
+            this.deferredQueue.length === 0
+          ) {
+            const error = this.getProviderInitializationError();
+            this.markTerminated(
+              error?.message ?? "Codex provider exited",
+              error ?? undefined,
+            );
+            break;
+          }
           // Don't transition to idle if we're waiting for input
           if (this._state.type !== "waiting-input") {
             this.transitionToIdle();
@@ -2382,9 +2397,19 @@ export class Process {
 
       // Detect process termination errors - set flag synchronously BEFORE markTerminated
       // to prevent race where queueMessage is called before state changes to terminated
-      if (this.isProcessTerminationError(err)) {
+      if (
+        this.isProcessTerminationError(err) ||
+        (this.provider === "codex" &&
+          this.messageQueue &&
+          this.deferredQueue.length === 0)
+      ) {
         this.transportFailed = true;
-        this.markTerminated("underlying process terminated", err);
+        this.markTerminated(
+          this.provider === "codex"
+            ? err.message
+            : "underlying process terminated",
+          err,
+        );
         return;
       }
 

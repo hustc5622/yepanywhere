@@ -1652,7 +1652,7 @@ export class SessionCommandService {
           code: result.error,
         });
       }
-      return commandFailure("Failed to queue message", 410, {
+      return commandFailure(result.error ?? "Failed to queue message", 410, {
         reason: result.error,
       });
     }

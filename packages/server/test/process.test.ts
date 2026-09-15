@@ -754,6 +754,38 @@ describe("Process", () => {
       });
       await process.abort();
     });
+
+    it("terminates a failed Codex resident process and preserves the startup error", async () => {
+      const error = "thread sess-1 already has an active writer";
+      const queue = new MessageQueue();
+      const process = new Process(
+        createMockIterator([
+          { type: "error", session_id: "sess-1", error },
+          { type: "result", session_id: "sess-1" },
+        ]),
+        {
+          projectPath: "/test",
+          projectId: "proj-1",
+          sessionId: "sess-1",
+          provider: "codex",
+          queue,
+        },
+      );
+      const complete = vi.fn();
+      process.subscribe((event) => {
+        if (event.type === "complete") complete();
+      });
+      await vi.waitFor(() => expect(process.state.type).toBe("terminated"));
+      expect(process.terminationReason).toBe(error);
+      expect(queue.isClosed).toBe(true);
+      expect(complete).toHaveBeenCalledTimes(1);
+      await expect(
+        process.queueMessage({ text: "retry" }),
+      ).resolves.toMatchObject({
+        success: false,
+        error: `Process terminated: ${error}`,
+      });
+    });
   });
 
   describe("getInfo", () => {

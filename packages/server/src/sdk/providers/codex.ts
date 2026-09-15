@@ -1432,7 +1432,16 @@ export class CodexProvider implements AgentProvider {
         active?: unknown;
         mcpProfile?: unknown;
       };
-      if (activePayload.active !== true) return null;
+      const mcpProfile =
+        activePayload.mcpProfile === "clear" ||
+        activePayload.mcpProfile === "light" ||
+        activePayload.mcpProfile === "full"
+          ? activePayload.mcpProfile
+          : undefined;
+      // A detached TUI is no longer active in the bridge, but its app-server
+      // can still own the thread. Rejoin that profile instead of spawning a
+      // competing stdio writer during (or after) the unload delay.
+      if (activePayload.active !== true && !mcpProfile) return null;
 
       const statusResponse = await fetch(`${config.controlUrl}/status`, {
         headers,
@@ -1467,12 +1476,6 @@ export class CodexProvider implements AgentProvider {
           "Codex bridge returned a WebSocket endpoint on a different host",
         );
       }
-      const mcpProfile =
-        activePayload.mcpProfile === "clear" ||
-        activePayload.mcpProfile === "light" ||
-        activePayload.mcpProfile === "full"
-          ? activePayload.mcpProfile
-          : undefined;
       if (
         mcpProfile === "clear" ||
         (!mcpProfile && options.codexMcpMode === "clear")

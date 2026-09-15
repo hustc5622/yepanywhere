@@ -2078,6 +2078,14 @@ describe("CodexBridgeService", () => {
         active: false,
         activity: "idle",
       });
+      const routing = await fetch(
+        `http://127.0.0.1:${bridgePort}/sessions/thread-unsubscribe/active`,
+        { headers: { authorization: `Bearer ${BRIDGE_CONTROL_TOKEN}` } },
+      );
+      expect(await routing.json()).toEqual({
+        active: false,
+        mcpProfile: "light",
+      });
     } finally {
       client.close();
     }
@@ -3389,6 +3397,7 @@ describe("CodexBridgeService", () => {
         {
           id: "thread-persist",
           ephemeral: false,
+          executionProfile: "light",
         },
       ],
     });
@@ -3417,6 +3426,13 @@ describe("CodexBridgeService", () => {
           percentage: 20,
           contextWindow: 16_000,
         },
+      });
+      const routing = await fetch(
+        `http://127.0.0.1:${portB}/sessions/thread-persist/active`,
+      );
+      expect(await routing.json()).toEqual({
+        active: false,
+        mcpProfile: "light",
       });
     } finally {
       await second.shutdown();

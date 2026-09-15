@@ -984,6 +984,24 @@ describe("SessionCommandService runtime boundary", () => {
     });
   });
 
+  it("exposes the runtime rejection instead of a generic queue failure", async () => {
+    const error = "Process provider is no longer accepting messages";
+    const service = createService({
+      getProcessSnapshotForSession: vi.fn(async () => processSnapshot()),
+      queueMessage: vi.fn(async () => ({ success: false, error })),
+    });
+    await expect(
+      service.queue({
+        sessionId: "session-1",
+        body: { message: "retry" },
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      status: 410,
+      body: { error, reason: error },
+    });
+  });
+
   it("interrupts the active turn and closes interaction aliases", async () => {
     const terminateInteractionOperations = vi.fn(async () => []);
     const interactions = interactionService({

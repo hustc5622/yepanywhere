@@ -62,6 +62,40 @@ describe("Supervisor", () => {
   });
 
   describe("startSession", () => {
+    it("removes a failed Codex resume so retry starts a fresh provider", async () => {
+      const startSession = vi.fn(async () => {
+        async function* iterator() {
+          yield {
+            type: "error",
+            session_id: "writer-locked",
+            error: "thread writer-locked already has an active writer",
+          };
+          yield { type: "result", session_id: "writer-locked" };
+        }
+        return {
+          iterator: iterator(),
+          queue: new MessageQueue(),
+          abort: () => {},
+        };
+      });
+      const local = new Supervisor({
+        provider: createCodexTestProvider(startSession),
+        idleTimeoutMs: 60_000,
+      });
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const resumed = await local.resumeSession(
+          "writer-locked",
+          "/tmp/test",
+          { text: "retry" },
+        );
+        expect(resumed).toHaveProperty("id");
+        await vi.waitFor(() => {
+          expect(local.getProcessForSession("writer-locked")).toBeUndefined();
+        });
+        expect(startSession).toHaveBeenCalledTimes(attempt);
+      }
+    });
+
     it("starts a session and returns a process", async () => {
       mockSdk.addScenario(createMockScenario("sess-123", "Hello!"));
 

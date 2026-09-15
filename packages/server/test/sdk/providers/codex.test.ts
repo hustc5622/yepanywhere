@@ -1737,6 +1737,13 @@ process.stdin.on("data", (chunk) => {
 
     it.each([
       {
+        name: "unsubscribed bridge thread with a retained writer",
+        initialTurnPresent: false,
+        runtimeStatus: "idle" as const,
+        startsNewTurn: true,
+        bridgeActive: false,
+      },
+      {
         name: "idle metadata after steer",
         initialTurnPresent: true,
         runtimeStatus: "idle" as const,
@@ -1756,7 +1763,12 @@ process.stdin.on("data", (chunk) => {
       },
     ])(
       "handles bridge rejoin safely for $name",
-      async ({ initialTurnPresent, runtimeStatus, startsNewTurn }) => {
+      async ({
+        initialTurnPresent,
+        runtimeStatus,
+        startsNewTurn,
+        bridgeActive = true,
+      }) => {
         const requests: Array<{
           method: string;
           params?: Record<string, unknown>;
@@ -1764,7 +1776,9 @@ process.stdin.on("data", (chunk) => {
         const httpServer = createServer((req, res) => {
           res.setHeader("content-type", "application/json");
           if (req.url === "/sessions/thread-bridge/active") {
-            res.end(JSON.stringify({ active: true, mcpProfile: "full" }));
+            res.end(
+              JSON.stringify({ active: bridgeActive, mcpProfile: "full" }),
+            );
             return;
           }
           if (req.url === "/status") {
@@ -1802,7 +1816,9 @@ process.stdin.on("data", (chunk) => {
                   cwd: "/repo",
                   modelProvider: "openai",
                   historyMode: "paginated",
-                  status: { type: "active", activeFlags: [] },
+                  status: bridgeActive
+                    ? { type: "active", activeFlags: [] }
+                    : { type: "idle" },
                   turns: [],
                   forkedFromId: null,
                 },

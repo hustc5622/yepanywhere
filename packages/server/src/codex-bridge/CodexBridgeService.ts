@@ -199,6 +199,8 @@ interface PendingServerRequest {
 
 interface SessionRecord {
   id: string;
+  /** Routing survives unsubscribe: the upstream may still hold the writer lock. */
+  executionProfile?: CodexBridgeUpstreamProfile;
   /**
    * Whether Codex declared this thread ephemeral. Undefined is reserved for
    * incomplete metadata and legacy persisted bridge state; neither is safe to
@@ -247,6 +249,7 @@ interface SessionRecord {
 /** JSON-serializable subset of SessionRecord persisted across bridge restarts. */
 interface PersistedSessionRecord {
   id: string;
+  executionProfile?: CodexBridgeUpstreamProfile;
   /** Missing from version 1 state. Ephemeral records are never persisted. */
   ephemeral?: boolean;
   isSubagent: boolean;
@@ -685,7 +688,7 @@ export class CodexBridgeService implements CodexBridgeController {
     sessionId: string,
   ): CodexBridgeUpstreamProfile | null {
     const record = this.sessions.get(sessionId);
-    if (!record) return null;
+    if (!record || !this.isTopLevelSessionRecord(record)) return null;
     const candidates = Array.from(record.connectionIds)
       .map((connectionId) => this.connections.get(connectionId))
       .filter((connection): connection is BridgeConnection =>
@@ -694,6 +697,7 @@ export class CodexBridgeService implements CodexBridgeController {
     return (
       candidates.find((connection) => connection.downstreamAttached)?.profile ??
       candidates[0]?.profile ??
+      record.executionProfile ??
       null
     );
   }
@@ -967,11 +971,12 @@ export class CodexBridgeService implements CodexBridgeController {
       }
       if (req.method === "GET" && pathParts[2] === "active") {
         const active = this.isSessionActive(sessionId);
+        const mcpProfile = this.getSessionExecutionProfile(sessionId);
         writeJson(res, 200, {
           active,
-          ...(active
-            ? { mcpProfile: this.getSessionExecutionProfile(sessionId) }
-            : {}),
+          // Subscription state does not say whether the upstream has unloaded
+          // the thread. Keep routing known threads through their original profile.
+          ...(mcpProfile ? { mcpProfile } : {}),
         });
         return;
       }
@@ -2898,6 +2903,7 @@ export class CodexBridgeService implements CodexBridgeController {
   ): void {
     connection.threadIds.add(threadId);
     const record = this.ensureSessionRecord(threadId, {});
+    record.executionProfile = connection.profile;
     record.connectionIds.add(connection.id);
   }
 
@@ -2949,6 +2955,7 @@ export class CodexBridgeService implements CodexBridgeController {
       )
       .map((record) => ({
         id: record.id,
+        executionProfile: record.executionProfile,
         ephemeral: false,
         isSubagent: record.isSubagent,
         threadMetadataKnown: record.threadMetadataKnown,
@@ -3028,6 +3035,12 @@ export class CodexBridgeService implements CodexBridgeController {
       }
       const record: SessionRecord = {
         id: stored.id,
+        executionProfile:
+          stored.executionProfile === "light" ||
+          stored.executionProfile === "clear" ||
+          stored.executionProfile === "full"
+            ? stored.executionProfile
+            : undefined,
         ephemeral: false,
         isSubagent: stored.isSubagent === true,
         threadMetadataKnown: stored.threadMetadataKnown === true,
