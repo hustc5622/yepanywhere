@@ -3592,6 +3592,8 @@ export function convertZCodeMessages(session: ZCodeSessionContent): Message[] {
     for (const tr of toolResults) {
       messages.push({
         type: "user",
+        // Synthesized results need stable identities for pagination cursors.
+        uuid: `${stored.id}-result-${tr.toolUseId}`,
         session_id: sid,
         tool_use_id: tr.toolUseId,
         message: {

@@ -14,6 +14,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - APK 侧边栏新增 Home、Mini 服务快捷切换，分别显示最近 24 小时已结束且未读的会话数；打开侧边栏时独立查询两端并每 15 秒刷新，区分离线与需要登录，切换服务不清除未读。Inbox 新增分页截断前的完整计数，兼容旧服务时对可能截断的计数显示 `+`。
 
 ### Fixed
+- 修复 ZCode 长会话索引加载失败：为转换后的工具结果补齐稳定消息 ID，确保分页从工具结果开始时仍能生成游标并读取完整历史。
 - 修复终端取消订阅 Codex 会话后 Yep 续聊误启独立 app-server、触发 `already has an active writer`：保留并持久化原 bridge profile；Codex 执行流退出后立即清理无效进程，入队失败展示具体原因。
 - 修复展开已折叠工具组或翻页时出现“无法加载工具列表”：优先复用生成当前展示的轻量工具索引，避免长任务迟到完成后历史重建顺序变化导致原分组找不到；工具正文继续按需加载。
 - 修复切换 ChatGPT 账号后 Codex bridge 继续复用旧登录状态而无法续聊：检测登录身份变化，在接收新轮次前等待旧 writer 进程退出并恢复原本地 session；保留正在执行的旧连接，空闲连接后续请求自动恢复，普通 token 续期不触发切换，已提交轮次不自动重放。

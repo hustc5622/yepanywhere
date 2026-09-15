@@ -16,6 +16,7 @@ import type {
 } from "@yep-anywhere/shared";
 import { describe, expect, it } from "vitest";
 import { convertZCodeMessages } from "../../src/sessions/normalization.js";
+import { sliceAtCompactBoundaries } from "../../src/sessions/pagination.js";
 
 function makeMessage(
   id: string,
@@ -98,6 +99,60 @@ describe("convertZCodeMessages", () => {
     >;
     expect(resultContent[0]?.type).toBe("tool_result");
     expect(resultContent[0]?.tool_use_id).toBe("tool-1");
+  });
+
+  it("paginates through tool results with stable, distinct message IDs", () => {
+    const session = makeSession([
+      makeMessage("question", "user", [
+        { type: "text", text: "Inspect files" },
+      ]),
+      makeMessage("tools", "assistant", [
+        {
+          id: "part-completed",
+          type: "tool",
+          callID: "call-completed",
+          tool: "Read",
+          state: { status: "completed", output: "file content" },
+        },
+        {
+          id: "part-error",
+          type: "tool",
+          tool: "Read",
+          state: { status: "error", output: "File not found" },
+        },
+      ]),
+      ...Array.from({ length: 99 }, (_, index) =>
+        makeMessage(`text-${index}`, "assistant", [
+          { type: "text", text: "More history" },
+        ]),
+      ),
+    ]);
+    const messages = convertZCodeMessages(session);
+    expect(messages).toHaveLength(103);
+    const latest = sliceAtCompactBoundaries(messages, 2, undefined, 100);
+    expect(latest.messages[0]?.tool_use_id).toBe("part-error");
+    expect(latest.pagination.hasOlderMessages).toBe(true);
+    expect(latest.pagination.truncatedBeforeMessageId).toEqual(
+      expect.any(String),
+    );
+
+    const older = sliceAtCompactBoundaries(
+      messages,
+      2,
+      latest.pagination.truncatedBeforeMessageId,
+      100,
+    );
+    expect(older.pagination.hasOlderMessages).toBe(false);
+    expect([...older.messages, ...latest.messages]).toEqual(messages);
+
+    const ids = messages.map((message) => message.uuid);
+    expect(ids.every((id) => typeof id === "string" && id.length > 0)).toBe(
+      true,
+    );
+    expect(new Set(ids).size).toBe(messages.length);
+    expect(
+      convertZCodeMessages(session).map((message) => message.uuid),
+    ).toEqual(ids);
   });
 
   it("marks tool_result with error status on error", () => {
