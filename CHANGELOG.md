@@ -14,6 +14,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - APK 侧边栏新增 Home、Mini 服务快捷切换，分别显示最近 24 小时已结束且未读的会话数；打开侧边栏时独立查询两端并每 15 秒刷新，区分离线与需要登录，切换服务不清除未读。Inbox 新增分页截断前的完整计数，兼容旧服务时对可能截断的计数显示 `+`。
 
 ### Fixed
+- 修复 Pi 会话被手动中断后在会话列表被标成红色「失败」的问题。UI 的停止按钮走 `interrupt`（RPC `abort`），但当取消发生在首个流事件之前时，Pi 记录的最后一条 assistant entry 是 `stopReason: "error"` + `errorMessage: "This operation was aborted"`（Node `AbortError` 原文）而不是它自己契约里的 `"aborted"`；`derivePiSession` 把所有 `error` 一律映射为 `lastTurnStatus: "failed"` 并回填 `lastErrorMessage`，而 `SessionStatusBadge` 中 failed 分支（含“有任何错误文案即失败”）优先于 interrupted 分支，于是中断显示为失败、且看不到「继续」入口。现在按已知取消文案的白名单把这类 `error` 判为 `interrupted`，并且不再把中断文案写入 `lastErrorMessage`；提到 abort 的真实 provider 报错仍报失败（本机 237 个 Pi session 命中 1 条，另外 27 条真实失败不受影响）。
 - 修复 Codex `/compact` 缺少会话内进度的问题：触发后立即展示压缩提示，空闲期间实时消费原生压缩通知，轻量会话流同步压缩状态，完成后保留时间线记录，失败或中断时清理进度。
 - 修复长会话生成标题时只读取尾部历史、遗漏最初用户需求而偏向提交和发布进度的问题：生成前补齐全部历史分页及 Codex 分支继承的原始需求，按时间顺序合并去重，并在标题上下文中明确保留首条用户输入；历史读取不完整时不再使用片段生成标题。
 - 修复排队消息同时残留“发送中”占位、切换会话后展示变化的问题：实时队列及重连快照按消息 tempId 清理已确认入队的本地占位，保留同文案的其他独立提交。

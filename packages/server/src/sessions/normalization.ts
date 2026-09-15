@@ -593,6 +593,45 @@ function isPiUsageBearingAssistant(message: PiAssistantMessage): boolean {
   return piContextTokens(message.usage) > 0;
 }
 
+/**
+ * Error messages Pi persists when a turn was cancelled rather than broken.
+ *
+ * Pi's own contract (`references/pi/packages/agent/docs/harness.md`) settles a
+ * user abort as `stopReason: "aborted"`, but a request cancelled before its
+ * first stream event surfaces as the raw `AbortError` from `fetch`, which lands
+ * in the generic error branch (`output.stopReason = signal?.aborted ?
+ * "aborted" : "error"`) with an all-zero usage and empty content. Treating
+ * those as failures showed a red "failed" badge for every interrupt taken while
+ * the provider was still connecting.
+ */
+const PI_ABORT_ERROR_MESSAGES = new Set([
+  // Node/undici `DOMException` for `controller.abort()` with no reason.
+  "this operation was aborted",
+  "the operation was aborted",
+  // Thrown by Pi's own API adapters once they observe the pulled signal.
+  "request was aborted",
+  "request aborted by user",
+  "operation aborted",
+  // Older undici / node-fetch wording.
+  "the user aborted a request",
+  "aborterror",
+]);
+
+/**
+ * Whether an `error` stop reason actually describes a user-requested abort.
+ *
+ * Kept to an allowlist of known cancellation strings: a provider failure that
+ * merely mentions "aborted" should still be reported as a failure.
+ */
+function isPiAbortErrorMessage(errorMessage: string | undefined): boolean {
+  if (!errorMessage) return false;
+  const normalized = errorMessage
+    .trim()
+    .replace(/[.!]+$/, "")
+    .toLowerCase();
+  return PI_ABORT_ERROR_MESSAGES.has(normalized);
+}
+
 interface PiDerivationAccumulator {
   model?: string;
   reasoningEffort?: string;
@@ -750,12 +789,20 @@ function finishPiDerivation(
   // counted as one.
   const settledStopReason =
     stopReason === "stop" || stopReason === "length" || stopReason === "error";
+  // An `error` turn whose message is a cancellation was interrupted, not
+  // broken: Pi logs the raw `AbortError` when the abort lands before the first
+  // stream event, so the stop reason alone cannot tell the two apart.
+  const abortedAsError =
+    stopReason === "error" &&
+    isPiAbortErrorMessage(accumulator.lastAssistant?.errorMessage);
   const lastTurnStatus =
     accumulator.lastConversationRole === "user" ||
     accumulator.lastConversationRole === "toolResult"
       ? ("interrupted" as const)
       : stopReason === "error"
-        ? ("failed" as const)
+        ? abortedAsError
+          ? ("interrupted" as const)
+          : ("failed" as const)
         : !accumulator.lastAssistant
           ? undefined
           : settledStopReason
@@ -776,8 +823,11 @@ function finishPiDerivation(
         ? accumulator.compactEvents
         : undefined,
     lastTurnStatus,
+    // Abort messages must stay out of `lastErrorMessage`: the status badge
+    // treats any error text as a failure, which would keep the red badge even
+    // after `lastTurnStatus` reports the interrupt.
     lastErrorMessage:
-      stopReason === "error"
+      stopReason === "error" && !abortedAsError
         ? accumulator.lastAssistant?.errorMessage
         : undefined,
   };
