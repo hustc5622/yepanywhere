@@ -15,6 +15,7 @@
     "version:bump": "tsx scripts/version.ts bump",
     "version:check": "tsx scripts/version.ts check",
     "deploy": "scripts/deploy.sh",
+    "hot-apply": "node scripts/hot-apply.mjs",
     "launchd:install": "scripts/install-launchagents.sh",
     "launchd:uninstall": "scripts/uninstall-launchagents.sh",
     "predev": "corepack pnpm codex:protocol:sync",
