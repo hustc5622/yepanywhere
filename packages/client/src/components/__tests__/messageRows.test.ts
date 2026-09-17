@@ -272,6 +272,57 @@ describe("buildMessageRows", () => {
     });
   });
 
+  it("starts the turn clock at the preceding user prompt", () => {
+    const rows = buildMessageRows({
+      items: [
+        userPrompt("u1", {
+          sourceMessages: [
+            msg({ uuid: "u1", timestamp: "2024-01-01T00:00:00Z" }),
+          ],
+        } as Partial<RenderItem>),
+        text("t1", "first", "2024-01-01T00:00:03Z"),
+        text("t2", "second", "2024-01-01T00:00:09Z"),
+      ],
+      hasOlderMessages: false,
+      hasNewerMessages: false,
+      pendingMessages: [],
+      deferredMessages: [],
+      isCompacting: false,
+      focusedBranchItemId: null,
+      targetItemId: null,
+    });
+    const turn = rows.find((row) => row.kind === "assistant-turn");
+
+    expect(turn).toMatchObject({
+      turnStartedAt: "2024-01-01T00:00:00Z",
+      turnUpdatedAt: "2024-01-01T00:00:09Z",
+    });
+  });
+
+  it("starts a resumed turn clock at the answered question", () => {
+    const rows = buildMessageRows({
+      items: [
+        text("t1", "before", "2024-01-01T00:00:01Z"),
+        answeredQuestion("q1"),
+        text("t2", "after", "2024-01-01T00:00:30Z"),
+      ],
+      hasOlderMessages: false,
+      hasNewerMessages: false,
+      pendingMessages: [],
+      deferredMessages: [],
+      isCompacting: false,
+      focusedBranchItemId: null,
+      targetItemId: null,
+    });
+    const turns = rows.filter((row) => row.kind === "assistant-turn");
+
+    expect(turns[1]).toMatchObject({
+      resumedAfterQuestion: true,
+      turnStartedAt: "2024-01-01T00:00:01Z",
+      turnUpdatedAt: "2024-01-01T00:00:30Z",
+    });
+  });
+
   it("marks a question prelude as progress and the following turn as resumed", () => {
     const rows = buildMessageRows({
       items: [

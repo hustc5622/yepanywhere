@@ -407,6 +407,31 @@ describe("SessionDisplayReducer", () => {
       displayToolId("turn", "a"),
     );
   });
+  it("stamps a start time on live steps and never invents one on replay", () => {
+    const live = new SessionDisplayReducer(view, "codex");
+    live.message(prompt);
+    live.message(tool("live"));
+    const liveGroupId = required(groups(live.snapshot())[0]).id;
+    const liveStep = required(required(live.groupSteps(liveGroupId))[0]);
+    expect(liveStep.status).toBe("running");
+    expect(Date.parse(required(liveStep.timestamp))).toBeGreaterThan(0);
+
+    const sourced = new SessionDisplayReducer(view, "codex");
+    sourced.message(prompt);
+    sourced.message({ ...tool("sourced"), timestamp: "2026-01-02T10:00:00Z" });
+    const sourcedGroupId = required(groups(sourced.snapshot())[0]).id;
+    expect(
+      required(required(sourced.groupSteps(sourcedGroupId))[0]).timestamp,
+    ).toBe("2026-01-02T10:00:00Z");
+
+    const replay = new SessionDisplayReducer(view, "codex");
+    replay.message({ ...prompt, isReplay: true });
+    replay.message({ ...tool("replayed"), isReplay: true });
+    const replayGroupId = required(groups(replay.snapshot())[0]).id;
+    expect(
+      required(required(replay.groupSteps(replayGroupId))[0]).timestamp,
+    ).toBeUndefined();
+  });
 });
 
 function required<T>(value: T | null | undefined): T {

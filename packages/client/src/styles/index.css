@@ -4308,6 +4308,15 @@ a.sidebar-nav-item {
   font-variant-numeric: tabular-nums;
 }
 
+.message-actions-duration {
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.message-actions-duration.is-running {
+  opacity: 0.8;
+}
+
 .message-actions-copy {
   display: inline-flex;
   align-items: center;

@@ -540,6 +540,18 @@
   white-space: nowrap;
 }
 
+.display-step-elapsed {
+  flex: 0 0 auto;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--thinking-color) 14%, transparent);
+  color: var(--thinking-color);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
 .display-step-chevron {
   width: 16px;
   flex: 0 0 16px;

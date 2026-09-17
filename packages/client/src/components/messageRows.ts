@@ -52,6 +52,12 @@ export type MessageRow =
       turnTimestamp?: string;
       /** Most recent timestamp among all source messages in this turn. */
       turnUpdatedAt?: string;
+      /**
+       * Timestamp of the user interaction that started this turn (the user
+       * prompt, or the answered question that resumed the agent). Used to show
+       * how long the turn took.
+       */
+      turnStartedAt?: string;
       turnCopyText?: string;
       turnHasTarget: boolean;
     }
@@ -356,10 +362,16 @@ export function buildMessageRows({
   }
 
   const turnGroups = groupItemsIntoTurns(items);
+  // Timestamp of the most recent user interaction. An assistant turn's elapsed
+  // time is measured from here: either the user prompt that triggered it, or
+  // (for a turn resumed after a question) the end of the previous turn, which
+  // is when the user submitted the answer.
+  let lastUserInteractionAt: string | undefined;
   for (const group of turnGroups) {
     if (group.isUserPrompt) {
       const item = group.items[0];
       if (!item) continue;
+      lastUserInteractionAt = item.sourceMessages[0]?.timestamp;
       rows.push({
         kind: "user-prompt",
         key: item.id,
@@ -373,6 +385,9 @@ export function buildMessageRows({
     const firstItem = group.items[0];
     if (!firstItem) continue;
     const turnCopyText = getTurnCopyText(group.items);
+    const turnUpdatedAt = getTurnUpdatedAt(group.items);
+    const turnStartedAt = lastUserInteractionAt;
+    lastUserInteractionAt = turnUpdatedAt;
     rows.push({
       kind: "assistant-turn",
       key: resolveTurnKey(group.items),
@@ -380,7 +395,8 @@ export function buildMessageRows({
       progressTextItemIds: getQuestionPreludeTextItemIds(group.items),
       resumedAfterQuestion: group.resumedAfterQuestion,
       turnTimestamp: firstItem.sourceMessages[0]?.timestamp,
-      turnUpdatedAt: getTurnUpdatedAt(group.items),
+      turnUpdatedAt,
+      turnStartedAt,
       turnCopyText: turnCopyText || undefined,
       turnHasTarget: group.items.some((item) => item.id === targetItemId),
     });

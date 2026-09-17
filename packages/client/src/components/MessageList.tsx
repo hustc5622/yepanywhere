@@ -918,6 +918,17 @@ export const MessageList = memo(function MessageList({
       case "assistant-turn": {
         // Assistant items wrapped in timeline container
         const usesLastUpdateTimestamp = row.key === lastUpdatedAssistantTurnKey;
+        const turnEndTimestamp = usesLastUpdateTimestamp
+          ? getLatestTimestamp(
+              row.turnTimestamp,
+              row.turnUpdatedAt,
+              lastActivityAt,
+            )
+          : getLatestTimestamp(row.turnTimestamp, row.turnUpdatedAt);
+        const turnDurationMs = getDurationMs(
+          row.turnStartedAt,
+          turnEndTimestamp,
+        );
         return (
           <div
             className={`assistant-turn${row.resumedAfterQuestion ? " assistant-turn-resumed" : ""}`}
@@ -953,15 +964,12 @@ export const MessageList = memo(function MessageList({
             })}
             <MessageActions
               timestamp={
-                usesLastUpdateTimestamp
-                  ? getLatestTimestamp(
-                      row.turnTimestamp,
-                      row.turnUpdatedAt,
-                      lastActivityAt,
-                    )
-                  : row.turnTimestamp
+                usesLastUpdateTimestamp ? turnEndTimestamp : row.turnTimestamp
               }
               timestampIsLastUpdate={usesLastUpdateTimestamp}
+              durationMs={turnDurationMs}
+              durationIsRunning={usesLastUpdateTimestamp && isProcessing}
+              turnStartedAt={row.turnStartedAt}
               copyText={row.turnCopyText}
             />
           </div>
@@ -1118,4 +1126,20 @@ function getLatestTimestamp(
   }
 
   return latestTimestamp;
+}
+
+/**
+ * Wall-clock duration between two ISO timestamps, or undefined when either end
+ * is missing/unparseable or the clock went backwards.
+ */
+function getDurationMs(
+  startedAt: string | undefined,
+  endedAt: string | undefined,
+): number | undefined {
+  if (!startedAt || !endedAt) return undefined;
+  const startMs = Date.parse(startedAt);
+  const endMs = Date.parse(endedAt);
+  if (Number.isNaN(startMs) || Number.isNaN(endMs)) return undefined;
+  if (endMs < startMs) return undefined;
+  return endMs - startMs;
 }

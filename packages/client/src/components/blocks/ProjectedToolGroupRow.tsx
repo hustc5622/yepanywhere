@@ -5,6 +5,7 @@ import type {
 } from "@yep-anywhere/shared";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api/client";
+import { useElapsedLabel } from "../../hooks/useElapsedLabel";
 import { useI18n } from "../../i18n";
 import { preprocessMessages } from "../../lib/preprocessMessages";
 import type { Message } from "../../types";
@@ -181,6 +182,7 @@ export function ProjectedToolStepRow({
         : [],
     [detail],
   );
+  const elapsed = useElapsedLabel(step.timestamp, step.status === "running");
   const showLiveOutput =
     step.status === "running" &&
     (!outputState || outputState.status === "running") &&
@@ -230,6 +232,18 @@ export function ProjectedToolStepRow({
         {step.summary && (
           <span className="display-step-summary" title={step.summary}>
             {step.summary}
+          </span>
+        )}
+        {elapsed && (
+          <span
+            className="display-step-elapsed"
+            data-testid="display-step-elapsed"
+            title={t("sessionDisplayStepElapsed", {
+              elapsed: elapsed.label,
+              time: new Date(elapsed.startedAt).toLocaleTimeString(),
+            })}
+          >
+            {elapsed.label}
           </span>
         )}
         <span className="display-step-chevron" aria-hidden="true">

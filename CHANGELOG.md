@@ -8,6 +8,8 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 ## [Unreleased]
 
 ### Added
+- 助手回复新增整轮耗时展示：在回复末尾的操作行显示从用户发话（或回答提问）到该轮内容结束经过了多久（如 `45s`、`3m12s`、`1h05m`），小于 1 秒不显示；进行中的那一轮复用工具步骤的共享一秒 ticker 实时跳动（标签页隐藏时暂停），不依赖消息事件，长时间无输出的 Bash 等调用期间也不会停止计时；适用于全部 provider。
+- 运行中的工具步骤展示实时计时：Bash/Shell 等长耗时调用在步骤行尾显示已运行时长（如 `4m00s`、`1h05m`），悬停显示开始时间，一秒一跳且标签页隐藏时暂停；适用于 Pi、Codex 等全部 provider。实时步骤缺少源时间戳时由服务端在创建步骤时补齐起始时间，历史回放不再伪造起始时间。
 - 飞书用户授权由 Yep 独立管理：新增 OAuth + PKCE 授权入口、后台续期、跨进程刷新锁、令牌失效分类、飞书授权卡片和中英文设置页。原生 Lark MCP 保留 38 个工具入口并随 Yep 打包，不再运行 MLB 或读取旧机器人 token 文件；渠道会话使用受管配置，Desktop/CLI 提供显式迁移工具。授权等待只发生在业务请求发送前，取消后不重放写操作。
 - Codex 的 DeepSeek 模型源新增 DeepSeek V4.1 Flash（`deepseek-flash`），支持图片输入、1M 上下文与 low/high/max 推理档位，并作为新建会话时的首选 DeepSeek 模型。已下线的 `deepseek-v4-flash`、`deepseek-v4-flash-vision-exp` 从选择器移除，但仍保留在模型目录中，旧会话续聊仍能正确路由到 DeepSeek 而不是 OpenAI；`deepseek-v4-pro` 保留并标注将于 2026-09-14 起由 V4.1 Flash 承接。Pi 等走 LLM gateway 的 provider 在网关上架该模型后即可直接选用。
 - Codex 会话执行中新增“回复并继续”作为默认发送操作（桌面 Enter），通过现有 steering 通道提交异步问题的回答或补充；保留独立的“打断并发送”和“排队”（Ctrl+Enter），同步更新中英文提示及移动端按钮换行。

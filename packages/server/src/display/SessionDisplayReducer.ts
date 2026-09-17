@@ -350,7 +350,14 @@ export class SessionDisplayReducer {
           preview: "",
           truncated: false,
           version: 0,
-          ...(timestamp ? { timestamp } : {}),
+          // A live step without a source timestamp still needs a start time so
+          // the client can show how long it has been running. Replay must not
+          // invent one: a resumed history would look like it just started.
+          ...(timestamp
+            ? { timestamp }
+            : replay
+              ? {}
+              : { timestamp: new Date().toISOString() }),
         },
       };
       this.tools.set(id, tool);

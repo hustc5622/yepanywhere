@@ -518,4 +518,45 @@ describe("ProjectedToolGroupRow", () => {
     expect(screen.queryByText("tool details")).toBeNull();
     expect(api.getSessionDisplayTool).toHaveBeenCalledTimes(1);
   });
+
+  it("ticks an elapsed badge for a running step and drops it once finished", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(new Date("2026-01-02T10:00:30.000Z"));
+    const timestamp = "2026-01-02T10:00:00.000Z";
+    const { rerender } = render(
+      <ProjectedToolStepRow
+        step={{ ...step, status: "running", timestamp }}
+        projectId="project"
+        sessionId="elapsed"
+      />,
+    );
+
+    expect(screen.getByTestId("display-step-elapsed").textContent).toBe("30s");
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(42_000);
+    });
+    expect(screen.getByTestId("display-step-elapsed").textContent).toBe(
+      "1m12s",
+    );
+
+    rerender(
+      <ProjectedToolStepRow
+        step={{ ...step, status: "completed", timestamp }}
+        projectId="project"
+        sessionId="elapsed"
+      />,
+    );
+    expect(screen.queryByTestId("display-step-elapsed")).toBeNull();
+  });
+
+  it("omits the elapsed badge when the step has no start timestamp", () => {
+    render(
+      <ProjectedToolStepRow
+        step={{ ...step, status: "running" }}
+        projectId="project"
+        sessionId="elapsed-missing"
+      />,
+    );
+    expect(screen.queryByTestId("display-step-elapsed")).toBeNull();
+  });
 });
