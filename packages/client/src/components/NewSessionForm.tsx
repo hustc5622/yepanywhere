@@ -51,6 +51,11 @@ import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
 import { useServerSettings } from "../hooks/useServerSettings";
 import { useI18n } from "../i18n";
 import { getAgentCommandConfigs } from "../lib/agentCommands";
+import {
+  hasAttachmentToken,
+  insertAttachmentToken,
+  removeAttachmentToken,
+} from "../lib/attachmentTokens";
 import { readClipboardUserInput } from "../lib/clipboard";
 import {
   getModelReasoningEfforts,
@@ -69,6 +74,7 @@ import {
 import type { PermissionMode, SessionNavigationState } from "../types";
 import { CodexAccountSelect } from "./CodexAccountSelect";
 import { CodexUsageCard } from "./CodexUsageCard";
+import { ComposerTokenHighlight } from "./ComposerTokenHighlight";
 import { FilterDropdown, type FilterOption } from "./FilterDropdown";
 import { clearFabPrefill, getFabPrefill } from "./FloatingActionButton";
 import { PiGatewayKeySelect } from "./PiGatewayKeySelect";
@@ -1110,30 +1116,66 @@ export function NewSessionForm({
     }
   }, [setMessage]);
 
-  const handleFileSelect = (e: ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files?.length) return;
+  const addPendingFiles = (
+    files: File[],
+    baseMessage?: string,
+    baseCursor?: number,
+  ) => {
+    if (files.length === 0) return;
 
-    const newPendingFiles: PendingFile[] = Array.from(files).map((file) => ({
+    const newPendingFiles: PendingFile[] = files.map((file) => ({
       id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       file,
       previewUrl: file.type.startsWith("image/")
         ? URL.createObjectURL(file)
         : undefined,
     }));
-
     setPendingFiles((prev) => [...prev, ...newPendingFiles]);
+
+    // Drop an inline token at the caret so the prompt records where each file
+    // belongs relative to the typed text.
+    const textarea = textareaRef.current;
+    let nextMessage = baseMessage ?? textarea?.value ?? message;
+    let nextCursor =
+      baseCursor ?? textarea?.selectionStart ?? nextMessage.length;
+    for (const pendingFile of newPendingFiles) {
+      const inserted = insertAttachmentToken(
+        nextMessage,
+        nextCursor,
+        pendingFile.file.name,
+      );
+      nextMessage = inserted.text;
+      nextCursor = inserted.cursor;
+    }
+
+    setInterimTranscript("");
+    setMessage(nextMessage);
+    setTimeout(() => {
+      const el = textareaRef.current;
+      el?.focus();
+      el?.setSelectionRange(nextCursor, nextCursor);
+    }, 0);
+  };
+
+  const handleFileSelect = (e: ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files?.length) return;
+
+    addPendingFiles(Array.from(files));
     e.target.value = ""; // Reset for re-selection
   };
 
   const handleRemoveFile = (id: string) => {
-    setPendingFiles((prev) => {
-      const file = prev.find((f) => f.id === id);
-      if (file?.previewUrl) {
-        URL.revokeObjectURL(file.previewUrl);
-      }
-      return prev.filter((f) => f.id !== id);
-    });
+    const file = pendingFilesRef.current.find((f) => f.id === id);
+    if (file?.previewUrl) {
+      URL.revokeObjectURL(file.previewUrl);
+    }
+    if (file) {
+      const textarea = textareaRef.current;
+      const currentValue = textarea?.value ?? message;
+      setMessage(removeAttachmentToken(currentValue, file.file.name));
+    }
+    setPendingFiles((prev) => prev.filter((f) => f.id !== id));
   };
 
   const handleModeSelect = (selectedMode: PermissionMode) => {
@@ -1533,27 +1575,19 @@ export function NewSessionForm({
     if (copiedInput && copiedInput.images.length > 0) {
       e.preventDefault();
 
-      if (copiedInput.text) {
-        const textarea = textareaRef.current;
-        const currentValue = textarea?.value ?? message;
-        const start = textarea?.selectionStart ?? currentValue.length;
-        const end = textarea?.selectionEnd ?? start;
-        const nextMessage = `${currentValue.slice(0, start)}${copiedInput.text}${currentValue.slice(end)}`;
-        const nextCursor = start + copiedInput.text.length;
+      const textarea = textareaRef.current;
+      const currentValue = textarea?.value ?? message;
+      const start = textarea?.selectionStart ?? currentValue.length;
+      const end = textarea?.selectionEnd ?? start;
 
-        setInterimTranscript("");
-        setMessage(nextMessage);
-        setTimeout(() => {
-          textareaRef.current?.setSelectionRange(nextCursor, nextCursor);
-        }, 0);
+      let baseMessage = currentValue;
+      let baseCursor = start;
+      if (copiedInput.text) {
+        baseMessage = `${currentValue.slice(0, start)}${copiedInput.text}${currentValue.slice(end)}`;
+        baseCursor = start + copiedInput.text.length;
       }
 
-      const newPendingFiles: PendingFile[] = copiedInput.images.map((file) => ({
-        id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        file,
-        previewUrl: URL.createObjectURL(file),
-      }));
-      setPendingFiles((prev) => [...prev, ...newPendingFiles]);
+      addPendingFiles(copiedInput.images, baseMessage, baseCursor);
       return;
     }
 
@@ -1572,14 +1606,7 @@ export function NewSessionForm({
 
     if (files.length > 0) {
       e.preventDefault();
-      const newPendingFiles: PendingFile[] = files.map((file) => ({
-        id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-        file,
-        previewUrl: file.type.startsWith("image/")
-          ? URL.createObjectURL(file)
-          : undefined,
-      }));
-      setPendingFiles((prev) => [...prev, ...newPendingFiles]);
+      addPendingFiles(files);
     }
   };
 
@@ -1647,6 +1674,15 @@ export function NewSessionForm({
   );
 
   const hasContent = message.trim() || pendingFiles.length > 0;
+  const pendingFileNames = pendingFiles.map((pf) => pf.file.name);
+  // Files referenced inline in the prompt are rendered as tokens; only the
+  // remaining ones still need a chip below the composer.
+  const detachedPendingFiles = pendingFiles.filter(
+    (pf) => !hasAttachmentToken(displayText, pf.file.name),
+  );
+  const hasInlineTokens = pendingFileNames.some((name) =>
+    hasAttachmentToken(displayText, name),
+  );
   const savedDefaults = settings?.newSessionDefaults;
   const savedProviderDefaults = selectedProvider
     ? getNewSessionProviderDefaults(savedDefaults, selectedProvider)
@@ -1754,6 +1790,13 @@ export function NewSessionForm({
   // Shared input area with toolbar (textarea + attach/voice on left, send on right)
   const inputArea = (
     <>
+      {hasInlineTokens && (
+        <ComposerTokenHighlight
+          textareaRef={textareaRef}
+          text={displayText}
+          names={pendingFileNames}
+        />
+      )}
       <textarea
         ref={textareaRef}
         value={displayText}
@@ -1766,7 +1809,7 @@ export function NewSessionForm({
         placeholder={resolvedPlaceholder}
         disabled={isStarting}
         rows={rows}
-        className="new-session-form-textarea"
+        className={`new-session-form-textarea${hasInlineTokens ? " has-token-mirror" : ""}`}
       />
       <div className="new-session-form-toolbar">
         <div className="new-session-form-toolbar-left">
@@ -1954,9 +1997,9 @@ export function NewSessionForm({
           </div>
         </div>
       )}
-      {pendingFiles.length > 0 && (
+      {detachedPendingFiles.length > 0 && (
         <div className="pending-files-list">
-          {pendingFiles.map((pf) => {
+          {detachedPendingFiles.map((pf) => {
             const progress = uploadProgress[pf.id];
             return (
               <div key={pf.id} className="pending-file-chip">

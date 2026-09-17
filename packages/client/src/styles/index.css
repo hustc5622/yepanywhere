@@ -3969,6 +3969,13 @@ a.sidebar-nav-item {
   outline-offset: 2px;
 }
 
+/* Attachment chips rendered inline inside prompt text */
+.text-block .uploaded-file {
+  font-size: var(--font-size-xs);
+  vertical-align: baseline;
+  margin: 0 2px;
+}
+
 .user-prompt-link {
   color: var(--text-link);
   text-decoration: underline;
@@ -5781,6 +5788,38 @@ a.sidebar-nav-item {
 
 .slash-command-item:only-child {
   border-radius: var(--radius-md);
+}
+
+/* Inline attachment tokens in the composer */
+.composer-token-mirror {
+  position: absolute;
+  z-index: 0;
+  margin: 0;
+  overflow: hidden;
+  white-space: pre-wrap;
+  overflow-wrap: break-word;
+  word-break: break-word;
+  color: transparent;
+  background: var(--bg-input);
+  border-style: solid;
+  border-color: transparent;
+  pointer-events: none;
+  user-select: none;
+}
+
+.composer-token-chip {
+  border-radius: 4px;
+  background: color-mix(in srgb, var(--link-color) 20%, transparent);
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--link-color) 20%, transparent);
+  -webkit-box-decoration-break: clone;
+  box-decoration-break: clone;
+}
+
+.message-input textarea.has-token-mirror,
+.new-session-form-textarea.has-token-mirror {
+  position: relative;
+  z-index: 1;
+  background: transparent;
 }
 
 /* Attachment list */

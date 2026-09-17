@@ -15,9 +15,15 @@ import {
 } from "../hooks/useDraftPersistence";
 import { useI18n } from "../i18n";
 import type { AgentCommandConfig } from "../lib/agentCommands";
+import {
+  hasAttachmentToken,
+  insertAttachmentToken,
+  sanitizeAttachmentTokenName,
+} from "../lib/attachmentTokens";
 import { readClipboardUserInput } from "../lib/clipboard";
 import { hasCoarsePointer } from "../lib/deviceDetection";
 import type { ContextUsage, PermissionMode } from "../types";
+import { ComposerTokenHighlight } from "./ComposerTokenHighlight";
 import { MessageInputToolbar } from "./MessageInputToolbar";
 import type { VoiceInputButtonRef } from "./VoiceInputButton";
 
@@ -191,6 +197,9 @@ export function MessageInput({
   const [dismissedCompletionKey, setDismissedCompletionKey] = useState<
     string | null
   >(null);
+  // Attachment names that were inserted as inline tokens; deleting the token
+  // text is how the user removes such an attachment.
+  const inlinedNamesRef = useRef<Set<string>>(new Set());
 
   // Combined display text: committed text + interim transcript
   const displayText = interimTranscript
@@ -329,10 +338,43 @@ export function MessageInput({
     [cursorPosition, onCustomCommand, setText, text],
   );
 
+  /**
+   * Starts uploads and drops an inline token at the caret so the prompt keeps
+   * the ordering between typed text and attached files.
+   */
+  const attachFiles = useCallback(
+    (files: File[], baseText?: string, baseCursor?: number) => {
+      if (!onAttach || files.length === 0) return;
+      onAttach(files);
+
+      const textarea = textareaRef.current;
+      let nextText = baseText ?? textarea?.value ?? text;
+      let nextCursor =
+        baseCursor ?? textarea?.selectionStart ?? nextText.length;
+      for (const file of files) {
+        const inserted = insertAttachmentToken(nextText, nextCursor, file.name);
+        nextText = inserted.text;
+        nextCursor = inserted.cursor;
+        inlinedNamesRef.current.add(sanitizeAttachmentTokenName(file.name));
+      }
+
+      setInterimTranscript("");
+      setDismissedCompletionKey(null);
+      setText(nextText);
+      setCursorPosition(nextCursor);
+      setTimeout(() => {
+        const el = textareaRef.current;
+        el?.focus();
+        el?.setSelectionRange(nextCursor, nextCursor);
+      }, 0);
+    },
+    [onAttach, setText, text],
+  );
+
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
     if (files?.length && onAttach) {
-      onAttach(Array.from(files));
+      attachFiles(Array.from(files));
       e.target.value = ""; // Reset for re-selection
     }
   };
@@ -507,24 +549,19 @@ export function MessageInput({
     if (copiedInput && copiedInput.images.length > 0) {
       e.preventDefault();
 
-      if (copiedInput.text) {
-        const textarea = textareaRef.current;
-        const currentValue = textarea?.value ?? text;
-        const start = textarea?.selectionStart ?? currentValue.length;
-        const end = textarea?.selectionEnd ?? start;
-        const nextText = `${currentValue.slice(0, start)}${copiedInput.text}${currentValue.slice(end)}`;
-        const nextCursor = start + copiedInput.text.length;
+      const textarea = textareaRef.current;
+      const currentValue = textarea?.value ?? text;
+      const start = textarea?.selectionStart ?? currentValue.length;
+      const end = textarea?.selectionEnd ?? start;
 
-        setInterimTranscript("");
-        setDismissedCompletionKey(null);
-        setText(nextText);
-        setCursorPosition(nextCursor);
-        setTimeout(() => {
-          textareaRef.current?.setSelectionRange(nextCursor, nextCursor);
-        }, 0);
+      let baseText = currentValue;
+      let baseCursor = start;
+      if (copiedInput.text) {
+        baseText = `${currentValue.slice(0, start)}${copiedInput.text}${currentValue.slice(end)}`;
+        baseCursor = start + copiedInput.text.length;
       }
 
-      onAttach(copiedInput.images);
+      attachFiles(copiedInput.images, baseText, baseCursor);
       return;
     }
 
@@ -545,9 +582,46 @@ export function MessageInput({
       // Prevent default only if we have files to handle
       // This allows text paste to still work normally
       e.preventDefault();
-      onAttach(files);
+      attachFiles(files);
     }
   };
+
+  // Names referenced by inline tokens (completed uploads + in-flight ones).
+  const attachmentNames = useMemo(
+    () => [
+      ...attachments.map((file) => file.originalName),
+      ...uploadProgress.map((progress) => progress.fileName),
+    ],
+    [attachments, uploadProgress],
+  );
+
+  // Attachments without an inline token (legacy drafts, or the user deleted
+  // the token text) still need a visible chip below the textarea.
+  const detachedAttachments = useMemo(
+    () =>
+      attachments.filter(
+        (file) => !hasAttachmentToken(text, file.originalName),
+      ),
+    [attachments, text],
+  );
+
+  const hasInlineTokens = useMemo(
+    () => attachmentNames.some((name) => hasAttachmentToken(text, name)),
+    [attachmentNames, text],
+  );
+
+  // Deleting the token text removes the attachment, mirroring how the chip
+  // behaves in other chat UIs.
+  useEffect(() => {
+    if (!onRemoveAttachment) return;
+    for (const file of attachments) {
+      const name = sanitizeAttachmentTokenName(file.originalName);
+      if (!inlinedNamesRef.current.has(name)) continue;
+      if (hasAttachmentToken(text, name)) continue;
+      inlinedNamesRef.current.delete(name);
+      onRemoveAttachment(file.id);
+    }
+  }, [attachments, onRemoveAttachment, text]);
 
   // Voice input handlers
   const handleVoiceTranscript = useCallback(
@@ -649,8 +723,16 @@ export function MessageInput({
             ))}
           </div>
         )}
+        {hasInlineTokens && !collapsed && (
+          <ComposerTokenHighlight
+            textareaRef={textareaRef}
+            text={displayText}
+            names={attachmentNames}
+          />
+        )}
         <textarea
           ref={textareaRef}
+          className={hasInlineTokens && !collapsed ? "has-token-mirror" : ""}
           value={displayText}
           onChange={(e) => {
             // If user edits while recording, only update committed text
@@ -672,11 +754,11 @@ export function MessageInput({
           rows={collapsed ? 1 : 3}
         />
 
-        {/* Attachment chips - show below textarea when not collapsed */}
+        {/* Attachment chips - only for files not referenced inline in the text */}
         {!collapsed &&
-          (attachments.length > 0 || uploadProgress.length > 0) && (
+          (detachedAttachments.length > 0 || uploadProgress.length > 0) && (
             <div className="attachment-list">
-              {attachments.map((file) => (
+              {detachedAttachments.map((file) => (
                 <div key={file.id} className="attachment-chip">
                   <span className="attachment-name" title={file.path}>
                     {file.originalName}

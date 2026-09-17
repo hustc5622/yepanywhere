@@ -366,6 +366,26 @@ User uploaded files:
     expect(screen.getByRole("alert").textContent).toContain("File not found");
   });
 
+  it("renders attachment tokens inline instead of below the prompt text", () => {
+    const content =
+      "before @[shot.png] after\n\nUser uploaded files:\n- shot.png (1 KB, image/png): /Users/test/.yep-anywhere/uploads/project-id/session-id/76285622-cb0a-47e3-a0d9-ffcdae95af9b_shot.png";
+
+    render(
+      <I18nProvider>
+        <UserPromptBlock content={content} />
+      </I18nProvider>,
+    );
+
+    const chip = screen.getByRole("button", { name: /shot\.png/i });
+    // The chip lives inside the prompt text block, not in the trailing list.
+    expect(chip.closest(".text-block")).not.toBeNull();
+    expect(chip.closest(".user-prompt-metadata")).toBeNull();
+    expect(document.querySelector(".user-prompt-metadata")).toBeNull();
+    expect(
+      chip.closest(".text-block")?.textContent?.replace(/\s+/g, " "),
+    ).toContain("before");
+  });
+
   it.each(["url", "posix", "windows"])(
     "opens authenticated upload previews from %s locations",
     async (kind) => {

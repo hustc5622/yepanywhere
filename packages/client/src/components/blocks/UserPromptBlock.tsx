@@ -4,6 +4,11 @@ import { useFetchedImage } from "../../hooks/useRemoteImage";
 import { useOptionalI18n } from "../../i18n";
 import { apiPath as resolveApiPath } from "../../lib/apiPath";
 import {
+  hasAttachmentToken,
+  matchTokenToAttachment,
+  splitByAttachmentTokens,
+} from "../../lib/attachmentTokens";
+import {
   createLinkPattern,
   splitTrailingUrlPunctuation,
 } from "../../lib/autolink";
@@ -158,6 +163,68 @@ function renderPromptTextWithLinks(text: string): ReactNode[] {
 
   if (cursor < text.length) rendered.push(text.slice(cursor));
   return rendered;
+}
+
+/**
+ * Renders prompt text, turning inline attachment tokens (`@[name.png]`) into
+ * file chips so the transcript preserves where each file was inserted.
+ */
+function renderPromptBody(
+  text: string,
+  files: UploadedFileInfo[],
+): ReactNode[] {
+  if (files.length === 0) return renderPromptTextWithLinks(text);
+
+  const segments = splitByAttachmentTokens(
+    text,
+    files.map((file) => file.originalName),
+  );
+  if (segments.every((segment) => segment.type === "text")) {
+    return renderPromptTextWithLinks(text);
+  }
+
+  const seen = new Map<string, number>();
+  const rendered: ReactNode[] = [];
+  for (const [index, segment] of segments.entries()) {
+    if (segment.type === "text") {
+      rendered.push(...renderPromptTextWithLinks(segment.value));
+      continue;
+    }
+    const occurrence = seen.get(segment.name) ?? 0;
+    seen.set(segment.name, occurrence + 1);
+    const file = matchTokenToAttachment(
+      files,
+      (candidate) => candidate.originalName,
+      segment.name,
+      occurrence,
+    );
+    if (!file) {
+      rendered.push(segment.raw);
+      continue;
+    }
+    rendered.push(
+      <UploadedFileItem
+        key={`attachment-${index}-${file.path}`}
+        file={file}
+        displayName={file.originalName}
+      />,
+    );
+  }
+  return rendered;
+}
+
+/**
+ * Prompt text with inline attachment chips, for surfaces that render raw
+ * prompt text outside of {@link UserPromptBlock} (e.g. queued messages).
+ */
+export function PromptTextWithAttachments({
+  text,
+  files,
+}: {
+  text: string;
+  files: UploadedFileInfo[];
+}) {
+  return <>{renderPromptBody(text, files)}</>;
 }
 
 function FeishuPromptSource({ info }: { info?: FeishuPromptInfo }) {
@@ -741,7 +808,14 @@ function BranchControls({
 /**
  * Renders text content with optional truncation and "Show more" button
  */
-function CollapsibleText({ text }: { text: string }) {
+function CollapsibleText({
+  text,
+  inlineFiles = [],
+}: {
+  text: string;
+  /** Attachments that may be referenced by inline tokens inside `text`. */
+  inlineFiles?: UploadedFileInfo[];
+}) {
   const i18n = useOptionalI18n();
   const [isExpanded, setIsExpanded] = useState(false);
   const lines = text.split("\n");
@@ -752,7 +826,7 @@ function CollapsibleText({ text }: { text: string }) {
   if (!needsTruncation || isExpanded) {
     return (
       <div className="text-block">
-        {renderPromptTextWithLinks(text)}
+        {renderPromptBody(text, inlineFiles)}
         {isExpanded && needsTruncation && (
           <button
             type="button"
@@ -777,7 +851,7 @@ function CollapsibleText({ text }: { text: string }) {
   return (
     <div className="text-block collapsible-text">
       <div className="truncated-content">
-        {renderPromptTextWithLinks(truncatedText)}
+        {renderPromptBody(truncatedText, inlineFiles)}
         <div className="fade-overlay" />
       </div>
       <button
@@ -875,6 +949,12 @@ export const UserPromptBlock = memo(function UserPromptBlock({
     }
 
     const copyText = text || getSkillCopyText(skills);
+    const inlineFiles = uploadedFiles.filter((file) =>
+      hasAttachmentToken(text, file.originalName),
+    );
+    const trailingFiles = uploadedFiles.filter(
+      (file) => !inlineFiles.includes(file),
+    );
 
     return (
       <UserPromptContainer isPending={isPending}>
@@ -891,9 +971,9 @@ export const UserPromptBlock = memo(function UserPromptBlock({
           />
           <div className="message-content">
             <FeishuPromptSource info={feishu} />
-            {text && <CollapsibleText text={text} />}
+            {text && <CollapsibleText text={text} inlineFiles={inlineFiles} />}
             <SkillReferences skills={skills} />
-            <UploadedFilesMetadata files={uploadedFiles} feishu={feishu} />
+            <UploadedFilesMetadata files={trailingFiles} feishu={feishu} />
           </div>
         </div>
         {branchMetadata && (
@@ -972,6 +1052,12 @@ export const UserPromptBlock = memo(function UserPromptBlock({
   }
 
   const copyText = text || getSkillCopyText(skills);
+  const inlineFiles = allUploadedFiles.filter((file) =>
+    hasAttachmentToken(text, file.originalName),
+  );
+  const trailingFiles = allUploadedFiles.filter(
+    (file) => !inlineFiles.includes(file),
+  );
 
   return (
     <UserPromptContainer isPending={isPending}>
@@ -988,9 +1074,9 @@ export const UserPromptBlock = memo(function UserPromptBlock({
         />
         <div className="message-content">
           <FeishuPromptSource info={feishu} />
-          {text && <CollapsibleText text={text} />}
+          {text && <CollapsibleText text={text} inlineFiles={inlineFiles} />}
           <SkillReferences skills={skills} />
-          <UploadedFilesMetadata files={allUploadedFiles} feishu={feishu} />
+          <UploadedFilesMetadata files={trailingFiles} feishu={feishu} />
         </div>
       </div>
       {branchMetadata && (

@@ -11,6 +11,7 @@ import {
   useState,
 } from "react";
 import { useOptionalI18n } from "../i18n";
+import { hasAttachmentToken } from "../lib/attachmentTokens";
 import { hasActiveTextSelectionWithin } from "../lib/clipboard";
 import {
   type ActiveToolApproval,
@@ -24,6 +25,7 @@ import { MessageActions } from "./MessageActions";
 import { ProcessingIndicator } from "./ProcessingIndicator";
 import { RenderItemComponent } from "./RenderItemComponent";
 import {
+  PromptTextWithAttachments,
   UploadedFilesMetadata,
   formatFileSize,
 } from "./blocks/UserPromptBlock";
@@ -1007,20 +1009,27 @@ export const MessageList = memo(function MessageList({
             </div>
           </div>
         );
-      case "deferred":
+      case "deferred": {
         // Queued server-side, waiting for agent turn to end
+        const deferredFiles = (row.deferred.attachments ?? []).map((file) => ({
+          originalName: file.originalName,
+          mimeType: file.mimeType,
+          path: file.path,
+          size: formatFileSize(file.size),
+        }));
+        // Files referenced by an inline token render inside the text itself.
+        const deferredTrailingFiles = deferredFiles.filter(
+          (file) =>
+            !hasAttachmentToken(row.deferred.content, file.originalName),
+        );
         return (
           <div className="deferred-message">
             <div className="message-user-prompt deferred-message-bubble">
-              {row.deferred.content}
-              <UploadedFilesMetadata
-                files={(row.deferred.attachments ?? []).map((file) => ({
-                  originalName: file.originalName,
-                  mimeType: file.mimeType,
-                  path: file.path,
-                  size: formatFileSize(file.size),
-                }))}
+              <PromptTextWithAttachments
+                text={row.deferred.content}
+                files={deferredFiles}
               />
+              <UploadedFilesMetadata files={deferredTrailingFiles} />
             </div>
             <div className="deferred-message-footer">
               <span className="deferred-message-status">
@@ -1051,6 +1060,7 @@ export const MessageList = memo(function MessageList({
             </div>
           </div>
         );
+      }
       case "compacting":
         // Shown when context is being compressed
         return (
