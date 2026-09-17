@@ -784,6 +784,8 @@
   "reportsToc": "目录",
   "reportsNoToc": "未找到标题",
   "reportsLineCount": "{count} 行",
+  "reportsImageLoadFailed": "图片加载失败",
+  "reportsImageRetry": "重试",
   "reportsDocumentOptions": "报告选项",
   "reportsCopyPath": "复制路径",
   "reportsPathCopied": "报告路径已复制",

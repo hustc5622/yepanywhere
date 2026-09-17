@@ -31,6 +31,7 @@ import {
   createReportCommentAnchor,
   resolveReportCommentAnchor,
 } from "../lib/reportComments";
+import { enhanceReportImages } from "../lib/reportImages";
 import { UI_KEYS } from "../lib/storageKeys";
 
 interface HeadingItem {
@@ -555,36 +556,25 @@ export function ReportsPage() {
 
     const controller = new AbortController();
     const blobUrls: string[] = [];
-    const needsAuthenticatedFetch = Boolean(getDesktopAuthToken());
-    const images = article.querySelectorAll<HTMLImageElement>("img");
-    for (const image of images) {
-      image.loading = "lazy";
-      image.decoding = "async";
-      const source = image.getAttribute("src") ?? "";
-      if (!needsAuthenticatedFetch || !source.includes("/api/reports/image?")) {
-        continue;
-      }
-
-      void api
-        .loadReportImage(source, controller.signal)
-        .then((blob) => {
-          if (controller.signal.aborted) return;
-          const blobUrl = URL.createObjectURL(blob);
-          blobUrls.push(blobUrl);
-          image.src = blobUrl;
-        })
-        .catch((error) => {
-          if (controller.signal.aborted) return;
-          console.error("Failed to load report image:", error);
-          image.classList.add("report-image-load-failed");
-        });
-    }
+    enhanceReportImages(article, {
+      signal: controller.signal,
+      loadImage: (url, signal) => api.loadReportImage(url, signal),
+      // The desktop iframe authenticates with a header, which `<img>` cannot
+      // send, so it has to go through fetch from the start. Everywhere else the
+      // native load runs first and fetch is only the recovery path.
+      preferFetch: Boolean(getDesktopAuthToken()),
+      strings: {
+        failed: t("reportsImageLoadFailed"),
+        retry: t("reportsImageRetry"),
+      },
+      onBlobUrl: (blobUrl) => blobUrls.push(blobUrl),
+    });
 
     return () => {
       controller.abort();
       for (const blobUrl of blobUrls) URL.revokeObjectURL(blobUrl);
     };
-  }, [renderedHtml]);
+  }, [renderedHtml, t]);
 
   useEffect(() => {
     if (!renderedHtml) return;

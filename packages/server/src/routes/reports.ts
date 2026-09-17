@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { type Dirent, createReadStream } from "node:fs";
+import { type Dirent, createReadStream, statSync } from "node:fs";
 import {
   mkdir,
   readFile,
@@ -249,6 +249,33 @@ function normalizeReportImageReference(href: string): string | null {
   return normalizeReportImagePath(decoded);
 }
 
+/**
+ * Millisecond mtime of a report-relative image, used as a cache-busting query
+ * parameter. Image responses are cached for an hour, so without a version tag a
+ * client that requested the URL before the asset existed (or while it was being
+ * rewritten) can keep showing a broken image. Returns null when the asset is
+ * missing or escapes the reports root — the URL is still emitted so a later
+ * retry can succeed once the file appears.
+ */
+function reportImageVersion(
+  deps: ReportsDeps,
+  reportPath: string,
+  imagePath: string,
+): number | null {
+  try {
+    const root = getReportsRoot(deps.reportsDir);
+    const reportFilePath = resolveReportPath(root, reportPath);
+    if (!reportFilePath) return null;
+    const candidate = resolve(dirname(reportFilePath), imagePath);
+    if (!isWithinRoot(root, candidate)) return null;
+    const stats = statSync(candidate);
+    if (!stats.isFile()) return null;
+    return Math.trunc(stats.mtimeMs);
+  } catch {
+    return null;
+  }
+}
+
 function buildReportImageUrl(
   deps: ReportsDeps,
   reportPath: string,
@@ -258,6 +285,8 @@ function buildReportImageUrl(
     path: reportPath,
     image: imagePath,
   });
+  const version = reportImageVersion(deps, reportPath, imagePath);
+  if (version !== null) params.set("v", String(version));
   return `${normalizeBasePath(deps.basePath)}/api/reports/image?${params.toString()}`;
 }
 
@@ -691,6 +720,10 @@ export function createReportsRoutes(deps: ReportsDeps = {}): Hono {
     const root = getReportsRoot(deps.reportsDir);
     const image = await resolveReportImage(root, reportPath, imageReference);
     if (!image) {
+      // Never let a negative result stick in an HTTP cache: assets are often
+      // written moments after the report itself, and the client must be able to
+      // recover by simply retrying the same URL.
+      c.header("Cache-Control", "no-store");
       return c.json({ error: "Report image not found" }, 404);
     }
 

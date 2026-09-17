@@ -8541,6 +8541,58 @@ a.sidebar-nav-item {
   color: var(--error-color);
 }
 
+/*
+ * Report image frame. Wraps every report image so a failed load can show a
+ * reason and a retry control. All text comes from CSS pseudo-elements: report
+ * comments are anchored by text offsets over the article, so real text nodes
+ * here would shift every highlight after the image.
+ */
+.reports-markdown .report-image-frame {
+  position: relative;
+  display: block;
+}
+
+.reports-markdown .report-image-frame.report-image-load-failed::after {
+  content: attr(data-report-image-error);
+  position: absolute;
+  inset: auto var(--space-3) var(--space-3) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--error-color);
+  font-size: 0.8125rem;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+
+.reports-markdown .report-image-frame .report-image-retry {
+  display: none;
+  position: absolute;
+  top: calc(1.25rem + var(--space-3));
+  right: var(--space-3);
+  padding: var(--space-1) var(--space-3);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-primary);
+  color: var(--text-primary);
+  font-size: 0.8125rem;
+  cursor: pointer;
+}
+
+.reports-markdown .report-image-frame .report-image-retry::after {
+  content: attr(data-label);
+}
+
+.reports-markdown
+  .report-image-frame.report-image-load-failed
+  .report-image-retry {
+  display: inline-flex;
+}
+
+.reports-markdown .report-image-frame.report-image-recovering {
+  opacity: 0.7;
+}
+
 .reports-markdown hr {
   height: 1px;
   margin: 1.6rem 0;

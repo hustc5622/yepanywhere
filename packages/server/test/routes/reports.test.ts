@@ -356,7 +356,7 @@ describe("Reports routes", () => {
     const documentJson =
       (await documentResponse.json()) as ReportDocumentResponse;
     expect(documentJson.renderedHtml).toContain(
-      'src="/yep/api/reports/image?path=research%2Fimage-report.md&amp;image=assets%2Fchart.png"',
+      'src="/yep/api/reports/image?path=research%2Fimage-report.md&amp;image=assets%2Fchart.png&amp;v=',
     );
     expect(documentJson.renderedHtml).toContain('alt="Benchmark chart"');
 
@@ -373,6 +373,7 @@ describe("Reports routes", () => {
       "/image?path=research%2Fimage-report.md&image=..%2F..%2Foutside.png",
     );
     expect(traversalResponse.status).toBe(404);
+    expect(traversalResponse.headers.get("cache-control")).toBe("no-store");
   });
 
   it("uploads report images into a report-specific assets directory", async () => {

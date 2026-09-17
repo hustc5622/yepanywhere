@@ -784,6 +784,8 @@
   "reportsToc": "Contents",
   "reportsNoToc": "No headings found",
   "reportsLineCount": "{count} lines",
+  "reportsImageLoadFailed": "Image failed to load",
+  "reportsImageRetry": "Retry",
   "reportsDocumentOptions": "Report options",
   "reportsCopyPath": "Copy path",
   "reportsPathCopied": "Report path copied",
