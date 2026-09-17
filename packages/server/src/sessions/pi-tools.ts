@@ -6,6 +6,15 @@ function isRecord(value: unknown): value is JsonRecord {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
+/**
+ * Result text used for a tool call Pi asked for but never executed, because
+ * the assistant stream ended before the request was complete. Shared by the
+ * live RPC path and the persisted-session conversion so both produce the same
+ * terminal step instead of a step that spins forever.
+ */
+export const PI_ABANDONED_TOOL_RESULT_TEXT =
+  "Tool call was abandoned: the assistant stream ended before the request was complete, so the tool never ran.";
+
 /** Map Pi's built-in tool names onto Yep's existing rich renderers. */
 export function canonicalizePiToolName(name: string): string {
   switch (name.toLowerCase()) {

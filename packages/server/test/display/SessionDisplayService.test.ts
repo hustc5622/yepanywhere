@@ -167,8 +167,16 @@ describe("SessionDisplayService", () => {
       ]);
       const groupId = displayToolId("turn", "slow").replace("dt2.", "dg2.");
       const snapshot = await service.snapshot(selection);
+      // "slow" never got a result while every later batch settled, so the
+      // projection retires it as `unknown` instead of spinning forever. It
+      // still belongs to the group and still counts toward its total.
       expect(snapshot.nodes.find((node) => node.id === groupId)).toMatchObject({
-        segment: { count, displayMode: "summary", runningCount: 1 },
+        segment: {
+          count,
+          displayMode: "summary",
+          runningCount: 0,
+          unknownCount: 1,
+        },
       });
       const first = await service.group(selection, groupId);
       expect(first.total).toBe(count);
@@ -183,7 +191,7 @@ describe("SessionDisplayService", () => {
       ]);
       expect(steps.every((step) => step.groupId === groupId)).toBe(true);
       expect(steps[0]).toMatchObject({
-        status: "running",
+        status: "unknown",
         summary: "run slow",
       });
       expect(earlier?.nextCursor).toBeUndefined();
@@ -197,6 +205,8 @@ describe("SessionDisplayService", () => {
         groupId,
         String(count > 50 ? 5 : count),
       );
+      // A late result always wins: retiring a stranded step is a display
+      // decision, never a refusal to accept the real outcome.
       expect(updated.steps[0]).toMatchObject({ status: "completed" });
       expect(updated.total).toBe(count);
       expect(source.detail).not.toHaveBeenCalled();

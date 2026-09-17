@@ -539,6 +539,8 @@
   "readMediaKindAudio": "Audio",
   "readMediaPreviewUnavailable": "Media loaded, but preview details are unavailable",
   "toolRendererUnavailable": "Tool details are temporarily unavailable",
+  "toolEditComputingDiff": "Computing diff...",
+  "toolEditIncompleteInvocation": "Incomplete tool call - it never ran, so there is no diff",
   "writePreparing": "Preparing write",
   "errorBoundaryTitle": "Something went wrong",
   "errorBoundaryBuildMismatchTitle": "Client and server builds differ.",

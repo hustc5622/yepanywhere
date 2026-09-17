@@ -38,6 +38,7 @@ import {
   qualifyPiModelId,
 } from "../../sessions/pi-model-refs.js";
 import {
+  PI_ABANDONED_TOOL_RESULT_TEXT,
   canonicalizePiToolName,
   normalizePiToolInput,
 } from "../../sessions/pi-tools.js";
@@ -1395,16 +1396,25 @@ export class PiProvider implements AgentProvider {
         stream.assistantId = null;
         stream.blocks.clear();
         const errorMessage = stringValue(message.errorMessage);
+        // A stream that dies before `message_stop` still carries whatever tool
+        // call blocks it had assembled. Pi never runs them and retries on a new
+        // assistant message, so without a synthetic terminal result the display
+        // reducer would spin on those steps for the rest of the session.
+        const abandoned =
+          message.stopReason === "error"
+            ? this.abandonedToolResultSdkMessages(message, sessionId)
+            : [];
         return errorMessage && message.stopReason === "error"
           ? [
               result,
+              ...abandoned,
               {
                 type: "error",
                 session_id: sessionId,
                 error: errorMessage,
               },
             ]
-          : [result];
+          : [result, ...abandoned];
       }
       if (message.role === "toolResult") {
         return [this.toolResultSdkMessage(message, sessionId)];
@@ -1764,6 +1774,44 @@ export class PiProvider implements AgentProvider {
       },
       is_error: message.isError === true,
     };
+  }
+
+  /**
+   * Terminal results for tool calls an interrupted assistant stream never ran.
+   * Mirrors `piAbandonedToolResults` on the persisted-session path so a live
+   * turn and a later reload agree on the same terminal step state.
+   */
+  private abandonedToolResultSdkMessages(
+    message: JsonRecord,
+    sessionId: string,
+  ): SDKMessage[] {
+    const content = Array.isArray(message.content) ? message.content : [];
+    const results: SDKMessage[] = [];
+    for (const raw of content) {
+      if (!isRecord(raw) || raw.type !== "toolCall") continue;
+      const callId = stringValue(raw.id);
+      if (!callId) continue;
+      results.push({
+        type: "user",
+        uuid: `pi-abandoned-tool-${callId}`,
+        session_id: sessionId,
+        tool_use_id: callId,
+        timestamp: toIsoTimestamp(message.timestamp),
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: callId,
+              content: PI_ABANDONED_TOOL_RESULT_TEXT,
+              is_error: true,
+            },
+          ],
+        },
+        is_error: true,
+      });
+    }
+    return results;
   }
 
   private async handleExtensionUiRequest(

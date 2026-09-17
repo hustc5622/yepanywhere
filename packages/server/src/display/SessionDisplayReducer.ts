@@ -32,6 +32,13 @@ export interface DisplayToolRecord {
   paths: Set<string>;
   check: boolean;
   position: number;
+  /**
+   * Identity of the assistant message that requested the call. Calls sharing a
+   * batch were issued together and may finish in any order; calls in different
+   * batches are strictly sequential, because a model only emits the next batch
+   * after it has seen the results of the previous one.
+   */
+  batch: string;
 }
 interface Group {
   id: string;
@@ -112,6 +119,8 @@ export class SessionDisplayReducer {
   private nodeIndices = new Map<string, number>();
   private groups = new Map<string, Group>();
   readonly tools = new Map<string, DisplayToolRecord>();
+  /** Tool records in creation order, used to detect stranded steps. */
+  private toolOrder: DisplayToolRecord[] = [];
   private rawToolIds = new Map<string, string>();
   private aliases = new Map<string, string>();
   private committed = new Set<string>();
@@ -271,6 +280,7 @@ export class SessionDisplayReducer {
     runId: string,
     timestamp?: string,
     replay = false,
+    batchId?: string,
   ): void {
     const rawId = string(block.id);
     if (!rawId) return;
@@ -339,6 +349,7 @@ export class SessionDisplayReducer {
         position: group.tools.length,
         rawId,
         runId,
+        batch: batchId ?? rawId,
         paths: new Set(),
         check: false,
         step: {
@@ -361,6 +372,7 @@ export class SessionDisplayReducer {
         },
       };
       this.tools.set(id, tool);
+      this.toolOrder.push(tool);
       this.rawToolIds.set(rawId, id);
       group.tools.push(id);
       const previousId =
@@ -667,14 +679,14 @@ export class SessionDisplayReducer {
               block.deferred === true,
             );
           } else if (block.type === "tool_use") {
-            this.tool(block, effectiveRun, timestamp, replay);
+            this.tool(block, effectiveRun, timestamp, replay, identity);
           }
         }
       }
     }
     for (const block of blocks) {
       if (block.type === "tool_use" && role !== "assistant")
-        this.tool(block, effectiveRun, timestamp, replay);
+        this.tool(block, effectiveRun, timestamp, replay, rawId ?? undefined);
       else if (block.type === "tool_result") this.result(block, effectiveRun);
     }
     if (message.type === "error" && message.willRetry !== true) {
@@ -752,7 +764,50 @@ export class SessionDisplayReducer {
     };
   }
 
+  /**
+   * Retire tool steps that can no longer receive a result.
+   *
+   * A step normally ends on its `tool_result`, or on a terminal turn status via
+   * `closeRun`. Neither arrives when a provider stream dies mid tool call: Pi
+   * persists the half-built call from a broken upstream stream, and Codex loses
+   * a turn outright when its app-server or bridge restarts before
+   * `turn_complete`. Providers without native turn ids (Pi, Kimi) make this
+   * worse, because every run collapses onto `session` and `closeRun` can only
+   * fire once the whole session goes idle. The orphan then spins as a bogus
+   * "still running" row for the rest of the session.
+   *
+   * Tool batches are strictly sequential: a model only requests the next batch
+   * after it has seen the results of the previous one. So any running step from
+   * a batch older than the newest settled step is dead, not pending. Steps
+   * inside one batch are never judged against each other, which leaves a
+   * genuinely in-flight parallel batch (some done, some still working) alone.
+   */
+  private reapStrandedTools(): void {
+    let lastSettled = -1;
+    for (let index = this.toolOrder.length - 1; index >= 0; index--) {
+      if (this.toolOrder[index]?.step.status !== "running") {
+        lastSettled = index;
+        break;
+      }
+    }
+    if (lastSettled < 1) return;
+    const liveBatch = this.toolOrder[lastSettled]?.batch;
+    for (let index = 0; index < lastSettled; index++) {
+      const tool = this.toolOrder[index];
+      if (!tool || tool.step.status !== "running" || tool.batch === liveBatch) {
+        continue;
+      }
+      tool.step = {
+        ...tool.step,
+        version: tool.step.version + 1,
+        status: "unknown",
+      };
+      this.releasePreview(tool);
+    }
+  }
+
   snapshot(olderCursor?: string): SessionDisplaySnapshot {
+    this.reapStrandedTools();
     const nodes = this.nodes.map((node) => {
       if (node.type === "segment" && node.segment.type === "assistant_text") {
         const cached = this.renderedNodes.get(node);

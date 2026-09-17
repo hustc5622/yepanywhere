@@ -153,6 +153,24 @@ describe("EditRenderer collapsed preview fallback", () => {
     expect(screen.getByText("Computing diff...")).toBeDefined();
   });
 
+  it("marks an argument-less Edit invocation as terminal instead of pending", () => {
+    // A provider stream that dies mid tool call persists the block with no
+    // arguments. Nothing can ever compute a diff for it, so it must not spin.
+    render(
+      <div>
+        {renderCollapsedPreview({} as never, undefined, false, renderContext)}
+        {editRenderer.renderToolUse({} as never, renderContext)}
+      </div>,
+    );
+
+    expect(screen.queryByText("Computing diff...")).toBeNull();
+    expect(
+      screen.getAllByText(
+        "Incomplete tool call - it never ran, so there is no diff",
+      ),
+    ).toHaveLength(2);
+  });
+
   it("keeps structured diff rendering unchanged when structured patch exists", () => {
     const input = {
       _structuredPatch: [

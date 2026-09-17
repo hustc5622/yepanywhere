@@ -218,6 +218,145 @@ describe("normalizeSession", () => {
     expect(JSON.stringify(normalized)).not.toContain("base64");
   });
 
+  it("closes Pi tool calls abandoned by a broken assistant stream", () => {
+    const piSession: PiSessionContent = {
+      header: {
+        type: "session",
+        id: "session-pi-abandoned",
+        timestamp: "2026-09-16T05:21:51.000Z",
+        cwd: "/tmp/project",
+      },
+      entries: [
+        {
+          type: "message",
+          id: "user-1",
+          parentId: null,
+          timestamp: "2026-09-16T05:21:51.000Z",
+          message: { role: "user", content: "edit the changelog" },
+        },
+        {
+          // Stream died before `message_stop`: the tool call is persisted with
+          // empty arguments and never receives a result.
+          type: "message",
+          id: "assistant-broken",
+          parentId: "user-1",
+          timestamp: "2026-09-16T05:40:07.000Z",
+          message: {
+            role: "assistant",
+            stopReason: "error",
+            errorMessage: "Anthropic stream ended before message_stop",
+            content: [
+              {
+                type: "toolCall",
+                id: "call-dead",
+                name: "edit",
+                arguments: {},
+              },
+            ],
+          },
+        },
+        {
+          type: "message",
+          id: "assistant-retry",
+          parentId: "assistant-broken",
+          timestamp: "2026-09-16T05:40:45.000Z",
+          message: {
+            role: "assistant",
+            stopReason: "toolUse",
+            content: [
+              {
+                type: "toolCall",
+                id: "call-live",
+                name: "edit",
+                arguments: { path: "/tmp/project/a.md", edits: [] },
+              },
+            ],
+          },
+        },
+        {
+          type: "message",
+          id: "result-live",
+          parentId: "assistant-retry",
+          timestamp: "2026-09-16T05:40:45.100Z",
+          message: {
+            role: "toolResult",
+            toolCallId: "call-live",
+            toolName: "edit",
+            isError: false,
+            content: [{ type: "text", text: "Successfully replaced" }],
+          },
+        },
+      ],
+      activeEntries: [],
+    };
+    piSession.activeEntries = piSession.entries;
+
+    const { messages } = convertPiSession(piSession);
+    const results = messages.filter(
+      (message) => typeof message.tool_use_id === "string",
+    );
+    expect(results.map((message) => message.tool_use_id)).toEqual([
+      "call-dead",
+      "call-live",
+    ]);
+    const abandoned = results[0];
+    expect(abandoned?.uuid).toBe("assistant-broken:abandoned-tool:call-dead");
+    expect(abandoned?.message).toMatchObject({
+      content: [{ type: "tool_result", is_error: true }],
+    });
+    // The synthetic result must sit right after the assistant message that
+    // asked for the call, so the display timeline keeps its order.
+    expect(messages.findIndex((m) => m.uuid === abandoned?.uuid)).toBe(
+      messages.findIndex((m) => m.uuid === "assistant-broken") + 1,
+    );
+  });
+
+  it("never synthesizes a Pi tool result that the log already carries", () => {
+    const piSession: PiSessionContent = {
+      header: {
+        type: "session",
+        id: "session-pi-aborted",
+        timestamp: "2026-09-16T05:21:51.000Z",
+        cwd: "/tmp/project",
+      },
+      entries: [
+        {
+          type: "message",
+          id: "assistant-aborted",
+          parentId: null,
+          timestamp: "2026-09-16T05:41:00.000Z",
+          message: {
+            role: "assistant",
+            stopReason: "aborted",
+            content: [
+              { type: "toolCall", id: "call-1", name: "bash", arguments: {} },
+            ],
+          },
+        },
+        {
+          type: "message",
+          id: "result-1",
+          parentId: "assistant-aborted",
+          timestamp: "2026-09-16T05:41:02.000Z",
+          message: {
+            role: "toolResult",
+            toolCallId: "call-1",
+            toolName: "bash",
+            isError: true,
+            content: [{ type: "text", text: "aborted by user" }],
+          },
+        },
+      ],
+      activeEntries: [],
+    };
+    piSession.activeEntries = piSession.entries;
+
+    const { messages } = convertPiSession(piSession);
+    expect(
+      messages.filter((message) => message.tool_use_id === "call-1"),
+    ).toHaveLength(1);
+  });
+
   it("renders Kimi prompt images as input_image blocks and hides the compression notice", () => {
     const blobsDir =
       "/home/u/.kimi-code/sessions/wd_x/session_y/agents/main/blobs";

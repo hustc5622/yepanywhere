@@ -3,6 +3,7 @@ import type { ZodError } from "zod";
 import { useSchemaValidationContext } from "../../../contexts/SchemaValidationContext";
 import { useSessionMetadata } from "../../../contexts/SessionMetadataContext";
 import { useExpandedDiff } from "../../../hooks/useExpandedDiff";
+import { useOptionalI18n } from "../../../i18n";
 import {
   classifyToolError,
   getErrorClassSuffix,
@@ -63,6 +64,50 @@ interface EditInputWithAugment extends EditInput {
   _structuredPatch?: PatchHunk[];
   _diffHtml?: string;
   _rawPatch?: string;
+}
+
+/**
+ * True when the invocation carries nothing a diff could ever be built from.
+ *
+ * A provider stream that dies mid tool call persists the block with empty
+ * arguments, and no augment pass can recover a patch from it. Such a call is
+ * terminal, so the renderer must not keep claiming a diff is being computed.
+ */
+function isIncompleteEditInvocation(input: EditInputWithAugment): boolean {
+  if (input._structuredPatch?.length || input._rawPatch) return false;
+  return (
+    !input.file_path &&
+    !input.old_string &&
+    !input.new_string &&
+    !(input as { edits?: unknown }).edits
+  );
+}
+
+/**
+ * Placeholder shown while an Edit row still has no diff to draw. Distinguishes
+ * "augment pending" from "this call can never produce a diff" so an abandoned
+ * invocation does not look like work in progress.
+ */
+function EditDiffPlaceholder({
+  input,
+  className,
+}: {
+  input: EditInputWithAugment;
+  className: string;
+}) {
+  const i18n = useOptionalI18n();
+  const incomplete = isIncompleteEditInvocation(input);
+  const key = incomplete
+    ? "toolEditIncompleteInvocation"
+    : "toolEditComputingDiff";
+  const fallback = incomplete
+    ? "Incomplete tool call - it never ran, so there is no diff"
+    : "Computing diff...";
+  return (
+    <div className={className}>
+      <div className="edit-loading">{i18n ? i18n.t(key) : fallback}</div>
+    </div>
+  );
 }
 
 function extractFilePathFromRawPatch(rawPatch?: string): string | undefined {
@@ -307,11 +352,7 @@ function EditToolUse({ input }: { input: EditInputWithAugment }) {
         </div>
       );
     }
-    return (
-      <div className="edit-result">
-        <div className="edit-loading">Computing diff...</div>
-      </div>
-    );
+    return <EditDiffPlaceholder input={input} className="edit-result" />;
   }
 
   const diffLines = input._structuredPatch.flatMap((hunk) => hunk.lines);
@@ -618,9 +659,7 @@ function EditCollapsedPreview({
   if (structuredPatch.length === 0) {
     if (result === undefined) {
       return (
-        <div className="edit-collapsed-preview">
-          <div className="edit-loading">Computing diff...</div>
-        </div>
+        <EditDiffPlaceholder input={input} className="edit-collapsed-preview" />
       );
     }
 

@@ -18,6 +18,8 @@ export interface ContentBlock {
   tool_use_id?: string;
   /** For tool_result blocks - the result content */
   content?: string;
+  /** For tool_result blocks - marks the call as failed rather than completed. */
+  is_error?: boolean;
   /** Live streaming output preview for a still-running tool. */
   partialOutput?: string;
 }

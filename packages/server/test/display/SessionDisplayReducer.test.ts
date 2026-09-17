@@ -159,6 +159,140 @@ describe("SessionDisplayReducer", () => {
     expect(model.snapshot().activity.state).toBe("completed");
   });
 
+  it("does not leave a Pi tool call abandoned by a broken stream as running", () => {
+    // Pi has no turn ids, so every run lands on "session" and only a
+    // tool_result can close a step while the session keeps working. The
+    // conversion layer synthesizes that result; this pins the display effect.
+    const model = new SessionDisplayReducer(view, "pi");
+    model.message({
+      uuid: "user",
+      type: "user",
+      message: { role: "user", content: "edit the changelog" },
+    });
+    model.message({
+      uuid: "assistant-broken",
+      type: "assistant",
+      stopReason: "error",
+      message: {
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "call-dead", name: "Edit", input: {} },
+        ],
+      },
+    });
+    expect(model.snapshot().activity.runningCount).toBe(1);
+
+    model.message({
+      uuid: "assistant-broken:abandoned-tool:call-dead",
+      type: "user",
+      tool_use_id: "call-dead",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "call-dead",
+            content: "Tool call was abandoned",
+            is_error: true,
+          },
+        ],
+      },
+    });
+    const snapshot = model.snapshot();
+    expect(snapshot.activity.runningCount).toBe(0);
+    expect(snapshot.activity.tools).toHaveLength(0);
+    expect(
+      groups(snapshot).flatMap((group) => group.steps ?? []),
+    ).toMatchObject([{ name: "Edit", status: "failed" }]);
+  });
+
+  it("retires a stranded tool call once a later batch settles, on any provider", () => {
+    // Generic safety net for the case no provider can close on its own: a
+    // stream that dies mid tool call leaves a step nothing will ever answer.
+    const call = (uuid: string, ids: string[]) => ({
+      uuid,
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: ids.map((id) => ({
+          type: "tool_use",
+          id,
+          name: "Bash",
+          input: { command: `run ${id}` },
+        })),
+      },
+    });
+    const answer = (id: string) => ({
+      uuid: `${id}-result`,
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: id, content: "ok" }],
+      },
+    });
+    const statuses = (model: SessionDisplayReducer) => {
+      // Retirement is decided when a snapshot is produced, which is the single
+      // place both live patches and cold reads go through.
+      model.snapshot();
+      return [...model.tools.values()].map((tool) => [
+        tool.rawId,
+        tool.step.status,
+      ]);
+    };
+
+    const model = new SessionDisplayReducer(view, "claude");
+    model.message(call("a", ["stranded"]));
+    model.message(call("b", ["next"]));
+    expect(model.snapshot().activity.runningCount).toBe(2);
+
+    model.message(answer("next"));
+    expect(statuses(model)).toEqual([
+      ["stranded", "unknown"],
+      ["next", "completed"],
+    ]);
+
+    // A late result still wins: retiring the step is a display decision, not a
+    // refusal to accept the real outcome.
+    model.message(answer("stranded"));
+    expect(statuses(model)).toEqual([
+      ["stranded", "completed"],
+      ["next", "completed"],
+    ]);
+  });
+
+  it("leaves a parallel batch alone while only part of it has answered", () => {
+    // Calls issued together may answer in any order, so a settled sibling says
+    // nothing about the ones still working.
+    const model = new SessionDisplayReducer(view, "claude");
+    model.message({
+      uuid: "batch",
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: ["one", "two", "three"].map((id) => ({
+          type: "tool_use",
+          id,
+          name: "Bash",
+          input: { command: `run ${id}` },
+        })),
+      },
+    });
+    model.message({
+      uuid: "two-result",
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "two", content: "ok" }],
+      },
+    });
+    expect(model.snapshot().activity.runningCount).toBe(2);
+    expect([...model.tools.values()].map((tool) => tool.step.status)).toEqual([
+      "running",
+      "completed",
+      "running",
+    ]);
+  });
+
   it("preserves text on both sides of a tool across live updates, replay and cold reads", () => {
     const model = new SessionDisplayReducer(view, "claude");
     const message: Message = {

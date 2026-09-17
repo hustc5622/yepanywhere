@@ -539,6 +539,8 @@
   "readMediaKindAudio": "音频",
   "readMediaPreviewUnavailable": "媒体已读取，但预览信息不可用",
   "toolRendererUnavailable": "工具详情暂时无法显示",
+  "toolEditComputingDiff": "正在生成 diff…",
+  "toolEditIncompleteInvocation": "工具调用不完整，未执行，因此没有 diff",
   "writePreparing": "正在准备写入",
   "errorBoundaryTitle": "页面出现错误",
   "errorBoundaryBuildMismatchTitle": "客户端与服务端构建不一致。",
