@@ -90,6 +90,10 @@ OPTIONS:
   --auth-disable        Disable authentication (bypass auth even if enabled in settings)
                         Emergency recovery mode; re-enable auth after fixing config
   --codex-bridge-only   Start only the Codex CLI bridge sidecar
+  --runtime-only        Start only the agent runtime worker (loopback control API).
+                        The web/API shell then runs with YEP_RUNTIME_MODE=external
+                        and can be restarted without aborting active turns.
+  --runtime-port <n>    Control port for --runtime-only (default: PORT + 3)
   claude                Start or attach to a Yep-managed Claude provider session
 
 SETUP OPTIONS (for headless installation):
@@ -107,6 +111,11 @@ ENVIRONMENT VARIABLES:
   LOG_LEVEL                     Log level: fatal, error, warn, info, debug, trace
   LOG_PRETTY                    Pretty-print console logs (default: true)
   MAINTENANCE_PORT              Maintenance server port (default: disabled)
+  YEP_RUNTIME_MODE              embedded (default) or external. External makes the
+                                web/API shell proxy live agent work to a runtime worker
+  YEP_RUNTIME_PORT              Agent runtime control port (default: PORT + 3)
+  YEP_RUNTIME_CONTROL_URL       Agent runtime control URL (default: http://127.0.0.1:PORT+3)
+  YEP_RUNTIME_TOKEN_FILE        Shared bearer token file (default: <data dir>/runtime/token)
   CODEX_WATCH_PERIODIC_RESCAN_MS
                                 Codex watcher fallback rescan interval in ms (default: 5000 on macOS, 0 elsewhere)
   SESSION_INDEX_FULL_VALIDATION_MS
@@ -145,6 +154,10 @@ EXAMPLES:
 
   # Start a Yep-managed Claude provider session from the terminal
   yepanywhere claude "fix the failing tests"
+
+  # Split the agent runtime out of the web/API shell (two processes)
+  yepanywhere --runtime-only --port 8022
+  YEP_RUNTIME_MODE=external yepanywhere --port 8022
 
 DOCUMENTATION:
   For full documentation, see: https://github.com/hustc5622/yepanywhere
@@ -260,6 +273,45 @@ if (claudeWrapperInvocation) {
     args.splice(codexBridgeOnlyIndex, 1);
   }
 
+  // Parse --runtime-port option (only meaningful together with --runtime-only)
+  const runtimePortIndex = args.indexOf("--runtime-port");
+  if (runtimePortIndex !== -1) {
+    const runtimePortValue = args[runtimePortIndex + 1];
+    if (!runtimePortValue || runtimePortValue.startsWith("-")) {
+      console.error(
+        "Error: --runtime-port requires a value (e.g., --runtime-port 8025)",
+      );
+      process.exit(1);
+    }
+    const runtimePortNum = Number.parseInt(runtimePortValue, 10);
+    if (
+      Number.isNaN(runtimePortNum) ||
+      runtimePortNum < 1 ||
+      runtimePortNum > 65535
+    ) {
+      console.error(
+        "Error: --runtime-port must be a valid port number (1-65535)",
+      );
+      process.exit(1);
+    }
+    process.env.YEP_RUNTIME_PORT = runtimePortValue;
+    args.splice(runtimePortIndex, 2);
+  }
+
+  // Parse --runtime-only flag
+  const runtimeOnlyIndex = args.indexOf("--runtime-only");
+  const runtimeOnly = runtimeOnlyIndex !== -1;
+  if (runtimeOnlyIndex !== -1) {
+    args.splice(runtimeOnlyIndex, 1);
+  }
+
+  if (runtimeOnly && codexBridgeOnly) {
+    console.error(
+      "Error: --runtime-only and --codex-bridge-only cannot be combined.",
+    );
+    process.exit(1);
+  }
+
   // Parse --setup-auth flag
   const setupAuthIndex = args.indexOf("--setup-auth");
   let setupAuthPassword: string | undefined;
@@ -294,6 +346,8 @@ if (claudeWrapperInvocation) {
     runSetup(setupAuthPassword);
   } else if (codexBridgeOnly) {
     runCodexBridgeOnly();
+  } else if (runtimeOnly) {
+    runAgentRuntimeOnlyProcess();
   } else {
     // Only check for Claude CLI when starting the server (not for setup commands)
     checkClaudeCli();
@@ -328,6 +382,23 @@ function runServer(): void {
     console.error("Failed to start server:", error);
     process.exit(1);
   });
+}
+
+/**
+ * Start only the long-lived agent runtime worker.
+ *
+ * The runtime owns provider child processes, so keeping it in its own process
+ * lets the web/API shell be rebuilt and restarted without aborting active
+ * turns. The shell connects over the loopback control API using
+ * YEP_RUNTIME_MODE=external.
+ */
+function runAgentRuntimeOnlyProcess(): void {
+  import("./runtime/standalone.js")
+    .then(({ runAgentRuntimeOnly }) => runAgentRuntimeOnly())
+    .catch((error) => {
+      console.error("Failed to start agent runtime:", error);
+      process.exit(1);
+    });
 }
 
 function runCodexBridgeOnly(): void {

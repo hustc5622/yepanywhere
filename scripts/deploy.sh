@@ -100,6 +100,9 @@ Options:
                       Keep the Codex bridge sidecar alive while restarting the web server (default)
   --restart-codex-bridge
                       Restart the Codex bridge sidecar too; disconnects active cf sessions
+  --restart-runtime   Restart the external agent runtime worker; aborts live turns
+  --external-runtime  Install/refresh the agent runtime LaunchAgent and point 8022 at it
+                      (one restart to switch; afterwards server deploys keep turns alive)
   --embedded-codex-bridge
                       Legacy mode: run the Codex bridge inside the web server
   --skip-checks       Skip pnpm lint/typecheck preflight
@@ -161,6 +164,12 @@ discover_fcm_service_account_file
 
 DO_SERVER=true
 DO_DEV_SERVER=false
+DEPLOY_EXTERNAL_RUNTIME=false
+if [[ -n "${YEP_RUNTIME_EXTERNAL:-}" ]]; then
+  case "$YEP_RUNTIME_EXTERNAL" in
+    1|true|yes|external) DEPLOY_EXTERNAL_RUNTIME=true ;;
+  esac
+fi
 ALLOW_YEP_SESSION_INTERRUPT=false
 DO_CODEX_BRIDGE=false
 DO_APK=true
@@ -305,6 +314,7 @@ configure_interactive() {
   if ask_yes_no "Redeploy 8022 web/API server?" "yes"; then
     DO_SERVER=true
     RUN_CHECKS=true
+    configure_interactive_runtime_split
   fi
 
   echo
@@ -326,6 +336,81 @@ configure_interactive() {
     DO_APK=true
     choose_apk_build_type
   fi
+}
+
+# Report how the running deployment owns live agent processes, so the wizard
+# can offer the split only when it would actually change anything.
+current_runtime_mode() {
+  local port="${YEP_DEPLOY_PORT:-8022}"
+  local raw_base_path="${YEP_DEPLOY_BASE_PATH:-/yep}"
+  local base_path response
+
+  if [[ "$raw_base_path" == "/" ]]; then
+    base_path=""
+  else
+    base_path="/${raw_base_path#/}"
+    base_path="${base_path%/}"
+  fi
+
+  response="$(curl -fsS --max-time 3 "http://127.0.0.1:${port}${base_path}/api/status/workers" 2>/dev/null)" || {
+    printf '%s' "unknown"
+    return 0
+  }
+  printf '%s' "$response" | node -e '
+let raw = "";
+process.stdin.on("data", (chunk) => raw += chunk);
+process.stdin.on("end", () => {
+  try {
+    process.stdout.write(JSON.parse(raw).runtimeMode || "unknown");
+  } catch {
+    process.stdout.write("unknown");
+  }
+});
+' 2>/dev/null || printf '%s' "unknown"
+}
+
+# The runtime mode cannot change while this deploy is planning, so probe once
+# and reuse the answer; both the wizard and the installer branch on it.
+RUNTIME_MODE_BEFORE=""
+runtime_mode_before() {
+  if [[ -z "$RUNTIME_MODE_BEFORE" ]]; then
+    RUNTIME_MODE_BEFORE="$(current_runtime_mode)"
+  fi
+  printf '%s' "$RUNTIME_MODE_BEFORE"
+}
+
+configure_interactive_runtime_split() {
+  local mode
+  mode="$(runtime_mode_before)"
+
+  echo
+  log "Agent runtime placement"
+  case "$mode" in
+    external)
+      dim "The agent runtime already runs as its own worker, so this deploy replaces"
+      dim "only the web/API process and active turns keep running."
+      DEPLOY_EXTERNAL_RUNTIME=true
+      if ask_yes_no "Restart the agent runtime too? (aborts every live turn)" "no"; then
+        SERVER_ARGS+=(--restart-runtime)
+      fi
+      ;;
+    embedded)
+      dim "Live agent processes currently run inside the 8022 process, so every"
+      dim "redeploy of 8022 aborts active turns (this deploy waits for idle first)."
+      dim "Splitting the runtime into its own worker is a one-time switch: it costs"
+      dim "one restart now, and afterwards 8022 redeploys leave live turns alone."
+      if ask_yes_no "Split the agent runtime into a separate worker?" "no"; then
+        DEPLOY_EXTERNAL_RUNTIME=true
+        dim "tip: add YEP_RUNTIME_EXTERNAL=true to .env.deploy.local to make this the default"
+      else
+        # An explicit "no" outranks YEP_RUNTIME_EXTERNAL from the deploy env file.
+        DEPLOY_EXTERNAL_RUNTIME=false
+      fi
+      ;;
+    *)
+      dim "Could not read the current runtime mode from 8022; leaving the placement unchanged."
+      ;;
+  esac
 }
 
 sync_android_google_services() {
@@ -675,6 +760,40 @@ sync_server_launchagent_env_if_needed() {
   scripts/install-launchagents.sh --server-only --no-start
 }
 
+# Write the agent runtime LaunchAgent and rewrite the 8022 plist so the shell
+# talks to it. Nothing is started here: a deployment that is switching from
+# embedded gets the one intentional restart from the server deploy below, and
+# an already-split deployment keeps its running worker (and its live turns).
+install_external_runtime_if_requested() {
+  if ! $DEPLOY_EXTERNAL_RUNTIME; then
+    return 0
+  fi
+  if [[ "$(uname -s)" != "Darwin" ]]; then
+    warn "--external-runtime needs LaunchAgents; skipping on $(uname -s)."
+    return 0
+  fi
+  ensure_server_bundle_for_launchagent_sync
+
+  log "Installing the external agent runtime LaunchAgent ..."
+  dim "the 8022 plist is rewritten with YEP_RUNTIME_MODE=external"
+  YEP_RUNTIME_EXTERNAL=true scripts/install-launchagents.sh --runtime-only --no-start
+  YEP_RUNTIME_EXTERNAL=true scripts/install-launchagents.sh --server-only --no-start
+
+  if [[ "$(runtime_mode_before)" == "external" ]]; then
+    # Already split: the refreshed plist is picked up on the next intentional
+    # runtime restart. Replacing the worker here would abort live turns on
+    # every deploy, which is exactly what the external runtime exists to avoid.
+    dim "the runtime worker is already running and is left untouched"
+    dim "pass --restart-runtime (or answer yes in the wizard) to replace it"
+    return 0
+  fi
+
+  # Switching from embedded only takes effect once both processes are replaced.
+  if ! server_args_contain "--restart-runtime"; then
+    SERVER_ARGS+=(--restart-runtime)
+  fi
+}
+
 start_dev_server() {
   local server_port="${YEP_DEPLOY_PORT:-8022}"
   local raw_base_path="${YEP_DEPLOY_BASE_PATH:-/yep}"
@@ -862,6 +981,16 @@ else
         SERVER_ARGS+=(--restart-codex-bridge)
         shift
         ;;
+      --restart-runtime)
+        SERVER_ARGS+=(--restart-runtime)
+        shift
+        ;;
+      --external-runtime)
+        # Split live agent processes into their own worker so later 8022
+        # redeploys stop aborting active turns.
+        DEPLOY_EXTERNAL_RUNTIME=true
+        shift
+        ;;
       --embedded-codex-bridge|--no-preserve-codex-bridge)
         SERVER_ARGS+=("$1")
         shift
@@ -906,6 +1035,7 @@ ensure_project_node
 log "Deploy plan"
 dim "8022 web/API:        $DO_SERVER"
 dim "8022 dev hot reload: $DO_DEV_SERVER"
+dim "external runtime:    $DEPLOY_EXTERNAL_RUNTIME"
 dim "allow session interrupt: $ALLOW_YEP_SESSION_INTERRUPT"
 dim "4510 Codex bridge:   $DO_CODEX_BRIDGE"
 dim "server args:         ${SERVER_ARGS[*]:-}"
@@ -947,6 +1077,7 @@ fi
 
 if ! $DO_DEV_SERVER; then
   sync_server_launchagent_env_if_needed
+  install_external_runtime_if_requested
 fi
 
 if $DO_DEV_SERVER; then

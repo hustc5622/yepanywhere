@@ -5,6 +5,7 @@ set -euo pipefail
 
 SERVER_LABEL="${YEP_LAUNCHD_SERVER_LABEL:-com.yueyuan.yepanywhere.server}"
 BRIDGE_LABEL="${YEP_LAUNCHD_BRIDGE_LABEL:-com.yueyuan.yepanywhere.codex-bridge}"
+RUNTIME_LABEL="${YEP_LAUNCHD_RUNTIME_LABEL:-com.yueyuan.yepanywhere.runtime}"
 LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 USER_DOMAIN="gui/$(id -u)"
 
@@ -57,4 +58,6 @@ uninstall_agent() {
 log "Uninstalling Yep Anywhere LaunchAgents ..."
 uninstall_agent "$SERVER_LABEL"
 uninstall_agent "$BRIDGE_LABEL"
+# Removed last: stopping it kills any provider process the shell still used.
+uninstall_agent "$RUNTIME_LABEL"
 log "Uninstalled LaunchAgents."
