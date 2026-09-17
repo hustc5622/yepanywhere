@@ -371,6 +371,10 @@ export interface SessionOptions {
   codexMcpMode?: CodexMcpMode;
   /** Codex model source (Codex `model_provider`), e.g. "openai"/"deepseek". */
   codexModelProvider?: string;
+  /** Codex account id (isolated `CODEX_HOME`); omitted uses the machine login. */
+  codexAccountId?: string;
+  /** Gateway API key id this session runs on; omitted uses the env key. */
+  llmGatewayKeyId?: string;
   /** Managed LLM gateway provider/model configuration. */
   llmGatewayConfig?: LlmGatewaySessionConfig;
   /** SSH host alias for remote execution (undefined = local) */
@@ -458,6 +462,84 @@ export interface CodexUsageResponse {
 
 /** Claude usage is normalized server-side to the same window/bucket shape. */
 export type ClaudeUsageResponse = CodexUsageResponse;
+
+export type CodexLoginMode = "browser" | "deviceCode";
+export type CodexLoginStatus =
+  | "pending"
+  | "completed"
+  | "failed"
+  | "canceled"
+  | "none";
+
+export interface CodexLoginState {
+  mode: CodexLoginMode;
+  status: CodexLoginStatus;
+  authUrl: string | null;
+  verificationUrl: string | null;
+  userCode: string | null;
+  error: string | null;
+  startedAt: string;
+}
+
+export interface CodexAccountEntry {
+  id: string;
+  label: string | null;
+  codexHome: string;
+  isDefault: boolean;
+  isActive: boolean;
+  account: {
+    type: string;
+    email: string | null;
+    planType: string | null;
+  } | null;
+  usage: CodexUsageResponse["usage"];
+  error: string | null;
+  login: CodexLoginState | null;
+}
+
+export interface CodexAccountsResponse {
+  accounts: CodexAccountEntry[];
+  error: string | null;
+}
+
+/** Probe result for one gateway key. */
+export interface LlmGatewayKeyStatus {
+  ok: boolean;
+  checkedAt: string;
+  latencyMs: number | null;
+  modelCount: number | null;
+  models: string[];
+  balanceUsd: number | null;
+  limitUsd: number | null;
+  usedUsd: number | null;
+  /** The gateway reports no real quota (unlimited token). */
+  unlimited: boolean;
+  error: string | null;
+}
+
+export interface LlmGatewayKeyEntry {
+  id: string;
+  channelId: string;
+  label: string | null;
+  /** Masked credential; the full key never leaves the server. */
+  preview: string;
+  isEnvKey: boolean;
+  createdAt: string;
+  status: LlmGatewayKeyStatus | null;
+}
+
+export interface LlmGatewayChannelEntry {
+  id: string;
+  label: string;
+  apiBase: string;
+  isDefault: boolean;
+  keys: LlmGatewayKeyEntry[];
+}
+
+export interface LlmGatewayKeysResponse {
+  channels: LlmGatewayChannelEntry[];
+  error: string | null;
+}
 
 export async function fetchJSON<T>(
   path: string,
@@ -890,6 +972,83 @@ export const api = {
         : "/providers/claude/usage",
     ),
 
+  // Multi-account Codex usage / login
+  getCodexAccounts: (options?: { fresh?: boolean }) =>
+    fetchJSON<CodexAccountsResponse>(
+      options?.fresh ? "/codex-accounts?fresh=1" : "/codex-accounts",
+    ),
+
+  addCodexAccount: (label?: string) =>
+    fetchJSON<{ account: { id: string } }>("/codex-accounts", {
+      method: "POST",
+      body: JSON.stringify({ label }),
+    }),
+
+  removeCodexAccount: (accountId: string) =>
+    fetchJSON<{ ok: boolean }>(`/codex-accounts/${accountId}`, {
+      method: "DELETE",
+    }),
+
+  startCodexAccountLogin: (accountId: string, mode: CodexLoginMode) =>
+    fetchJSON<{ login: CodexLoginState | null; error: string | null }>(
+      `/codex-accounts/${accountId}/login`,
+      { method: "POST", body: JSON.stringify({ mode }) },
+    ),
+
+  getCodexAccountLogin: (accountId: string) =>
+    fetchJSON<{ login: CodexLoginState | null }>(
+      `/codex-accounts/${accountId}/login`,
+    ),
+
+  cancelCodexAccountLogin: (accountId: string) =>
+    fetchJSON<{ ok: boolean }>(`/codex-accounts/${accountId}/login`, {
+      method: "DELETE",
+    }),
+
+  logoutCodexAccount: (accountId: string) =>
+    fetchJSON<{ ok: boolean }>(`/codex-accounts/${accountId}/logout`, {
+      method: "POST",
+    }),
+
+  activateCodexAccount: (accountId: string) =>
+    fetchJSON<{ ok: boolean }>(`/codex-accounts/${accountId}/activate`, {
+      method: "POST",
+    }),
+
+  // Selectable LLM gateway keys (Pi picks one per session)
+  getLlmGatewayKeys: (options?: { probe?: boolean; fresh?: boolean }) => {
+    const query = [
+      options?.probe ? "probe=1" : null,
+      options?.fresh ? "fresh=1" : null,
+    ]
+      .filter(Boolean)
+      .join("&");
+    return fetchJSON<LlmGatewayKeysResponse>(
+      query ? `/llm-gateway-keys?${query}` : "/llm-gateway-keys",
+    );
+  },
+
+  addLlmGatewayKey: (input: {
+    channelId: string;
+    apiKey: string;
+    label?: string | null;
+  }) =>
+    fetchJSON<{ key: LlmGatewayKeyEntry | null; error: string | null }>(
+      "/llm-gateway-keys",
+      { method: "POST", body: JSON.stringify(input) },
+    ),
+
+  renameLlmGatewayKey: (keyId: string, label: string | null) =>
+    fetchJSON<{ ok: boolean }>(`/llm-gateway-keys/${keyId}`, {
+      method: "PATCH",
+      body: JSON.stringify({ label }),
+    }),
+
+  removeLlmGatewayKey: (keyId: string) =>
+    fetchJSON<{ ok: boolean }>(`/llm-gateway-keys/${keyId}`, {
+      method: "DELETE",
+    }),
+
   // Network binding API (runtime port/interface configuration)
   getNetworkBinding: () => fetchJSON<NetworkBindingState>("/network-binding"),
 
@@ -1242,6 +1401,8 @@ export const api = {
         provider: options?.provider,
         codexMcpMode: options?.codexMcpMode,
         codexModelProvider: options?.codexModelProvider,
+        codexAccountId: options?.codexAccountId,
+        llmGatewayKeyId: options?.llmGatewayKeyId,
         llmGatewayConfig: options?.llmGatewayConfig,
         executor: options?.executor,
         codexInputs: options?.codexInputs,
@@ -1265,6 +1426,8 @@ export const api = {
         provider: options?.provider,
         codexMcpMode: options?.codexMcpMode,
         codexModelProvider: options?.codexModelProvider,
+        codexAccountId: options?.codexAccountId,
+        llmGatewayKeyId: options?.llmGatewayKeyId,
         llmGatewayConfig: options?.llmGatewayConfig,
         executor: options?.executor,
       }),
@@ -1313,6 +1476,8 @@ export const api = {
           provider: options?.provider,
           codexMcpMode: options?.codexMcpMode,
           codexModelProvider: options?.codexModelProvider,
+          codexAccountId: options?.codexAccountId,
+          llmGatewayKeyId: options?.llmGatewayKeyId,
           llmGatewayConfig: options?.llmGatewayConfig,
           executor: options?.executor,
           codexInputs: options?.codexInputs,
@@ -1362,6 +1527,8 @@ export const api = {
             provider: "codex",
             codexMcpMode: options?.codexMcpMode,
             codexModelProvider: options?.codexModelProvider,
+            codexAccountId: options?.codexAccountId,
+            llmGatewayKeyId: options?.llmGatewayKeyId,
             llmGatewayConfig: options?.llmGatewayConfig,
             executor: options?.executor,
           },

@@ -1,5 +1,8 @@
 import { useCallback, useEffect, useState } from "react";
 import {
+  type CodexAccountEntry,
+  type CodexLoginMode,
+  type CodexLoginState,
   type CodexUsageBucket,
   type CodexUsageResponse,
   type CodexUsageWindow,
@@ -49,7 +52,14 @@ function UsageWindow({ window }: { window: CodexUsageWindow }) {
   return (
     <div className="codex-usage-window">
       <div className="codex-usage-window-heading">
-        <span>{getWindowLabel(window, t)}</span>
+        <span>
+          {getWindowLabel(window, t)}
+          {resetAt && (
+            <span className="codex-usage-reset">
+              {t("newSessionCodexUsageResetAt", { time: resetAt })}
+            </span>
+          )}
+        </span>
         <strong>
           {t("newSessionCodexUsageUsed", { percent: usedPercent })}
         </strong>
@@ -68,11 +78,6 @@ function UsageWindow({ window }: { window: CodexUsageWindow }) {
           style={{ width: `${usedPercent}%` }}
         />
       </div>
-      {resetAt && (
-        <span className="codex-usage-reset">
-          {t("newSessionCodexUsageResetAt", { time: resetAt })}
-        </span>
-      )}
     </div>
   );
 }
@@ -85,7 +90,7 @@ function AdditionalBucket({ bucket }: { bucket: CodexUsageBucket }) {
   if (windows.length === 0) return null;
 
   return (
-    <div className="codex-usage-additional-bucket">
+    <span className="codex-usage-additional-bucket">
       <span className="codex-usage-additional-name">
         {bucket.name ?? bucket.id}
       </span>
@@ -99,7 +104,7 @@ function AdditionalBucket({ bucket }: { bucket: CodexUsageBucket }) {
           )
           .join(" · ")}
       </span>
-    </div>
+    </span>
   );
 }
 
@@ -213,8 +218,316 @@ function ProviderUsageCard({ provider, load }: ProviderUsageCardProps) {
   );
 }
 
+function AccountBlock({
+  entry,
+  busy,
+  onRefresh,
+  onBusyChange,
+}: {
+  entry: CodexAccountEntry;
+  busy: boolean;
+  onRefresh: () => Promise<void>;
+  onBusyChange: (busy: boolean) => void;
+}) {
+  const { t } = useI18n();
+  const [login, setLogin] = useState<CodexLoginState | null>(entry.login);
+  const [actionError, setActionError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setLogin(entry.login);
+  }, [entry.login]);
+
+  // Poll the login flow until Codex reports success/failure.
+  useEffect(() => {
+    if (login?.status !== "pending") return;
+    let cancelled = false;
+    const timer = setInterval(async () => {
+      try {
+        const next = await api.getCodexAccountLogin(entry.id);
+        if (cancelled) return;
+        setLogin(next.login);
+        if (next.login && next.login.status !== "pending") {
+          clearInterval(timer);
+          void onRefresh();
+        }
+      } catch {
+        // keep polling; transient network errors are expected on mobile
+      }
+    }, 2_000);
+    return () => {
+      cancelled = true;
+      clearInterval(timer);
+    };
+  }, [login?.status, entry.id, onRefresh]);
+
+  const run = useCallback(
+    async (action: () => Promise<unknown>, refresh = true) => {
+      onBusyChange(true);
+      setActionError(null);
+      try {
+        await action();
+        if (refresh) await onRefresh();
+      } catch (error) {
+        setActionError((error as Error).message);
+      } finally {
+        onBusyChange(false);
+      }
+    },
+    [onBusyChange, onRefresh],
+  );
+
+  const startLogin = (mode: CodexLoginMode) =>
+    run(async () => {
+      const response = await api.startCodexAccountLogin(entry.id, mode);
+      if (response.error) throw new Error(response.error);
+      setLogin(response.login);
+      const url = response.login?.authUrl ?? response.login?.verificationUrl;
+      if (url) window.open(url, "_blank", "noopener,noreferrer");
+    }, false);
+
+  const usage = entry.usage;
+  const windows = [usage?.primary, usage?.secondary].filter(
+    (window): window is CodexUsageWindow => Boolean(window),
+  );
+  const title =
+    entry.account?.email ??
+    entry.label ??
+    (entry.isDefault
+      ? t("codexAccountsDefaultName")
+      : t("codexAccountsUnnamed"));
+  const signedIn = Boolean(entry.account) || windows.length > 0;
+  const loginUrl = login?.authUrl ?? login?.verificationUrl ?? null;
+
+  return (
+    <div className="codex-account-block">
+      <div className="codex-account-heading">
+        <div className="codex-account-identity">
+          <strong>{title}</strong>
+          <span className="codex-usage-plan">
+            {[
+              entry.account?.planType
+                ? t("newSessionCodexUsagePlan", {
+                    plan: entry.account.planType,
+                  })
+                : null,
+              entry.isActive ? t("codexAccountsActiveBadge") : null,
+            ]
+              .filter(Boolean)
+              .join(" · ")}
+          </span>
+        </div>
+        <div className="codex-account-actions">
+          {signedIn && !entry.isActive && (
+            <button
+              type="button"
+              className="codex-usage-refresh"
+              disabled={busy}
+              onClick={() => void run(() => api.activateCodexAccount(entry.id))}
+            >
+              {t("codexAccountsUseAccount")}
+            </button>
+          )}
+          {!entry.isDefault && (
+            <button
+              type="button"
+              className="codex-usage-refresh"
+              disabled={busy}
+              onClick={() => void run(() => api.removeCodexAccount(entry.id))}
+            >
+              {t("codexAccountsRemove")}
+            </button>
+          )}
+        </div>
+      </div>
+
+      {windows.length > 0 ? (
+        <>
+          <div className="codex-usage-windows">
+            {windows.map((window) => (
+              <UsageWindow
+                key={`${window.windowDurationMins}-${window.resetsAt}`}
+                window={window}
+              />
+            ))}
+          </div>
+          {usage?.resetCredits && usage.resetCredits.availableCount > 0 && (
+            <p className="codex-usage-reset-credit">
+              {t("newSessionCodexUsageResetCredits", {
+                count: usage.resetCredits.availableCount,
+              })}
+            </p>
+          )}
+          {usage && usage.additionalBuckets.length > 0 && (
+            <div className="codex-usage-additional">
+              <span className="codex-usage-additional-title">
+                {t("newSessionCodexUsageAdditionalTitle")}
+              </span>
+              {usage.additionalBuckets.map((bucket) => (
+                <AdditionalBucket key={bucket.id} bucket={bucket} />
+              ))}
+            </div>
+          )}
+        </>
+      ) : (
+        <p className="codex-usage-state">
+          {entry.error === "not-signed-in"
+            ? t("codexAccountsNotSignedIn")
+            : (entry.error ?? t("newSessionCodexUsageUnavailable"))}
+        </p>
+      )}
+
+      {login?.status === "pending" && loginUrl ? (
+        <div className="codex-account-login">
+          <a href={loginUrl} target="_blank" rel="noopener noreferrer">
+            {login.mode === "deviceCode"
+              ? t("codexAccountsOpenDeviceUrl")
+              : t("codexAccountsOpenAuthUrl")}
+          </a>
+          {login.userCode && (
+            <span className="codex-account-code">
+              {t("codexAccountsUserCode", { code: login.userCode })}
+            </span>
+          )}
+          <span className="codex-usage-state">{t("codexAccountsWaiting")}</span>
+          <button
+            type="button"
+            className="codex-usage-refresh"
+            onClick={() =>
+              void run(() => api.cancelCodexAccountLogin(entry.id), false).then(
+                () => setLogin(null),
+              )
+            }
+          >
+            {t("codexAccountsCancelLogin")}
+          </button>
+        </div>
+      ) : (
+        <div className="codex-account-login">
+          <button
+            type="button"
+            className="codex-usage-refresh"
+            disabled={busy}
+            onClick={() => void startLogin("deviceCode")}
+          >
+            {signedIn
+              ? t("codexAccountsReloginDevice")
+              : t("codexAccountsLoginDevice")}
+          </button>
+          <button
+            type="button"
+            className="codex-usage-refresh"
+            disabled={busy}
+            onClick={() => void startLogin("browser")}
+          >
+            {t("codexAccountsLoginBrowser")}
+          </button>
+          {signedIn && (
+            <button
+              type="button"
+              className="codex-usage-refresh"
+              disabled={busy}
+              onClick={() => void run(() => api.logoutCodexAccount(entry.id))}
+            >
+              {t("codexAccountsSignOut")}
+            </button>
+          )}
+        </div>
+      )}
+
+      {login && login.status !== "pending" && login.status !== "none" && (
+        <p className="codex-usage-state">
+          {login.status === "completed"
+            ? t("codexAccountsLoginCompleted")
+            : t("codexAccountsLoginFailed", {
+                error: login.error ?? login.status,
+              })}
+        </p>
+      )}
+      {actionError && <p className="codex-usage-state">{actionError}</p>}
+    </div>
+  );
+}
+
 export function CodexUsageCard() {
-  return <ProviderUsageCard provider="codex" load={api.getCodexUsage} />;
+  const { t } = useI18n();
+  const [accounts, setAccounts] = useState<CodexAccountEntry[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+
+  const load = useCallback(async (fresh = false) => {
+    setLoading(true);
+    try {
+      const response = await api.getCodexAccounts({ fresh });
+      setAccounts(response.accounts);
+      setError(response.error);
+    } catch (requestError) {
+      setError((requestError as Error).message);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load]);
+
+  const refresh = useCallback(() => load(true), [load]);
+
+  return (
+    <section className="codex-usage-card" aria-live="polite">
+      <div className="codex-usage-header">
+        <h3>{t("newSessionCodexUsageTitle")}</h3>
+        <div className="codex-account-actions">
+          <button
+            type="button"
+            className="codex-usage-refresh"
+            disabled={loading || busy}
+            onClick={() => void refresh()}
+          >
+            {loading
+              ? t("newSessionCodexUsageRefreshing")
+              : t("newSessionCodexUsageRefresh")}
+          </button>
+          <button
+            type="button"
+            className="codex-usage-refresh"
+            disabled={busy}
+            onClick={() =>
+              void (async () => {
+                setBusy(true);
+                try {
+                  await api.addCodexAccount();
+                  await load(true);
+                } finally {
+                  setBusy(false);
+                }
+              })()
+            }
+          >
+            {t("codexAccountsAdd")}
+          </button>
+        </div>
+      </div>
+
+      {loading && accounts.length === 0 ? (
+        <p className="codex-usage-state">{t("newSessionCodexUsageLoading")}</p>
+      ) : (
+        <div className="codex-account-list">
+          {accounts.map((entry) => (
+            <AccountBlock
+              key={entry.id}
+              entry={entry}
+              busy={busy}
+              onRefresh={refresh}
+              onBusyChange={setBusy}
+            />
+          ))}
+        </div>
+      )}
+      {error && <p className="codex-usage-state">{error}</p>}
+    </section>
+  );
 }
 
 export function ClaudeUsageCard() {

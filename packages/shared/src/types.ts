@@ -339,6 +339,14 @@ export interface NewSessionProviderDefaults {
   codexMcpMode?: CodexMcpMode;
   /** Codex model source (Codex `model_provider`), e.g. "openai"/"deepseek". */
   codexModelProvider?: string;
+  /** Codex account id (isolated `CODEX_HOME`); omitted uses the machine login. */
+  codexAccountId?: string;
+  /**
+   * Gateway API key this session runs on (see the server's
+   * `llm-gateways/gateway-keys.ts`). Omitted uses each channel's environment
+   * key. Currently consumed by Pi.
+   */
+  llmGatewayKeyId?: string;
   /** Managed LLM gateway provider/model configuration. */
   llmGatewayConfig?: LlmGatewaySessionConfig;
   /** @deprecated Persisted compatibility; live clients use `llmGatewayConfig`. */
@@ -443,6 +451,12 @@ function getLegacyNewSessionProviderDefaults(
   }
   if (defaults.codexModelProvider !== undefined) {
     providerDefaults.codexModelProvider = defaults.codexModelProvider;
+  }
+  if (defaults.codexAccountId !== undefined) {
+    providerDefaults.codexAccountId = defaults.codexAccountId;
+  }
+  if (defaults.llmGatewayKeyId !== undefined) {
+    providerDefaults.llmGatewayKeyId = defaults.llmGatewayKeyId;
   }
   const llmGatewayConfig = defaults.llmGatewayConfig ?? defaults.opencodeConfig;
   if (llmGatewayConfig !== undefined) {

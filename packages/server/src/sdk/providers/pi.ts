@@ -17,6 +17,7 @@ import type {
   ThinkingConfig,
 } from "@yep-anywhere/shared";
 import { getDataDir } from "../../config.js";
+import { resolveGatewayKeyForChannel } from "../../llm-gateways/gateway-keys.js";
 import {
   LLM_GATEWAYS_ENV,
   type LlmGatewayChannel,
@@ -1177,7 +1178,15 @@ export class PiProvider implements AgentProvider {
                 piProviderId("anthropic", candidate) === provider.id ||
                 piProviderId("openai-compatible", candidate) === provider.id,
             );
-            return channel ? [[provider.id, channel.apiKey]] : [];
+            if (!channel) return [];
+            // A session can be pinned to one of the extra keys configured for
+            // this channel; an unknown or foreign id falls back to the
+            // environment key so a removed key degrades instead of failing.
+            const sessionKey = resolveGatewayKeyForChannel(
+              channel.id,
+              options.llmGatewayKeyId,
+            );
+            return [[provider.id, sessionKey ?? channel.apiKey]];
           }),
         ),
       );

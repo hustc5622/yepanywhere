@@ -7,7 +7,14 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 
 ## [Unreleased]
 
+### Changed
+- 新建会话页的 `网关 API Key` 选择器改为始终列出全部 gateway channel 的 Key（按网关分组），不再因为「还没选模型」而只显示默认网关的 Key——此前给非默认网关新增的 Key 在未选模型时会直接从列表消失。Key 与模型的关系也改为以 Key 为主导：选中某个 Key 后，下方模型下拉自动收敛到该 Key 所属网关且探测可达的模型，当前模型不匹配时自动切到第一个可用模型；Key 不再因为「覆盖不到当前模型」而置灰（只有探测不通的 Key 仍不可选），避免模型与 Key 互相锁死。UI 同步收拾：分组标题标注「当前模型」所属网关，卡片内右侧悬浮删除按钮（不再溢出到卡片外），新增/刷新按钮移到标题行，添加表单在多网关时可显式选择归属网关，状态与告警文案分行展示。
+- 收紧新建会话页 Codex 用量卡片的留白：账号块、用量窗口、进度条、额外限额等区块的间距和内边距整体下调一档，多账号时卡片高度明显降低，信息密度更高，不影响布局结构与移动端单列回退。
+
 ### Added
+- 新建会话页可以选择本次 Pi 会话使用哪个网关 API Key：`网关 API Key` 选择器按当前所选模型所属的 gateway channel 列出全部可用 Key（服务端环境变量里的默认 Key + 用户自行添加的 Key），展示脱敏预览、可访问模型数和余额；网关只回无限哨兵值（`hard_limit_usd = 1e8`）时明确显示「网关未提供额度信息」而不伪造余额。Key 打不通或覆盖不到当前模型时置灰不可选，避免第一轮才失败。选择随新建会话默认值保存，会话启动时只对该 channel 覆盖 `YEP_PI_LLM_API_KEYS` 中的凭据，续聊、重启、fork 跟随创建时记录的 Key（`llmGatewayKeyId` 存入 session metadata），Key 被删除后自动回落环境 Key。卡片内可直接添加 / 删除 Key（添加前先向网关校验），存储在 `<dataDir>/llm-gateway-keys.json` 并在运行时热读取；新增 `/api/llm-gateway-keys` 系列接口，完整 Key 永不返回给客户端。
+- 新建会话页可以选择本次会话使用哪个 Codex 账号：`Codex 账号` 选择器列出全部已登录账号（邮箱、套餐、5 小时 / 每周用量），未登录的账号置灰，只有一个账号时自动隐藏；选择会随新建会话默认值一起保存，下次进入沿用。会话启动时按账号注入独立 `CODEX_HOME`，续聊、重启、fork 都跟随创建时记录的账号（`codexAccountId` 存入 session metadata，客户端无法把已有会话搬到别的账号），非默认账号的会话不再走 4510 bridge 复用路径。非默认账号的 `CODEX_HOME` 会把 `sessions/`、`archived_sessions/`、`session_index.jsonl`、`history.jsonl` 软链回 `~/.codex`，因此会话列表、展示、watcher 与 resume 全部照常；thread-history SQLite 保持各账号独立（避免跨路径 WAL 损坏），这类会话的原生分页历史会自动回退到 rollout JSONL 读取。
+- 新建会话页的 Codex 用量卡片支持多账号：每个账号独立 `CODEX_HOME`（默认账号仍是 `~/.codex`，新增账号落在 `<dataDir>/codex-homes/<id>`），并排展示邮箱、套餐、5 小时 / 每周窗口和额外限额，可区分「当前会话使用中」的账号。卡片内可直接添加账号并登录：默认使用设备码方式（移动端也能完成，显示 `auth.openai.com/codex/device` 链接与一次性验证码），也可在服务器本机浏览器走 OAuth 链接；登录状态自动轮询，支持取消、退出登录、移除账号，以及把某个账号一键切换为会话实际使用的凭据（切换前自动备份并回写原账号的 `auth.json`）。后端新增 `/api/codex-accounts` 系列接口和复用的 `codex app-server` JSON-RPC 客户端。新增 `scripts/codex-usage.ts` 可在命令行查询任意 `CODEX_HOME` 的额度。
 - 助手回复新增整轮耗时展示：在回复末尾的操作行显示从用户发话（或回答提问）到该轮内容结束经过了多久（如 `45s`、`3m12s`、`1h05m`），小于 1 秒不显示；进行中的那一轮复用工具步骤的共享一秒 ticker 实时跳动（标签页隐藏时暂停），不依赖消息事件，长时间无输出的 Bash 等调用期间也不会停止计时；适用于全部 provider。
 - 运行中的工具步骤展示实时计时：Bash/Shell 等长耗时调用在步骤行尾显示已运行时长（如 `4m00s`、`1h05m`），悬停显示开始时间，一秒一跳且标签页隐藏时暂停；适用于 Pi、Codex 等全部 provider。实时步骤缺少源时间戳时由服务端在创建步骤时补齐起始时间，历史回放不再伪造起始时间。
 - 飞书用户授权由 Yep 独立管理：新增 OAuth + PKCE 授权入口、后台续期、跨进程刷新锁、令牌失效分类、飞书授权卡片和中英文设置页。原生 Lark MCP 保留 38 个工具入口并随 Yep 打包，不再运行 MLB 或读取旧机器人 token 文件；渠道会话使用受管配置，Desktop/CLI 提供显式迁移工具。授权等待只发生在业务请求发送前，取消后不重放写操作。
@@ -16,6 +23,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - APK 侧边栏新增 Home、Mini 服务快捷切换，分别显示最近 24 小时已结束且未读的会话数；打开侧边栏时独立查询两端并每 15 秒刷新，区分离线与需要登录，切换服务不清除未读。Inbox 新增分页截断前的完整计数，兼容旧服务时对可能截断的计数显示 `+`。
 
 ### Fixed
+- 修复新建会话页点「保存为默认」时 Pi 的网关 API Key 选择不会被保存的问题：服务端 `PUT /api/settings` 的 `newSessionDefaults` 校验漏了 `llmGatewayKeyId` 字段，客户端正常上报但被静默丢弃，下次进入表单总是回落服务端默认 Key（Codex 账号 `codexAccountId` 不受影响，现已补上两者的回归测试）。该字段仅允许在 Pi 下保存，写到其他 provider 会被 400 拒绝。
 - 修复会话里被中断的工具调用永远卡在「此前仍在运行的步骤」并一直显示 `Computing diff...` 的问题。展示层只在收到工具结果或明确的轮次终态时才结束一个步骤，两者都缺失时步骤就会永远转圈：上游流在 `message_stop` 之前断开时，Pi 会落盘一条 `stopReason: "error"`、`arguments` 为空的残缺 `toolCall` 并在新消息上重试，Codex 则会在 app-server / bridge 在 `turn_complete` 前重启时丢掉整个轮次；没有原生 turn id 的 provider（Pi、Kimi）更严重，所有步骤归到同一个 run，只有整个会话空闲时才可能被关闭。现在分三层治理：展示层对所有 provider 统一做兵底——工具批次是严格顺序的，比最新已结束步骤更早的批次里仍在 running 的步骤会被判为 `unknown`（同一批次内的并行调用互不判定，真正在跑的并行批次不受影响，迟到的真实结果仍会覆盖回正确状态）；Pi 的实时 RPC 路径和持久化会话转换额外为被放弃的调用补一条失败的终态结果（日志里已有真实结果时不补）；Edit 渲染器把参数不完整、不可能生成 diff 的调用显示为终态文案而不是加载中。
 - 修复报告页图片在移动端加载失败后只剩一个裂图图标、且无法自行恢复的问题：所有环境下原生 `<img>` 加载失败都会自动改走带鉴权的 `fetch` 重试（失败原因如 `HTTP 404` 直接显示在图片位置，并提供「重试」按钮），此前只有桌面 iframe（带 desktop token）才有错误处理。图片 URL 附带资源 mtime 版本参数，避免报告先于图片资产生成时被 `Cache-Control: private, max-age=3600` 缓存住失败状态；图片 404 响应改为 `no-store`。失败提示与重试按钮全部用 CSS 伪元素绘制，不引入文本节点，保证报告评论的文本偏移锚点不偏移。
 - 移动外壳默认 TCP 节点从已停服的 `43.226.60.75:46789` 换为 `39.106.189.88:18022`（mini，同一台机器的当前 frps 入口），退役地址归入迁移列表，已保存该地址的客户端自动回落默认节点，不再在冷启动时先吃一次连接超时；连接面板节点列表、输入框占位和 DNS 预解析同步更新。此项需重新打包 APK 才生效。

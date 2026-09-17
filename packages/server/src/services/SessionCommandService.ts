@@ -19,11 +19,19 @@ import {
   thinkingOptionToConfig,
 } from "@yep-anywhere/shared";
 import type { FeishuMcpConfig } from "../channels/feishu/user-auth/mcp-gateway.js";
+import {
+  DEFAULT_CODEX_ACCOUNT_ID,
+  readCodexAccountProfiles,
+} from "../codex-bridge/codex-account-home.js";
 import type {
   RespondToInputOptions,
   SessionInputResponseBody,
   SessionInteractionService,
 } from "../interactions/SessionInteractionService.js";
+import {
+  channelIdFromEnvGatewayKeyId,
+  isKnownGatewayKeyId,
+} from "../llm-gateways/gateway-keys.js";
 import { getLogger } from "../logging/logger.js";
 import type { SessionMetadataService } from "../metadata/index.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
@@ -210,6 +218,10 @@ export interface StartSessionBody {
   provider?: ProviderName;
   /** Codex MCP profile. Only used when provider resolves to Codex. */
   codexMcpMode?: CodexMcpMode;
+  /** Codex account id (isolated `CODEX_HOME`). Only used for Codex. */
+  codexAccountId?: string;
+  /** Gateway API key id. Only used for Pi. */
+  llmGatewayKeyId?: string;
   /** Codex model source (Codex `model_provider`). Only used for Codex. */
   codexModelProvider?: string;
   /** Managed gateway provider/model configuration. */
@@ -237,6 +249,8 @@ export interface CreateSessionBody {
   serviceTier?: CodexServiceTier;
   provider?: ProviderName;
   codexMcpMode?: CodexMcpMode;
+  codexAccountId?: string;
+  llmGatewayKeyId?: string;
   codexModelProvider?: string;
   llmGatewayConfig?: LlmGatewaySessionConfig;
   executor?: string;
@@ -346,6 +360,79 @@ function parseOptionalCodexMcpMode(rawMode: unknown): {
     return { codexMcpMode: rawMode as CodexMcpMode };
   }
   return { codexMcpMode: undefined, error: "codexMcpMode is invalid" };
+}
+
+/**
+ * Validate an optional Codex account id against the registered accounts.
+ *
+ * Unknown ids are rejected instead of silently falling back to the machine
+ * account: running a turn on the wrong credentials burns the wrong quota.
+ */
+function parseOptionalCodexAccountId(
+  provider: ProviderName | undefined,
+  rawAccountId: unknown,
+): { codexAccountId: string | undefined; error?: string } {
+  if (
+    rawAccountId === undefined ||
+    rawAccountId === null ||
+    rawAccountId === ""
+  ) {
+    return { codexAccountId: undefined };
+  }
+  if (typeof rawAccountId !== "string") {
+    return { codexAccountId: undefined, error: "codexAccountId is invalid" };
+  }
+  const accountId = rawAccountId.trim();
+  if (!accountId || accountId === DEFAULT_CODEX_ACCOUNT_ID) {
+    return { codexAccountId: undefined };
+  }
+  if (provider !== "codex") {
+    return {
+      codexAccountId: undefined,
+      error: "codexAccountId is only supported for Codex sessions",
+    };
+  }
+  const known = readCodexAccountProfiles().some(
+    (profile) => profile.id === accountId,
+  );
+  if (!known) {
+    return { codexAccountId: undefined, error: "codexAccountId is unknown" };
+  }
+  return { codexAccountId: accountId };
+}
+
+/**
+ * Validate an optional gateway key id against the configured gateway keys.
+ *
+ * An `env:<channelId>` id means "use the channel's environment credential",
+ * which is the default, so it normalizes to `undefined` instead of being
+ * persisted. Unknown ids are rejected rather than silently falling back: a
+ * session that quietly runs on another key burns the wrong quota.
+ */
+function parseOptionalLlmGatewayKeyId(
+  provider: ProviderName | undefined,
+  rawKeyId: unknown,
+): { llmGatewayKeyId: string | undefined; error?: string } {
+  if (rawKeyId === undefined || rawKeyId === null || rawKeyId === "") {
+    return { llmGatewayKeyId: undefined };
+  }
+  if (typeof rawKeyId !== "string") {
+    return { llmGatewayKeyId: undefined, error: "llmGatewayKeyId is invalid" };
+  }
+  const keyId = rawKeyId.trim();
+  if (!keyId || channelIdFromEnvGatewayKeyId(keyId) !== null) {
+    return { llmGatewayKeyId: undefined };
+  }
+  if (provider !== "pi") {
+    return {
+      llmGatewayKeyId: undefined,
+      error: "llmGatewayKeyId is only supported for Pi sessions",
+    };
+  }
+  if (!isKnownGatewayKeyId(keyId)) {
+    return { llmGatewayKeyId: undefined, error: "llmGatewayKeyId is unknown" };
+  }
+  return { llmGatewayKeyId: keyId };
 }
 
 function resolveCodexModelProviderForStart(
@@ -1066,6 +1153,12 @@ export class SessionCommandService {
           parsedCodexMcpMode.codexMcpMode ??
           this.deps.sessionMetadataService?.getCodexMcpMode?.(sessionId) ??
           null,
+        codexAccountId:
+          this.deps.sessionMetadataService?.getCodexAccountId?.(sessionId) ??
+          null,
+        llmGatewayKeyId:
+          this.deps.sessionMetadataService?.getLlmGatewayKeyId?.(sessionId) ??
+          null,
         resumeSessionAt: supportsResumeSessionAt(providerName)
           ? (body.resumeSessionAt ?? null)
           : null,
@@ -1182,6 +1275,18 @@ export class SessionCommandService {
               this.deps.sessionMetadataService?.getCodexMcpMode?.(sessionId))
             : undefined,
         codexModelProvider: resumeCodexModelProvider,
+        // Resumes always follow the account recorded when the thread was
+        // created; a client cannot move an existing thread to another account.
+        codexAccountId:
+          providerName === "codex"
+            ? this.deps.sessionMetadataService?.getCodexAccountId?.(sessionId)
+            : undefined,
+        // Same rule for Pi's gateway key: an existing thread keeps running on
+        // the credential it was created with.
+        llmGatewayKeyId:
+          providerName === "pi"
+            ? this.deps.sessionMetadataService?.getLlmGatewayKeyId?.(sessionId)
+            : undefined,
         codexEventAccountId: input.origin?.codexEventAccountId,
         feishuMcpConfig: input.origin?.feishuMcpConfig,
         llmGatewayConfig,
@@ -2010,6 +2115,8 @@ export class SessionCommandService {
         llmGatewayConfig?: LlmGatewaySessionConfig;
         codexMcpMode?: CodexMcpMode;
         codexModelProvider?: string;
+        codexAccountId?: string;
+        llmGatewayKeyId?: string;
         modelSettings: Parameters<
           RuntimeController["createSession"]
         >[0]["modelSettings"];
@@ -2084,6 +2191,26 @@ export class SessionCommandService {
         }),
       };
     }
+    const parsedCodexAccountId = parseOptionalCodexAccountId(
+      provider,
+      body.codexAccountId,
+    );
+    if (parsedCodexAccountId.error) {
+      return {
+        ok: false,
+        result: commandFailure(parsedCodexAccountId.error, 400),
+      };
+    }
+    const parsedLlmGatewayKeyId = parseOptionalLlmGatewayKeyId(
+      provider,
+      body.llmGatewayKeyId,
+    );
+    if (parsedLlmGatewayKeyId.error) {
+      return {
+        ok: false,
+        result: commandFailure(parsedLlmGatewayKeyId.error, 400),
+      };
+    }
 
     return {
       ok: true,
@@ -2092,6 +2219,8 @@ export class SessionCommandService {
       llmGatewayConfig: parsedGatewayConfig.llmGatewayConfig,
       codexMcpMode: parsedCodexMcpMode.codexMcpMode,
       codexModelProvider: parsedCodexModelProvider.value,
+      codexAccountId: parsedCodexAccountId.codexAccountId,
+      llmGatewayKeyId: parsedLlmGatewayKeyId.llmGatewayKeyId,
       modelSettings: {
         model,
         thinking,
@@ -2104,6 +2233,8 @@ export class SessionCommandService {
         providerName: provider,
         codexMcpMode: parsedCodexMcpMode.codexMcpMode,
         codexModelProvider: parsedCodexModelProvider.value,
+        codexAccountId: parsedCodexAccountId.codexAccountId,
+        llmGatewayKeyId: parsedLlmGatewayKeyId.llmGatewayKeyId,
         llmGatewayConfig: parsedGatewayConfig.llmGatewayConfig,
         executor: parsedExecutor.executor,
         globalInstructions:
@@ -2200,6 +2331,8 @@ export class SessionCommandService {
       llmGatewayConfig?: LlmGatewaySessionConfig;
       codexMcpMode?: CodexMcpMode;
       codexModelProvider?: string;
+      codexAccountId?: string;
+      llmGatewayKeyId?: string;
       modelSettings?: { serviceTier?: CodexServiceTier };
     },
     requestedProvider: ProviderName | undefined,
@@ -2221,6 +2354,18 @@ export class SessionCommandService {
     }
     if (result.provider === "codex" && prepared.codexMcpMode) {
       await metadata.setCodexMcpMode?.(result.sessionId, prepared.codexMcpMode);
+    }
+    if (result.provider === "codex" && prepared.codexAccountId) {
+      await metadata.setCodexAccountId?.(
+        result.sessionId,
+        prepared.codexAccountId,
+      );
+    }
+    if (result.provider === "pi" && prepared.llmGatewayKeyId) {
+      await metadata.setLlmGatewayKeyId?.(
+        result.sessionId,
+        prepared.llmGatewayKeyId,
+      );
     }
     if (
       result.provider === "codex" &&

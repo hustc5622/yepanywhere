@@ -22,6 +22,7 @@ import {
   readCodexAsyncMessage,
 } from "@yep-anywhere/shared";
 import { WebSocket } from "ws";
+import { resolveCodexHomeForAccount } from "../../codex-bridge/codex-account-home.js";
 import {
   buildCodexInteractiveResponse,
   toCodexInteractiveRequestView,
@@ -1535,9 +1536,16 @@ export class CodexProvider implements AgentProvider {
 
   /**
    * Build environment overrides for Codex subprocesses.
+   *
+   * `codexHome` isolates the session on a non-default Codex account: it only
+   * changes where Codex reads `auth.json` from, because the alternate home
+   * symlinks its session storage back to the machine-wide one.
    */
-  private getCodexEnv(): NodeJS.ProcessEnv {
+  private getCodexEnv(codexHome?: string | null): NodeJS.ProcessEnv {
     const env: NodeJS.ProcessEnv = { ...process.env };
+    if (codexHome) {
+      env.CODEX_HOME = codexHome;
+    }
     if (this.config.baseUrl) {
       env.OPENAI_BASE_URL = this.config.baseUrl;
     }
@@ -2830,7 +2838,10 @@ export class CodexProvider implements AgentProvider {
     const modelSource = registry.require(
       options.codexModelProvider ?? DEFAULT_CODEX_MODEL_PROVIDER,
     );
-    const codexEnv = this.getCodexEnv();
+    // Sessions bound to a non-default Codex account run against that account's
+    // isolated CODEX_HOME so the app-server picks up its credentials.
+    const sessionCodexHome = resolveCodexHomeForAccount(options.codexAccountId);
+    const codexEnv = this.getCodexEnv(sessionCodexHome);
     let appServer: CodexAppServerClient | undefined;
     let startupStage = "transport-selection";
     let transportKind: "stdio" | "bridge-websocket" = "stdio";
@@ -2894,7 +2905,9 @@ export class CodexProvider implements AgentProvider {
     };
 
     try {
-      const bridgeTarget = await this.resolveBridgeExecutionTarget(options);
+      const bridgeTarget = sessionCodexHome
+        ? null
+        : await this.resolveBridgeExecutionTarget(options);
       transportKind = bridgeTarget ? "bridge-websocket" : "stdio";
       const needsPaginatedHistoryApi =
         bridgeTarget !== null || options.rollbackNumTurns !== undefined;

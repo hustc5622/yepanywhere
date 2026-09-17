@@ -17,6 +17,7 @@ import type { FeishuBindingStore } from "./channels/feishu/binding-store.js";
 import type { FeishuDurableInbox } from "./channels/feishu/inbox.js";
 import type { FeishuOperationStore } from "./channels/feishu/operation-store.js";
 import type { FeishuChannelService } from "./channels/feishu/service.js";
+import { CodexAccountsService } from "./codex-bridge/CodexAccountsService.js";
 import type { CodexBridgeController } from "./codex-bridge/types.js";
 import { CodexAppServerHistoryReader } from "./codex-history/CodexAppServerHistoryReader.js";
 import { getCodexHistoryClient } from "./codex-history/CodexHistoryClient.js";
@@ -31,6 +32,7 @@ import type {
 } from "./indexes/index.js";
 import type { InteractionBroker } from "./interactions/InteractionBroker.js";
 import { SessionInteractionService } from "./interactions/SessionInteractionService.js";
+import { LlmGatewayKeysService } from "./llm-gateways/LlmGatewayKeysService.js";
 import { getLogger } from "./logging/logger.js";
 import type {
   ProjectMetadataService,
@@ -71,6 +73,7 @@ import type { RecentsService } from "./recents/index.js";
 import { createActivityRoutes } from "./routes/activity.js";
 import { createBrowserProfilesRoutes } from "./routes/browser-profiles.js";
 import { createClientLogsRoutes } from "./routes/client-logs.js";
+import { createCodexAccountsRoutes } from "./routes/codex-accounts.js";
 import { createCodexBridgeRoutes } from "./routes/codex-bridge.js";
 import { createCodexImageRoutes } from "./routes/codex-images.js";
 import {
@@ -93,6 +96,7 @@ import { createGitStatusRoutes } from "./routes/git-status.js";
 import { createGlobalSessionsRoutes } from "./routes/global-sessions.js";
 import { health } from "./routes/health.js";
 import { createInboxRoutes } from "./routes/inbox.js";
+import { createLlmGatewayKeysRoutes } from "./routes/llm-gateway-keys.js";
 import { createLocalFileRoutes } from "./routes/local-file.js";
 import { createLocalImageRoutes } from "./routes/local-image.js";
 import { createNetworkBindingRoutes } from "./routes/network-binding.js";
@@ -1253,6 +1257,26 @@ export function createApp(options: AppOptions): AppResult {
       }),
     );
   }
+
+  // Multi-account Codex usage / login (works independently of the bridge).
+  if (options.dataDir) {
+    app.route(
+      "/api/codex-accounts",
+      createCodexAccountsRoutes({
+        codexAccountsService: new CodexAccountsService({
+          dataDir: options.dataDir,
+        }),
+      }),
+    );
+  }
+
+  // Selectable LLM gateway keys (Pi sessions pick one per session).
+  app.route(
+    "/api/llm-gateway-keys",
+    createLlmGatewayKeysRoutes({
+      llmGatewayKeysService: new LlmGatewayKeysService(),
+    }),
+  );
 
   const codexTranscriptStoreSources =
     options.codexTranscriptStoreSources ??

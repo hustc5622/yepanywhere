@@ -32,6 +32,7 @@ import { ENTER_SENDS_MESSAGE } from "../constants";
 import { useToastContext } from "../contexts/ToastContext";
 import { useConnection } from "../hooks/useConnection";
 import { useDraftPersistence } from "../hooks/useDraftPersistence";
+import { useLlmGatewayKeys } from "../hooks/useLlmGatewayKeys";
 import {
   EFFORT_LEVEL_OPTIONS,
   type EffortLevel,
@@ -66,9 +67,11 @@ import {
   shouldRestoreHistoricalEditAfterFailure,
 } from "../lib/sessionBranching";
 import type { PermissionMode, SessionNavigationState } from "../types";
+import { CodexAccountSelect } from "./CodexAccountSelect";
 import { CodexUsageCard } from "./CodexUsageCard";
 import { FilterDropdown, type FilterOption } from "./FilterDropdown";
 import { clearFabPrefill, getFabPrefill } from "./FloatingActionButton";
+import { PiGatewayKeySelect } from "./PiGatewayKeySelect";
 import { SlashCommandButton } from "./SlashCommandButton";
 import { VoiceInputButton, type VoiceInputButtonRef } from "./VoiceInputButton";
 
@@ -323,6 +326,15 @@ export function NewSessionForm({
     useState<LlmGatewayRequestProtocol>("openai-compatible");
   const [selectedCodexMcpMode, setSelectedCodexMcpMode] =
     useState<CodexMcpMode>("standard");
+  /** Codex account (isolated CODEX_HOME); null = machine-wide ~/.codex login. */
+  const [selectedCodexAccountId, setSelectedCodexAccountId] = useState<
+    string | null
+  >(null);
+  /** Pi gateway API key; null = the channel's server-side environment key. */
+  const [selectedLlmGatewayKeyId, setSelectedLlmGatewayKeyId] = useState<
+    string | null
+  >(null);
+  const llmGatewayKeys = useLlmGatewayKeys(selectedProvider === "pi");
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const pendingFilesRef = useRef<PendingFile[]>(pendingFiles);
   pendingFilesRef.current = pendingFiles;
@@ -726,6 +738,14 @@ export function NewSessionForm({
           ? (savedDefaults?.codexMcpMode ?? "standard")
           : "standard",
       );
+      setSelectedCodexAccountId(
+        providerName === "codex"
+          ? (savedDefaults?.codexAccountId ?? null)
+          : null,
+      );
+      setSelectedLlmGatewayKeyId(
+        providerName === "pi" ? (savedDefaults?.llmGatewayKeyId ?? null) : null,
+      );
       setKimiReasoningEffort(
         providerName === "kimi"
           ? (savedDefaults?.reasoningEffort ?? null)
@@ -824,6 +844,42 @@ export function NewSessionForm({
     );
   };
 
+  // When an explicit gateway key is picked, the model dropdown narrows to the
+  // models that key can actually reach: a key only works on its own gateway,
+  // and aggregator keys often expose a subset of that gateway's catalog.
+  const gatewayKeyModelFilter = useMemo(():
+    | ((modelId: string) => boolean)
+    | null => {
+    if (selectedProvider !== "pi" || !selectedLlmGatewayKeyId) return null;
+    const key = llmGatewayKeys.keys.find(
+      (entry) => entry.id === selectedLlmGatewayKeyId,
+    );
+    if (!key) return null;
+    const channels = llmGatewayKeys.channels;
+    const defaultChannelId =
+      (channels.find((channel) => channel.isDefault) ?? channels[0])?.id ??
+      null;
+    const reachable = key.status?.ok === true ? (key.status.models ?? []) : [];
+    return (modelId: string) => {
+      if (modelId === "default") return true;
+      const separator = modelId.indexOf("/");
+      const prefix = separator > 0 ? modelId.slice(0, separator) : null;
+      const qualified =
+        prefix !== null && channels.some((channel) => channel.id === prefix);
+      const channelId = qualified ? prefix : defaultChannelId;
+      if (channelId !== key.channelId) return false;
+      if (reachable.length === 0) return true;
+      return reachable.includes(
+        qualified ? modelId.slice(separator + 1) : modelId,
+      );
+    };
+  }, [
+    llmGatewayKeys.channels,
+    llmGatewayKeys.keys,
+    selectedLlmGatewayKeyId,
+    selectedProvider,
+  ]);
+
   // Build model options for FilterDropdown
   const modelOptions = useMemo((): FilterOption<string>[] => {
     const options: FilterOption<string>[] = [];
@@ -839,6 +895,7 @@ export function NewSessionForm({
     };
 
     for (const model of availableModels) {
+      if (gatewayKeyModelFilter && !gatewayKeyModelFilter(model.id)) continue;
       const label = model.size
         ? `${model.name} (${(model.size / (1024 * 1024 * 1024)).toFixed(1)} GB)`
         : model.name;
@@ -910,6 +967,7 @@ export function NewSessionForm({
     return options;
   }, [
     availableModels,
+    gatewayKeyModelFilter,
     getEffortLabel,
     selectedProvider,
     selectedProviderInfo?.codexModelSources,
@@ -988,6 +1046,24 @@ export function NewSessionForm({
     },
     [availableModels, selectedGatewayProtocol, selectedProvider],
   );
+
+  // Keep the model consistent with the chosen key: if the current model is not
+  // reachable on it, fall back to the first model the key does serve.
+  useEffect(() => {
+    if (!gatewayKeyModelFilter || selectedProvider !== "pi") return;
+    if (availableModels.length === 0) return;
+    if (selectedModel && gatewayKeyModelFilter(selectedModel)) return;
+    const next = availableModels.find((model) =>
+      gatewayKeyModelFilter(model.id),
+    );
+    handleModelSelect(next ? [next.id] : []);
+  }, [
+    availableModels,
+    gatewayKeyModelFilter,
+    handleModelSelect,
+    selectedModel,
+    selectedProvider,
+  ]);
 
   const handleGatewayProtocolSelect = useCallback(
     (protocol: LlmGatewayRequestProtocol) => {
@@ -1147,11 +1223,21 @@ export function NewSessionForm({
       codexMcpMode:
         selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
       codexModelProvider: codexModelProviderForRequest,
+      codexAccountId:
+        selectedProvider === "codex"
+          ? (selectedCodexAccountId ?? undefined)
+          : undefined,
+      llmGatewayKeyId:
+        selectedProvider === "pi"
+          ? (selectedLlmGatewayKeyId ?? undefined)
+          : undefined,
       llmGatewayConfig: llmGatewayConfigForRequest,
     }),
     [
       mode,
       llmGatewayConfigForRequest,
+      selectedCodexAccountId,
+      selectedLlmGatewayKeyId,
       selectedCodexMcpMode,
       codexModelProviderForRequest,
       modelForRequest,
@@ -1252,6 +1338,14 @@ export function NewSessionForm({
         codexMcpMode:
           selectedProvider === "codex" ? selectedCodexMcpMode : undefined,
         codexModelProvider: codexModelProviderForRequest,
+        codexAccountId:
+          selectedProvider === "codex"
+            ? (selectedCodexAccountId ?? undefined)
+            : undefined,
+        llmGatewayKeyId:
+          selectedProvider === "pi"
+            ? (selectedLlmGatewayKeyId ?? undefined)
+            : undefined,
         llmGatewayConfig: llmGatewayConfigForRequest,
       };
 
@@ -1560,7 +1654,9 @@ export function NewSessionForm({
   const codexMcpDefaultsMatch =
     selectedProvider === "codex"
       ? (savedProviderDefaults?.codexMcpMode ?? "standard") ===
-        selectedCodexMcpMode
+          selectedCodexMcpMode &&
+        (savedProviderDefaults?.codexAccountId ?? null) ===
+          selectedCodexAccountId
       : true;
   const thinkingDefaultsMatch = supportsThinkingToggle
     ? (savedProviderDefaults?.thinking ?? undefined) === thinkingForRequest
@@ -1577,7 +1673,9 @@ export function NewSessionForm({
       ? sameLlmGatewayConfig(
           savedProviderDefaults?.llmGatewayConfig,
           llmGatewayConfigForRequest,
-        )
+        ) &&
+        (savedProviderDefaults?.llmGatewayKeyId ?? null) ===
+          selectedLlmGatewayKeyId
       : true;
   const savedPermissionMode = normalizeProviderPermissionMode(
     selectedProvider,
@@ -1933,7 +2031,34 @@ export function NewSessionForm({
         <p className="new-session-subtitle">{t("newSessionHeaderSubtitle")}</p>
       </div>
 
+      {selectedProvider === "codex" && (
+        <CodexAccountSelect
+          value={selectedCodexAccountId}
+          onChange={setSelectedCodexAccountId}
+          disabled={isStarting}
+        />
+      )}
       {selectedProvider === "codex" && <CodexUsageCard />}
+      {selectedProvider === "pi" && (
+        <PiGatewayKeySelect
+          value={selectedLlmGatewayKeyId}
+          onChange={setSelectedLlmGatewayKeyId}
+          channels={llmGatewayKeys.channels}
+          loading={llmGatewayKeys.loading}
+          busy={llmGatewayKeys.busy}
+          error={llmGatewayKeys.error}
+          onAdd={llmGatewayKeys.addKey}
+          onRemove={llmGatewayKeys.removeKey}
+          onRefresh={llmGatewayKeys.refresh}
+          modelId={
+            // Pi's managed gateway models travel in `llmGatewayConfig`, not in
+            // `model`, and only that id carries the channel prefix that says
+            // which gateway's keys are selectable.
+            llmGatewayConfigForRequest?.model ?? modelForRequest
+          }
+          disabled={isStarting}
+        />
+      )}
 
       <div className="new-session-input-area">{inputArea}</div>
 

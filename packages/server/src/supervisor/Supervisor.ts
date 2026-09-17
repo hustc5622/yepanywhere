@@ -89,6 +89,10 @@ export interface ModelSettings {
   codexMcpMode?: CodexMcpMode;
   /** Codex model source (Codex `model_provider`). Only consumed by Codex. */
   codexModelProvider?: string;
+  /** Codex account id (isolated `CODEX_HOME`). Only consumed by Codex. */
+  codexAccountId?: string;
+  /** Gateway API key id this session runs on. Currently consumed by Pi. */
+  llmGatewayKeyId?: string;
   /** Stable non-secret channel account key for Codex event-spine rollout. */
   codexEventAccountId?: string;
   /** Trusted, channel-issued MCP configuration; never accepted from a request body. */
@@ -490,6 +494,8 @@ export class Supervisor {
       serviceTier: modelSettings?.serviceTier,
       codexMcpMode: modelSettings?.codexMcpMode,
       codexModelProvider: modelSettings?.codexModelProvider,
+      codexAccountId: modelSettings?.codexAccountId,
+      llmGatewayKeyId: modelSettings?.llmGatewayKeyId,
       codexEventAccountId: modelSettings?.codexEventAccountId,
       feishuMcpConfig: modelSettings?.feishuMcpConfig,
       codexEventProjectId: projectId,
@@ -655,6 +661,8 @@ export class Supervisor {
         serviceTier: modelSettings?.serviceTier ?? null,
         codexMcpMode: modelSettings?.codexMcpMode ?? null,
         codexModelProvider: modelSettings?.codexModelProvider ?? null,
+        codexAccountId: modelSettings?.codexAccountId ?? null,
+        llmGatewayKeyId: modelSettings?.llmGatewayKeyId ?? null,
         resumeSessionAt: rewind.resumeSessionAt,
         rollbackNumTurns: rewind.rollbackNumTurns,
       },
@@ -676,6 +684,8 @@ export class Supervisor {
       serviceTier: modelSettings?.serviceTier,
       codexMcpMode: modelSettings?.codexMcpMode,
       codexModelProvider: modelSettings?.codexModelProvider,
+      codexAccountId: modelSettings?.codexAccountId,
+      llmGatewayKeyId: modelSettings?.llmGatewayKeyId,
       codexEventAccountId: modelSettings?.codexEventAccountId,
       feishuMcpConfig: modelSettings?.feishuMcpConfig,
       codexEventProjectId: projectId,

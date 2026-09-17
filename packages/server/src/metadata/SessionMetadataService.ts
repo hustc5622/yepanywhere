@@ -50,6 +50,16 @@ export interface SessionMetadata {
   codexServiceTier?: CodexServiceTier;
   /** Effective Codex model source (Codex `model_provider`) for this session. */
   codexModelProvider?: string;
+  /**
+   * Codex account (isolated `CODEX_HOME`) that owns this session's thread.
+   * Absent / "default" means the machine-wide `~/.codex` login.
+   */
+  codexAccountId?: string;
+  /**
+   * Gateway API key this session runs on. Absent means every channel uses its
+   * environment key, which is what sessions created before per-session keys do.
+   */
+  llmGatewayKeyId?: string;
   /** Managed LLM gateway settings used to resume the session. */
   llmGatewayConfig?: LlmGatewaySessionConfig;
   /** @deprecated Persisted compatibility; never written by the live runtime. */
@@ -336,6 +346,36 @@ export class SessionMetadataService {
     await this.save();
   }
 
+  /**
+   * Persist the Codex account (isolated `CODEX_HOME`) that owns this thread so
+   * resumes, restarts and forks keep using the same credentials.
+   */
+  async setCodexAccountId(
+    sessionId: string,
+    codexAccountId: string | undefined,
+  ): Promise<void> {
+    this.updateSessionMetadata(sessionId, (metadata) => ({
+      ...metadata,
+      codexAccountId: codexAccountId || undefined,
+    }));
+    await this.save();
+  }
+
+  /**
+   * Persist the gateway key a session runs on so resumes, restarts and forks
+   * keep burning the same credential the user picked.
+   */
+  async setLlmGatewayKeyId(
+    sessionId: string,
+    llmGatewayKeyId: string | undefined,
+  ): Promise<void> {
+    this.updateSessionMetadata(sessionId, (metadata) => ({
+      ...metadata,
+      llmGatewayKeyId: llmGatewayKeyId || undefined,
+    }));
+    await this.save();
+  }
+
   /** Persist the managed LLM gateway contract for restarts. */
   async setLlmGatewayConfig(
     sessionId: string,
@@ -410,6 +450,14 @@ export class SessionMetadataService {
 
   getCodexModelProvider(sessionId: string): string | undefined {
     return this.getMetadata(sessionId)?.codexModelProvider;
+  }
+
+  getCodexAccountId(sessionId: string): string | undefined {
+    return this.getMetadata(sessionId)?.codexAccountId;
+  }
+
+  getLlmGatewayKeyId(sessionId: string): string | undefined {
+    return this.getMetadata(sessionId)?.llmGatewayKeyId;
   }
 
   getCodexServiceTier(sessionId: string): CodexServiceTier | undefined {
@@ -609,6 +657,12 @@ export class SessionMetadataService {
     }
     if (updated.codexModelProvider) {
       cleaned.codexModelProvider = updated.codexModelProvider;
+    }
+    if (updated.codexAccountId) {
+      cleaned.codexAccountId = updated.codexAccountId;
+    }
+    if (updated.llmGatewayKeyId) {
+      cleaned.llmGatewayKeyId = updated.llmGatewayKeyId;
     }
     const llmGatewayConfig = updated.llmGatewayConfig ?? updated.opencodeConfig;
     if (llmGatewayConfig) {

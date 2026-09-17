@@ -358,6 +358,37 @@ function parseNewSessionProviderDefaults(
     }
   }
 
+  if ("codexAccountId" in raw) {
+    const rawAccountId = raw.codexAccountId;
+    if (
+      rawAccountId !== undefined &&
+      rawAccountId !== null &&
+      rawAccountId !== ""
+    ) {
+      if (
+        typeof rawAccountId !== "string" ||
+        (provider !== undefined && provider !== "codex")
+      ) {
+        return null;
+      }
+      parsed.codexAccountId = rawAccountId;
+    }
+  }
+
+  if ("llmGatewayKeyId" in raw) {
+    const rawKeyId = raw.llmGatewayKeyId;
+    if (rawKeyId !== undefined && rawKeyId !== null && rawKeyId !== "") {
+      if (
+        typeof rawKeyId !== "string" ||
+        rawKeyId.length > 200 ||
+        (provider !== undefined && provider !== "pi")
+      ) {
+        return null;
+      }
+      parsed.llmGatewayKeyId = rawKeyId;
+    }
+  }
+
   if ("llmGatewayConfig" in raw) {
     const config = parseLlmGatewaySessionConfig(raw.llmGatewayConfig);
     if (config === null) return null;

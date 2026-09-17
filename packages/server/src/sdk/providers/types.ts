@@ -81,6 +81,11 @@ export interface StartSessionOptions {
   codexMcpMode?: CodexMcpMode;
   /** Codex model source (Codex `model_provider`). Only consumed by Codex. */
   codexModelProvider?: string;
+  /**
+   * Codex account id (isolated `CODEX_HOME`). Only consumed by Codex;
+   * undefined / "default" uses the machine-wide `~/.codex` login.
+   */
+  codexAccountId?: string;
   /** Optional stable account key for per-account Codex event-spine rollout. */
   codexEventAccountId?: string;
   feishuMcpConfig?: FeishuMcpConfig;
@@ -88,6 +93,12 @@ export interface StartSessionOptions {
   codexEventProjectId?: string;
   /** Provider-neutral managed gateway settings. */
   llmGatewayConfig?: LlmGatewaySessionConfig;
+  /**
+   * Gateway API key id this session runs on (see the server's
+   * `llm-gateways/gateway-keys.ts`). Only consumed by Pi; undefined uses each
+   * channel's environment key.
+   */
+  llmGatewayKeyId?: string;
   /** Tool approval callback */
   onToolApproval?: CanUseTool;
   /**
