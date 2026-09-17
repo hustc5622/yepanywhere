@@ -51,6 +51,7 @@ Android 模拟器/真机和 ChromeOS streaming 是产品功能，但不是默认
 | `PORT + 0` | 主 web/API 服务，默认 `3400` |
 | `PORT + 1` | 维护服务，默认 `3401` |
 | `PORT + 2` | Vite dev server，默认 `3402` |
+| `PORT + 3` | 外置 agent runtime 控制端口，默认 `3403`（仅 external 形态）|
 
 示例：
 
@@ -65,6 +66,50 @@ PORT=4000 YEP_ANYWHERE_PROFILE=dev pnpm dev
 - `CLAUDE_CONFIG_DIR`：Claude Code 配置/session 根目录，默认 `~/.claude`。
 - `ENABLED_PROVIDERS`：逗号分隔的 provider allowlist。有效值包括 `claude`、`claude-ollama`、`codex`、`codex-oss`、`gemini`、`gemini-acp`、`pi`、`kimi`、`zcode`。
 - `VOICE_INPUT=false`：在服务端禁用语音输入按钮。
+- `YEP_RUNTIME_EXTERNAL=true`：部署时把 agent runtime 拆成独立进程（见下面的热叠加章节）。
+- `YEP_RUNTIME_MODE`：`embedded`（默认）或 `external`，运行时形态。
+
+## 一次性热叠加（hot-apply）
+
+当 8022 上挂着不能打断的会话，但工作树里有一波改动想立刻用上时，用 `pnpm hot-apply` 把改动叠加到运行中的部署，而不是整机重新部署。它是**一次性**的：只改运行目录下的产物，不改部署形态，下一次正常 `scripts/deploy.sh` 会从提交树完整重建并自动回归。
+
+档位由变更文件自动推导，不由参数决定：
+
+| 档位 | 触发文件 | 会话影响 |
+| ---- | ---- | ---- |
+| `client` | `packages/client/src` 等 | 无，不重启任何进程 |
+| `shell` | `packages/server/src` 中非 runtime 的部分 | embedded 下中断；external runtime 下无 |
+| `runtime` | `supervisor/`、`runtime/`、`sdk/providers/`、`packages/shared/`、`packages/server/resources/` | 中断所有活跃 turn |
+
+标准流程：
+
+```bash
+pnpm hot-apply --check          # 先看计划，永远从这一步开始
+pnpm hot-apply                  # client 档，零中断
+pnpm hot-apply --allow-shell    # 需要重启 web/API 时显式授权
+pnpm hot-apply --allow-runtime  # 会打断活跃 turn，仅在确认可接受时使用
+pnpm hot-apply --status         # 查看当前叠加状态
+pnpm hot-apply --revert         # 回滚上一次 client 叠加
+```
+
+约束：
+
+- 档位超出授权时命令以退出码 `2` 拒绝执行，不会偷偷重启任何东西。
+- `--allow-runtime` 等同于中断线上会话，必须先取得用户明确同意，和重启服务的约束一致。
+- `runtime` 档的改动不要强行叠加，等 idle 走正常部署。
+- baseline 是运行中部署的 `build.gitCommit`，所以 diff 是“自部署以来的全部改动”，不只是最近一次编辑。
+
+想让 `shell` 档也变成零中断，需要把 agent runtime 拆成独立进程（一次性切换，需要一次重启窗口）：
+
+```bash
+scripts/deploy.sh --server-only --external-runtime
+```
+
+切换后 `/api/status/workers` 的 `runtimeMode` 变为 `external`，此后 `scripts/deploy.sh --server-only` 只替换 web/API 进程，活跃会话不受影响；只有 `scripts/redeploy-server.sh --restart-runtime` 才会打断它们。
+
+外置 runtime 是 **opt-in**：普通部署不会自动切换形态。三种启用方式：命令行 `--external-runtime`、交互式向导里的 `Agent runtime placement` 问题，或在 `.env.deploy.local` 写 `YEP_RUNTIME_EXTERNAL=true`（一次决定、长期生效；向导里显式回答 no 优先级更高）。
+
+完整说明见 `docs/project/hot-apply-and-external-runtime.md`。
 
 ## 验证
 
@@ -107,6 +152,7 @@ pnpm deploy -- --server-only
 
 常用日志：
 - `~/.yep-anywhere/logs/server.log`：启用文件日志时的 app log。
+- `~/.yep-anywhere/logs/runtime-launchd.*.log`：外置 agent runtime 的 stdout/stderr（仅 external 形态）。
 - `/private/tmp/yep-server.log`：本地 `8022` launchd 风格实例的 stdout/stderr。
 - `~/.yep-anywhere/logs/client-logs/*.jsonl`：Developer Mode remote logging 打开后的客户端 console 日志。
 
