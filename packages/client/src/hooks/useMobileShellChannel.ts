@@ -7,12 +7,15 @@ export type MobileShellNode = {
   origin: string;
 };
 
+/**
+ * Nodes offered by the Android shell's connection picker.
+ *
+ * Aliases name the machine behind the tunnel, not the frps provider in front
+ * of it: the `mini` endpoint has moved providers several times, and the retired
+ * origins are listed in the shell loader's DEPRECATED_DEFAULT_TCP_ORIGINS so
+ * stored values migrate to the current default.
+ */
 export const MOBILE_SHELL_NODES: MobileShellNode[] = [
-  {
-    alias: "air",
-    label: "43.226.60.75:46789",
-    origin: "http://43.226.60.75:46789",
-  },
   {
     alias: "mini",
     label: "39.106.189.88:18022",

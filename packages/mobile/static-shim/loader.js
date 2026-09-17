@@ -12,12 +12,12 @@
   var ACTIVE_NODE_STORAGE_KEY = "yep-anywhere-mobile-active-node";
   var NODE_HISTORY_STORAGE_KEY = "yep-anywhere-mobile-node-history";
   var DEFAULT_CHANNEL = "tcp";
+  // Node aliases track the machine that terminates the tunnel, not the frps
+  // provider in front of it. This Mac mini has moved providers several times
+  // (43.226.60.75 -> 39.106.200.1 -> 39.106.189.88), so retired public
+  // endpoints go into DEPRECATED_DEFAULT_TCP_ORIGINS instead of lingering as
+  // separate, permanently unreachable nodes.
   var TCP_NODES = [
-    {
-      alias: "air",
-      label: "43.226.60.75:46789",
-      origin: "http://43.226.60.75:46789"
-    },
     {
       alias: "mini",
       label: "39.106.189.88:18022",
@@ -30,14 +30,17 @@
     }
   ];
   var DEFAULT_TCP_ORIGIN = TCP_NODES[0].origin;
-  var SEEDED_NODE_HISTORY = [
-    DEFAULT_TCP_ORIGIN,
-    TCP_NODES[1].origin,
-    TCP_NODES[2].origin
-  ];
+  var SEEDED_NODE_HISTORY = (function () {
+    var origins = [];
+    for (var index = 0; index < TCP_NODES.length; index += 1) {
+      origins.push(TCP_NODES[index].origin);
+    }
+    return origins;
+  })();
   var DEPRECATED_DEFAULT_TCP_ORIGINS = [
     "http://123.56.106.49:37160",
     "http://43.226.60.75:61874",
+    "http://43.226.60.75:46789",
     "http://39.106.200.1:18022"
   ];
   var NODE_HISTORY_LIMIT = 8;

@@ -14,6 +14,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - APK 侧边栏新增 Home、Mini 服务快捷切换，分别显示最近 24 小时已结束且未读的会话数；打开侧边栏时独立查询两端并每 15 秒刷新，区分离线与需要登录，切换服务不清除未读。Inbox 新增分页截断前的完整计数，兼容旧服务时对可能截断的计数显示 `+`。
 
 ### Fixed
+- 移动外壳默认 TCP 节点从已停服的 `43.226.60.75:46789` 换为 `39.106.189.88:18022`（mini，同一台机器的当前 frps 入口），退役地址归入迁移列表，已保存该地址的客户端自动回落默认节点，不再在冷启动时先吃一次连接超时；连接面板节点列表、输入框占位和 DNS 预解析同步更新。此项需重新打包 APK 才生效。
 - 修复 Pi 会话被手动中断后在会话列表被标成红色「失败」的问题。UI 的停止按钮走 `interrupt`（RPC `abort`），但当取消发生在首个流事件之前时，Pi 记录的最后一条 assistant entry 是 `stopReason: "error"` + `errorMessage: "This operation was aborted"`（Node `AbortError` 原文）而不是它自己契约里的 `"aborted"`；`derivePiSession` 把所有 `error` 一律映射为 `lastTurnStatus: "failed"` 并回填 `lastErrorMessage`，而 `SessionStatusBadge` 中 failed 分支（含“有任何错误文案即失败”）优先于 interrupted 分支，于是中断显示为失败、且看不到「继续」入口。现在按已知取消文案的白名单把这类 `error` 判为 `interrupted`，并且不再把中断文案写入 `lastErrorMessage`；提到 abort 的真实 provider 报错仍报失败（本机 237 个 Pi session 命中 1 条，另外 27 条真实失败不受影响）。
 - 修复思考行折叠时把 `Thinking` 字面量拼在推理正文前、容易被误读成思维链内容的问题：折叠行只展示推理首行预览（斜体、弱化配色），标签只在展开或没有预览文本时出现，并改为随界面语言显示（英文 `Reasoning` / 中文 `思考过程`）。
 - 修复 Codex `/compact` 缺少会话内进度的问题：触发后立即展示压缩提示，空闲期间实时消费原生压缩通知，轻量会话流同步压缩状态，完成后保留时间线记录，失败或中断时清理进度。

@@ -116,7 +116,7 @@ describe("APK mobile shell recovery", () => {
     Object.defineProperty(dom.window, "YepNativePush", {
       value: { getNodeNotifications },
     });
-    clickSavedNode(dom, "http://39.106.189.88:18022");
+    clickSavedNode(dom, "http://47.95.254.240:5750");
     const postMessage = vi.spyOn(frame.contentWindow as Window, "postMessage");
     postClientMessage(dom, frame, {
       type: "yep-anywhere:native-push-request",
@@ -144,7 +144,7 @@ describe("APK mobile shell recovery", () => {
       }),
       "*",
     );
-    expect(frame.src).toContain("39.106.189.88:18022");
+    expect(frame.src).toContain("47.95.254.240:5750");
   });
 
   it("migrates the retired persisted endpoint to the current default", () => {
@@ -153,14 +153,16 @@ describe("APK mobile shell recovery", () => {
       storedNode: "http://43.226.60.75:61874",
     });
 
-    expect(frame.src).toBe("http://43.226.60.75:46789/yep/?yep-mobile-shell=1");
+    expect(frame.src).toBe(
+      "http://39.106.189.88:18022/yep/?yep-mobile-shell=1",
+    );
     expect(
       dom.window.localStorage.getItem("yep-anywhere-mobile-active-node"),
     ).toBeNull();
     expect(
       dom.window.document.querySelector<HTMLInputElement>("[data-node-input]")
         ?.value,
-    ).toBe("43.226.60.75:46789");
+    ).toBe("39.106.189.88:18022");
     expect(dom.window.document.body.classList.contains("is-loaded")).toBe(
       false,
     );
@@ -172,10 +174,33 @@ describe("APK mobile shell recovery", () => {
       storedNode: "http://39.106.200.1:18022",
     });
 
-    expect(frame.src).toBe("http://43.226.60.75:46789/yep/?yep-mobile-shell=1");
+    expect(frame.src).toBe(
+      "http://39.106.189.88:18022/yep/?yep-mobile-shell=1",
+    );
     expect(
       dom.window.localStorage.getItem("yep-anywhere-mobile-active-node"),
     ).toBeNull();
+  });
+
+  it("migrates the retired 43.226.60.75 endpoint to the current default", () => {
+    const { dom, frame } = mountShell({
+      storedChannel: "tcp",
+      storedNode: "http://43.226.60.75:46789",
+    });
+
+    expect(frame.src).toBe(
+      "http://39.106.189.88:18022/yep/?yep-mobile-shell=1",
+    );
+    expect(
+      dom.window.localStorage.getItem("yep-anywhere-mobile-active-node"),
+    ).toBeNull();
+    expect(
+      Array.from(
+        dom.window.document.querySelectorAll<HTMLButtonElement>(
+          "[data-node-origin]",
+        ),
+      ).map((button) => button.dataset.nodeOrigin),
+    ).not.toContain("http://43.226.60.75:46789");
   });
 
   it("does not treat an iframe load event as an app-ready handshake", async () => {
@@ -218,7 +243,7 @@ describe("APK mobile shell recovery", () => {
       false,
     );
 
-    postAppReady(dom, frame, "http://43.226.60.75:46789");
+    postAppReady(dom, frame, "http://39.106.189.88:18022");
     expect(dom.window.document.body.classList.contains("is-loaded")).toBe(true);
     expect(
       dom.window.document.querySelector("[data-diagnostic-state]")?.textContent,
@@ -327,12 +352,12 @@ describe("APK mobile shell recovery", () => {
   it("opens the new endpoint at its project list instead of reusing an old session route", () => {
     const { dom, frame } = mountShell();
     frame.src =
-      "http://43.226.60.75:46789/yep/projects/old-project/sessions/old-session?branch=old-branch";
+      "http://39.106.189.88:18022/yep/projects/old-project/sessions/old-session?branch=old-branch";
 
-    clickSavedNode(dom, "http://39.106.189.88:18022");
+    clickSavedNode(dom, "http://47.95.254.240:5750");
 
     expect(frame.src).toBe(
-      "http://39.106.189.88:18022/yep/projects?yep-mobile-shell=1",
+      "http://47.95.254.240:5750/yep/projects?yep-mobile-shell=1",
     );
   });
 
@@ -344,7 +369,7 @@ describe("APK mobile shell recovery", () => {
         data: {
           type: "yep-anywhere:mobile-shell-set-channel",
           channel: "tcp",
-          node: "http://39.106.189.88:18022",
+          node: "http://47.95.254.240:5750",
           path: "/yep/new-session?projectId=old-project",
         },
         source: frame.contentWindow,
@@ -352,21 +377,21 @@ describe("APK mobile shell recovery", () => {
     );
 
     expect(frame.src).toBe(
-      "http://39.106.189.88:18022/yep/projects?yep-mobile-shell=1",
+      "http://47.95.254.240:5750/yep/projects?yep-mobile-shell=1",
     );
   });
 
   it("preserves the current route when retrying the same endpoint", () => {
     const { dom, frame } = mountShell();
     frame.src =
-      "http://43.226.60.75:46789/yep/projects/current-project/sessions/current-session?branch=current-branch";
+      "http://39.106.189.88:18022/yep/projects/current-project/sessions/current-session?branch=current-branch";
 
     dom.window.document
       .querySelector<HTMLButtonElement>("[data-retry-connection]")
       ?.click();
 
     expect(frame.src).toBe(
-      "http://43.226.60.75:46789/yep/projects/current-project/sessions/current-session?branch=current-branch&yep-mobile-shell=1",
+      "http://39.106.189.88:18022/yep/projects/current-project/sessions/current-session?branch=current-branch&yep-mobile-shell=1",
     );
   });
 });
