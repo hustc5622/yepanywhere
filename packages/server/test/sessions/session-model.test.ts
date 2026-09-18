@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { resolveSessionModel } from "../../src/routes/session-model.js";
+import { resolveSessionModel } from "../../src/sessions/session-model.js";
 
 describe("resolveSessionModel", () => {
   it("maps Claude's displayed default to an explicit Sonnet model", () => {
