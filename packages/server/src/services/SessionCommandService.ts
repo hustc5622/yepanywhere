@@ -42,7 +42,6 @@ import {
 } from "../projects/paths.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { RecentsService } from "../recents/index.js";
-import { resolveSessionModel } from "../routes/session-model.js";
 import type {
   RuntimeController,
   RuntimeProcessSnapshot,
@@ -78,6 +77,7 @@ import {
   type ProviderResolutionDeps,
   findSessionSummaryAcrossProviders,
 } from "../sessions/provider-resolution.js";
+import { resolveSessionModel } from "../sessions/session-model.js";
 import type { ISessionReader } from "../sessions/types.js";
 import type { ZCodeSessionReader } from "../sessions/zcode-reader.js";
 import type {
