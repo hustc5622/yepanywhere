@@ -4,6 +4,7 @@ import { api } from "../api/client";
 import { useToastContext } from "../contexts/ToastContext";
 import type { AgentActivity } from "../hooks/useFileActivity";
 import { useI18n } from "../i18n";
+import { stripAttachmentTokensForTitle } from "../lib/attachmentTokens";
 import { formatSmartTime } from "../lib/datetime";
 import { formatTokenCount, getEffectiveTokenTotal } from "../lib/tokens";
 import type {
@@ -284,8 +285,9 @@ export function SessionListItem({
     !localTitle &&
     !title &&
     (messageCount === 0 || (messageCount == null && activity === "in-turn"));
-  const displayTitle =
-    localTitle ?? title ?? (isNewSession ? "New session" : "Untitled session");
+  const displayTitle = stripAttachmentTokensForTitle(
+    localTitle ?? title ?? (isNewSession ? "New session" : "Untitled session"),
+  );
   const effectiveTokenTotal = getEffectiveTokenTotal(cumulativeUsage);
   const fallbackContextTokenTotal =
     effectiveTokenTotal === null && contextUsage && contextUsage.inputTokens > 0

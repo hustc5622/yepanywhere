@@ -169,6 +169,67 @@ export function splitByAttachmentTokens(
 }
 
 /**
+ * Handles Backspace/Delete next to an inline token so the chip behaves like a
+ * single atomic character instead of losing one letter at a time.
+ *
+ * Returns `null` when the caret is not adjacent to (or inside) a token, in
+ * which case the caller should let the browser handle the key normally.
+ */
+export function deleteAttachmentTokenAtCaret(
+  text: string,
+  selectionStart: number,
+  selectionEnd: number,
+  direction: "backward" | "forward",
+  names?: Iterable<string>,
+): { text: string; cursor: number; name: string } | null {
+  if (selectionStart !== selectionEnd) return null;
+
+  const caret = selectionStart;
+  const token = findAttachmentTokens(text, names).find((candidate) =>
+    direction === "backward"
+      ? caret > candidate.start && caret <= candidate.end
+      : caret >= candidate.start && caret < candidate.end,
+  );
+  if (!token) return null;
+
+  let start = token.start;
+  let end = token.end;
+  // Swallow one adjacent space so the sentence does not keep a double gap.
+  if (text[end] === " " && /\s|^$/.test(text[start - 1] ?? "")) {
+    end += 1;
+  } else if (text[start - 1] === " ") {
+    start -= 1;
+  }
+
+  return {
+    text: text.slice(0, start) + text.slice(end),
+    cursor: start,
+    name: token.name,
+  };
+}
+
+/**
+ * Renders prompt text for compact, non-interactive surfaces (session titles,
+ * list previews): inline tokens are dropped so `@[shot.png]` noise does not
+ * eat the title. Attachment-only prompts fall back to the file names.
+ */
+export function stripAttachmentTokensForTitle(text: string): string {
+  const tokens = findAttachmentTokens(text);
+  if (tokens.length === 0) return text;
+
+  let out = "";
+  let cursor = 0;
+  for (const token of tokens) {
+    out += text.slice(cursor, token.start);
+    cursor = token.end;
+  }
+  out += text.slice(cursor);
+  out = out.replace(/[ \t]{2,}/g, " ").trim();
+
+  return out || tokens.map((token) => token.name).join(", ");
+}
+
+/**
  * Picks the attachment matching a token occurrence. Duplicated file names are
  * resolved positionally: the n-th token for a name maps to the n-th matching
  * attachment.

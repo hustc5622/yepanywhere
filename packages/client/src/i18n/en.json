@@ -526,6 +526,7 @@
   "messageInputExpand": "Expand message input",
   "messageInputCollapse": "Collapse message input",
   "messageInputContinueAbove": "Continue typing while responding above...",
+  "attachmentPreviewLoading": "Loading image...",
   "messageInputRemoveAttachment": "Remove {name}",
   "toolbarAttachFiles": "Attach files",
   "toolbarAttachDisabled": "Send a message first to enable attachments",

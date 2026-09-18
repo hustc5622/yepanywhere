@@ -466,4 +466,31 @@ describe("MessageInput", () => {
       "second.png",
     ]);
   });
+
+  it("reuses tokens already present in pasted Yep clipboard text", () => {
+    const onAttach = vi.fn();
+    const { textarea } = renderMessageInput({
+      projectId: "project",
+      sessionId: "session",
+      onAttach,
+    });
+
+    fireEvent.paste(textarea, {
+      clipboardData: {
+        items: [],
+        getData: (type: string) => {
+          if (type === "text/plain") return "@[first.png] look at this";
+          if (type === "text/html") {
+            return `<div data-yep-anywhere-user-input="1">
+              <img src="data:image/png;base64,Zmlyc3Q=" data-yep-anywhere-attachment-name="first.png">
+            </div>`;
+          }
+          return "";
+        },
+      },
+    });
+
+    // The pasted text already references the file; no duplicate token is added.
+    expect(textarea.value).toBe("@[first.png] look at this");
+  });
 });

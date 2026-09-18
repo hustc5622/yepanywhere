@@ -526,6 +526,7 @@
   "messageInputExpand": "展开消息输入框",
   "messageInputCollapse": "收起消息输入框",
   "messageInputContinueAbove": "在上方响应时可继续输入...",
+  "attachmentPreviewLoading": "图片加载中...",
   "messageInputRemoveAttachment": "移除 {name}",
   "toolbarAttachFiles": "添加文件",
   "toolbarAttachDisabled": "先发送一条消息后才能添加附件",

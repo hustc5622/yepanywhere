@@ -42,6 +42,7 @@ import { useActivityBusState } from "../hooks/useActivityBusState";
 import { useConnection } from "../hooks/useConnection";
 import { useDeveloperMode } from "../hooks/useDeveloperMode";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
+import { useDraftAttachments } from "../hooks/useDraftAttachments";
 import type { DraftControls } from "../hooks/useDraftPersistence";
 import { useEngagementTracking } from "../hooks/useEngagementTracking";
 import { useHideSplashOnReady } from "../hooks/useHideSplashOnReady";
@@ -61,6 +62,7 @@ import {
   getAgentCommandConfig,
   getAgentCommandConfigs,
 } from "../lib/agentCommands";
+import { stripAttachmentTokensForTitle } from "../lib/attachmentTokens";
 import {
   type CodexSkillCommand,
   parseCodexSkillsList,
@@ -976,8 +978,11 @@ function SessionPageContent({
     basePath,
   ]);
 
-  // File attachment state
-  const [attachments, setAttachments] = useState<UploadedFile[]>([]);
+  // File attachment state. Persisted alongside the draft text so the inline
+  // `@[name]` tokens keep working after navigating away and back.
+  const [attachments, setAttachments] = useDraftAttachments(
+    `draft-attachments-${sessionId}`,
+  );
   const [uploadProgress, setUploadProgress] = useState<UploadProgress[]>([]);
   // Track in-flight upload promises so handleSend can wait for them
   const pendingUploadsRef = useRef<Map<string, Promise<UploadedFile | null>>>(
@@ -1855,12 +1860,15 @@ function SessionPageContent({
         pendingUploadsRef.current.set(tempId, uploadPromise);
       }
     },
-    [projectId, sessionId, showToast, connection, t],
+    [projectId, sessionId, setAttachments, showToast, connection, t],
   );
 
-  const handleRemoveAttachment = useCallback((id: string) => {
-    setAttachments((prev) => prev.filter((a) => a.id !== id));
-  }, []);
+  const handleRemoveAttachment = useCallback(
+    (id: string) => {
+      setAttachments((prev) => prev.filter((a) => a.id !== id));
+    },
+    [setAttachments],
+  );
 
   // Check if pending request is an AskUserQuestion
   const isAskUserQuestion = pendingInputRequest?.toolName === "AskUserQuestion";
@@ -1941,11 +1949,12 @@ function SessionPageContent({
   // 3. Initial title from navigation state (optimistic, before server responds)
   // 4. "Untitled" as final fallback
   const sessionTitle = getSessionDisplayTitle(session);
-  const displayTitle =
+  const displayTitle = stripAttachmentTokensForTitle(
     localCustomTitle ??
-    (sessionTitle !== "Untitled" ? sessionTitle : null) ??
-    initialTitle ??
-    t("sessionUntitled");
+      (sessionTitle !== "Untitled" ? sessionTitle : null) ??
+      initialTitle ??
+      t("sessionUntitled"),
+  );
   const isArchived = localIsArchived ?? session?.isArchived ?? false;
   // `isStarred` is the persisted compatibility bit; the product semantics are
   // now pinning, so existing favorites become pins without a migration.

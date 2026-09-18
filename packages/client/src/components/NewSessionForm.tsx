@@ -52,9 +52,13 @@ import { useServerSettings } from "../hooks/useServerSettings";
 import { useI18n } from "../i18n";
 import { getAgentCommandConfigs } from "../lib/agentCommands";
 import {
+  countAttachmentTokens,
+  deleteAttachmentTokenAtCaret,
   hasAttachmentToken,
   insertAttachmentToken,
+  matchTokenToAttachment,
   removeAttachmentToken,
+  sanitizeAttachmentTokenName,
 } from "../lib/attachmentTokens";
 import { readClipboardUserInput } from "../lib/clipboard";
 import {
@@ -72,6 +76,7 @@ import {
   shouldRestoreHistoricalEditAfterFailure,
 } from "../lib/sessionBranching";
 import type { PermissionMode, SessionNavigationState } from "../types";
+import { AttachmentPreviewModal } from "./AttachmentPreviewModal";
 import { CodexAccountSelect } from "./CodexAccountSelect";
 import { CodexUsageCard } from "./CodexUsageCard";
 import { ComposerTokenHighlight } from "./ComposerTokenHighlight";
@@ -342,6 +347,7 @@ export function NewSessionForm({
   >(null);
   const llmGatewayKeys = useLlmGatewayKeys(selectedProvider === "pi");
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
+  const [previewFileId, setPreviewFileId] = useState<string | null>(null);
   const pendingFilesRef = useRef<PendingFile[]>(pendingFiles);
   pendingFilesRef.current = pendingFiles;
   const [isStarting, setIsStarting] = useState(false);
@@ -1116,6 +1122,21 @@ export function NewSessionForm({
     }
   }, [setMessage]);
 
+  /** Restores the caret after React has flushed the new textarea value. */
+  const setCaretSoon = (position: number) => {
+    const apply = () => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(position, position);
+    };
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(apply);
+    } else {
+      setTimeout(apply, 0);
+    }
+  };
+
   const addPendingFiles = (
     files: File[],
     baseMessage?: string,
@@ -1138,7 +1159,14 @@ export function NewSessionForm({
     let nextMessage = baseMessage ?? textarea?.value ?? message;
     let nextCursor =
       baseCursor ?? textarea?.selectionStart ?? nextMessage.length;
+    // Pasted Yep clipboard payloads already carry `@[name]` inside the copied
+    // text; reuse those tokens instead of appending duplicates.
+    const consumed = new Map<string, number>();
     for (const pendingFile of newPendingFiles) {
+      const name = sanitizeAttachmentTokenName(pendingFile.file.name);
+      const used = consumed.get(name) ?? 0;
+      consumed.set(name, used + 1);
+      if (countAttachmentTokens(nextMessage, name) > used) continue;
       const inserted = insertAttachmentToken(
         nextMessage,
         nextCursor,
@@ -1150,11 +1178,7 @@ export function NewSessionForm({
 
     setInterimTranscript("");
     setMessage(nextMessage);
-    setTimeout(() => {
-      const el = textareaRef.current;
-      el?.focus();
-      el?.setSelectionRange(nextCursor, nextCursor);
-    }, 0);
+    setCaretSoon(nextCursor);
   };
 
   const handleFileSelect = (e: ChangeEvent<HTMLInputElement>) => {
@@ -1537,6 +1561,42 @@ export function NewSessionForm({
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
+    // Attachment tokens delete as one unit, like a chip would.
+    if (
+      (e.key === "Backspace" || e.key === "Delete") &&
+      !e.metaKey &&
+      !e.ctrlKey &&
+      !e.altKey
+    ) {
+      const textarea = textareaRef.current;
+      const deletion = textarea
+        ? deleteAttachmentTokenAtCaret(
+            textarea.value,
+            textarea.selectionStart,
+            textarea.selectionEnd,
+            e.key === "Backspace" ? "backward" : "forward",
+            pendingFileNames,
+          )
+        : null;
+      if (deletion) {
+        e.preventDefault();
+        setInterimTranscript("");
+        setMessage(deletion.text);
+        setCaretSoon(deletion.cursor);
+        const removed = matchTokenToAttachment(
+          pendingFiles,
+          (candidate) => candidate.file.name,
+          deletion.name,
+          0,
+        );
+        if (removed) {
+          if (removed.previewUrl) URL.revokeObjectURL(removed.previewUrl);
+          setPendingFiles((prev) => prev.filter((f) => f.id !== removed.id));
+        }
+        return;
+      }
+    }
+
     if (e.key === "Enter") {
       // Skip Enter during IME composition (e.g. Chinese/Japanese/Korean input)
       if (e.nativeEvent.isComposing) return;
@@ -1683,6 +1743,21 @@ export function NewSessionForm({
   const hasInlineTokens = pendingFileNames.some((name) =>
     hasAttachmentToken(displayText, name),
   );
+
+  const handleTokenClick = (name: string, occurrence: number) => {
+    const pendingFile = matchTokenToAttachment(
+      pendingFiles,
+      (candidate) => candidate.file.name,
+      name,
+      occurrence,
+    );
+    if (!pendingFile) return;
+    setPreviewFileId(pendingFile.id);
+  };
+
+  const previewFile = previewFileId
+    ? pendingFiles.find((pf) => pf.id === previewFileId)
+    : undefined;
   const savedDefaults = settings?.newSessionDefaults;
   const savedProviderDefaults = selectedProvider
     ? getNewSessionProviderDefaults(savedDefaults, selectedProvider)
@@ -1795,6 +1870,7 @@ export function NewSessionForm({
           textareaRef={textareaRef}
           text={displayText}
           names={pendingFileNames}
+          onTokenClick={handleTokenClick}
         />
       )}
       <textarea
@@ -2045,6 +2121,13 @@ export function NewSessionForm({
             );
           })}
         </div>
+      )}
+      {previewFile && (
+        <AttachmentPreviewModal
+          name={previewFile.file.name}
+          src={previewFile.previewUrl ?? null}
+          onClose={() => setPreviewFileId(null)}
+        />
       )}
     </>
   );

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   buildAttachmentToken,
   countAttachmentTokens,
+  deleteAttachmentTokenAtCaret,
   findAttachmentTokens,
   hasAttachmentToken,
   insertAttachmentToken,
@@ -9,6 +10,7 @@ import {
   removeAttachmentToken,
   sanitizeAttachmentTokenName,
   splitByAttachmentTokens,
+  stripAttachmentTokensForTitle,
 } from "../attachmentTokens";
 
 describe("attachmentTokens", () => {
@@ -71,6 +73,47 @@ describe("attachmentTokens", () => {
     expect(splitByAttachmentTokens("a @[x.png] b", ["y.png"])).toEqual([
       { type: "text", value: "a @[x.png] b" },
     ]);
+  });
+
+  it("deletes a token as one unit from either side", () => {
+    const text = "a @[x.png] b";
+    // Caret right after the token, Backspace
+    expect(
+      deleteAttachmentTokenAtCaret(text, 10, 10, "backward", ["x.png"]),
+    ).toEqual({ text: "a b", cursor: 2, name: "x.png" });
+    // Caret right before the token, Delete
+    expect(
+      deleteAttachmentTokenAtCaret(text, 2, 2, "forward", ["x.png"]),
+    ).toEqual({ text: "a b", cursor: 2, name: "x.png" });
+    // Caret inside the token
+    expect(
+      deleteAttachmentTokenAtCaret(text, 5, 5, "backward", ["x.png"]),
+    ).toEqual({ text: "a b", cursor: 2, name: "x.png" });
+  });
+
+  it("leaves normal deletions to the browser", () => {
+    const text = "a @[x.png] b";
+    // Caret at the very end, far from the token
+    expect(
+      deleteAttachmentTokenAtCaret(text, 12, 12, "backward", ["x.png"]),
+    ).toBeNull();
+    // Non-collapsed selection
+    expect(
+      deleteAttachmentTokenAtCaret(text, 2, 10, "backward", ["x.png"]),
+    ).toBeNull();
+    // Unknown attachment name
+    expect(
+      deleteAttachmentTokenAtCaret(text, 10, 10, "backward", ["y.png"]),
+    ).toBeNull();
+  });
+
+  it("drops tokens from title-like previews", () => {
+    expect(stripAttachmentTokensForTitle("@[a.png] 看看这个")).toBe("看看这个");
+    expect(stripAttachmentTokensForTitle("plain title")).toBe("plain title");
+    // Attachment-only prompts keep the file names so the title is not empty.
+    expect(stripAttachmentTokensForTitle("@[a.png] @[b.png]")).toBe(
+      "a.png, b.png",
+    );
   });
 
   it("maps duplicated names positionally", () => {

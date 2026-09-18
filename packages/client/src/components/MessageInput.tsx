@@ -16,13 +16,17 @@ import {
 import { useI18n } from "../i18n";
 import type { AgentCommandConfig } from "../lib/agentCommands";
 import {
+  countAttachmentTokens,
+  deleteAttachmentTokenAtCaret,
   hasAttachmentToken,
   insertAttachmentToken,
+  matchTokenToAttachment,
   sanitizeAttachmentTokenName,
 } from "../lib/attachmentTokens";
 import { readClipboardUserInput } from "../lib/clipboard";
 import { hasCoarsePointer } from "../lib/deviceDetection";
 import type { ContextUsage, PermissionMode } from "../types";
+import { AttachmentPreviewModal } from "./AttachmentPreviewModal";
 import { ComposerTokenHighlight } from "./ComposerTokenHighlight";
 import { MessageInputToolbar } from "./MessageInputToolbar";
 import type { VoiceInputButtonRef } from "./VoiceInputButton";
@@ -338,6 +342,21 @@ export function MessageInput({
     [cursorPosition, onCustomCommand, setText, text],
   );
 
+  /** Restores the caret after React has flushed the new textarea value. */
+  const setCaretSoon = useCallback((position: number) => {
+    const apply = () => {
+      const el = textareaRef.current;
+      if (!el) return;
+      el.focus();
+      el.setSelectionRange(position, position);
+    };
+    if (typeof requestAnimationFrame === "function") {
+      requestAnimationFrame(apply);
+    } else {
+      setTimeout(apply, 0);
+    }
+  }, []);
+
   /**
    * Starts uploads and drops an inline token at the caret so the prompt keeps
    * the ordering between typed text and attached files.
@@ -351,24 +370,27 @@ export function MessageInput({
       let nextText = baseText ?? textarea?.value ?? text;
       let nextCursor =
         baseCursor ?? textarea?.selectionStart ?? nextText.length;
+      // Pasted Yep clipboard payloads already carry `@[name]` inside the copied
+      // text; reuse those tokens instead of appending duplicates.
+      const consumed = new Map<string, number>();
       for (const file of files) {
+        const name = sanitizeAttachmentTokenName(file.name);
+        inlinedNamesRef.current.add(name);
+        const used = consumed.get(name) ?? 0;
+        consumed.set(name, used + 1);
+        if (countAttachmentTokens(nextText, name) > used) continue;
         const inserted = insertAttachmentToken(nextText, nextCursor, file.name);
         nextText = inserted.text;
         nextCursor = inserted.cursor;
-        inlinedNamesRef.current.add(sanitizeAttachmentTokenName(file.name));
       }
 
       setInterimTranscript("");
       setDismissedCompletionKey(null);
       setText(nextText);
       setCursorPosition(nextCursor);
-      setTimeout(() => {
-        const el = textareaRef.current;
-        el?.focus();
-        el?.setSelectionRange(nextCursor, nextCursor);
-      }, 0);
+      setCaretSoon(nextCursor);
     },
-    [onAttach, setText, text],
+    [onAttach, setCaretSoon, setText, text],
   );
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -441,6 +463,33 @@ export function MessageInput({
         voiceButtonRef.current.toggle();
       }
       return;
+    }
+
+    // Attachment tokens delete as one unit, like a chip would.
+    if (
+      (e.key === "Backspace" || e.key === "Delete") &&
+      !e.metaKey &&
+      !e.ctrlKey &&
+      !e.altKey
+    ) {
+      const textarea = textareaRef.current;
+      const deletion = textarea
+        ? deleteAttachmentTokenAtCaret(
+            textarea.value,
+            textarea.selectionStart,
+            textarea.selectionEnd,
+            e.key === "Backspace" ? "backward" : "forward",
+            attachmentNames,
+          )
+        : null;
+      if (deletion) {
+        e.preventDefault();
+        setInterimTranscript("");
+        setText(deletion.text);
+        setCursorPosition(deletion.cursor);
+        setCaretSoon(deletion.cursor);
+        return;
+      }
     }
 
     if (isCommandCompletionOpen) {
@@ -611,17 +660,44 @@ export function MessageInput({
   );
 
   // Deleting the token text removes the attachment, mirroring how the chip
-  // behaves in other chat UIs.
+  // behaves in other chat UIs. Attachments restored from a persisted draft are
+  // re-adopted here, so their tokens stay wired up after a navigation.
   useEffect(() => {
-    if (!onRemoveAttachment) return;
     for (const file of attachments) {
       const name = sanitizeAttachmentTokenName(file.originalName);
+      if (hasAttachmentToken(text, name)) {
+        inlinedNamesRef.current.add(name);
+        continue;
+      }
       if (!inlinedNamesRef.current.has(name)) continue;
-      if (hasAttachmentToken(text, name)) continue;
       inlinedNamesRef.current.delete(name);
-      onRemoveAttachment(file.id);
+      onRemoveAttachment?.(file.id);
     }
   }, [attachments, onRemoveAttachment, text]);
+
+  // Inline token preview (click an `@[name]` chip in the composer).
+  const [previewAttachment, setPreviewAttachment] = useState<{
+    name: string;
+    apiPath: string | null;
+  } | null>(null);
+
+  const handleTokenClick = useCallback(
+    (name: string, occurrence: number) => {
+      const file = matchTokenToAttachment(
+        attachments,
+        (candidate) => candidate.originalName,
+        name,
+        occurrence,
+      );
+      if (!file) return;
+      const apiPath =
+        projectId && sessionId
+          ? `/api/projects/${projectId}/sessions/${sessionId}/upload/${encodeURIComponent(file.name)}`
+          : null;
+      setPreviewAttachment({ name: file.originalName, apiPath });
+    },
+    [attachments, projectId, sessionId],
+  );
 
   // Voice input handlers
   const handleVoiceTranscript = useCallback(
@@ -728,6 +804,7 @@ export function MessageInput({
             textareaRef={textareaRef}
             text={displayText}
             names={attachmentNames}
+            onTokenClick={handleTokenClick}
           />
         )}
         <textarea
@@ -841,6 +918,13 @@ export function MessageInput({
           />
         )}
       </div>
+      {previewAttachment && (
+        <AttachmentPreviewModal
+          name={previewAttachment.name}
+          apiPath={previewAttachment.apiPath}
+          onClose={() => setPreviewAttachment(null)}
+        />
+      )}
     </div>
   );
 }
