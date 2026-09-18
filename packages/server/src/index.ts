@@ -36,6 +36,7 @@ import {
 } from "./indexes/index.js";
 import { InteractionBroker } from "./interactions/InteractionBroker.js";
 import type { SessionInteractionService } from "./interactions/SessionInteractionService.js";
+import { maskApiKey } from "./llm-gateways/gateway-keys.js";
 import {
   LLM_GATEWAYS_ENV,
   resolveLlmGatewayChannelsDetailed,
@@ -416,12 +417,16 @@ function warnAboutLlmGatewayConfig(): void {
   if (channels.length === 0) return;
   // A retired credential answers `/models` exactly like a live one, so the
   // first visible symptom of a stale key is a failed turn inside a provider
-  // process. Print the configured key so "which key is this server actually
-  // using" is answerable without restarting it.
+  // process. Print a masked fingerprint of the configured key so "did this
+  // server pick up the rotated key" is answerable without restarting it —
+  // enough to tell two keys apart, never enough to use one. Logs are
+  // collected, shared and exported, so the full credential must not cross
+  // this boundary.
   console.log(
     `[LLM gateways] Active channels: ${channels
       .map(
-        (channel) => `${channel.id}(${channel.apiBase}, key ${channel.apiKey})`,
+        (channel) =>
+          `${channel.id}(${channel.apiBase}, key ${maskApiKey(channel.apiKey)})`,
       )
       .join(", ")}`,
   );

@@ -28,6 +28,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - APK 侧边栏新增 Home、Mini 服务快捷切换，分别显示最近 24 小时已结束且未读的会话数；打开侧边栏时独立查询两端并每 15 秒刷新，区分离线与需要登录，切换服务不清除未读。Inbox 新增分页截断前的完整计数，兼容旧服务时对可能截断的计数显示 `+`。
 
 ### Fixed
+- 启动诊断不再把完整的 gateway API key 写进日志。`[LLM gateways] Active channels:` 这行此前把 `channel.apiKey` 原样拼进 `console.log`，经 console 拦截转发给 Pino 后落盘，并随日志导出 / 集中采集扩散；现在改为复用既有的 `maskApiKey()` 输出脱敏指纹（前 6 位 + `…` + 后 4 位），仍能回答「这台服务是否已经用上轮换后的 Key」，但完整凭据不再跨越日志边界。渠道 id、apiBase 和 overlay 路径的输出保持不变。
 - 修复部署脚本重载 LaunchAgent 时偶发 `Bootstrap failed: 5: Input/output error` 的问题：`launchctl bootout` 是异步的，返回后 launchd 仍在拆服务，此时立刻 `bootstrap` 会被拒绝。`scripts/redeploy-server.sh` 与 `scripts/install-launchagents.sh` 现在都会先等 label 卸载、旧进程退出，再带重试地 bootstrap，最后一次失败仍原样抛出真实错误。
 - 修复 Pi 会话跑着跑着就悄悄换回默认网关 Key 的问题（表现为一段时间后突然报 `403 budget_exceeded`，而会话选的其实是另一把有额度的 Key）。有两条路径会丢掉会话创建时记录的 `llmGatewayKeyId`：一是续聊消息触发的进程重启（切换 thinking / reasoning effort、变更飞书 MCP 授权都会重启 provider 进程），`queueMessage` 组装的 `modelSettings` 漏带凭据，重启后回落到环境默认 Key；二是编辑消息 / 回滚产生新 session id 时，只迁移了 provider、executor、gateway 配置，没有迁移凭据，分支会话之后每次续聊都用默认 Key。现在两条路径统一走同一份「线程固定凭据」逻辑，Codex 的 `codexAccountId` 同样受影响、一并修复（此前重启后会静默切回默认账号）。另外 Pi 启动时若 `llmGatewayKeyId` 无法解析到凭据（Key 被删或归属别的 channel），不再无声回落，会记录 `pi_gateway_key_unresolved` 警告。
 - 修复新建会话页点「保存为默认」时 Pi 的网关 API Key 选择不会被保存的问题：服务端 `PUT /api/settings` 的 `newSessionDefaults` 校验漏了 `llmGatewayKeyId` 字段，客户端正常上报但被静默丢弃，下次进入表单总是回落服务端默认 Key（Codex 账号 `codexAccountId` 不受影响，现已补上两者的回归测试）。该字段仅允许在 Pi 下保存，写到其他 provider 会被 400 拒绝。
