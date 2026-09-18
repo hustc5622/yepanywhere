@@ -2057,6 +2057,128 @@ h2 {
   background: var(--text-dimmed);
 }
 
+.session-inspector-file-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.session-inspector-file-group + .session-inspector-file-group {
+  margin-top: var(--space-3);
+}
+
+.session-inspector-file-group-title {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: 0 6px;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.session-inspector-file-group-count {
+  color: var(--text-dimmed);
+}
+
+.session-inspector-file-row {
+  display: flex;
+  align-items: stretch;
+  gap: 2px;
+  min-width: 0;
+}
+
+.session-inspector-file-row .session-inspector-row:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.session-inspector-file-jump {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 26px;
+  padding: 0;
+  border: 0;
+  border-radius: var(--radius-md);
+  color: var(--text-dimmed);
+  background: transparent;
+  cursor: pointer;
+  opacity: 0;
+}
+
+.session-inspector-file-row:hover .session-inspector-file-jump,
+.session-inspector-file-jump:focus-visible {
+  opacity: 1;
+}
+
+.session-inspector-file-jump:hover {
+  color: var(--text-secondary);
+  background: var(--bg-hover);
+}
+
+.session-inspector-file-more {
+  align-self: flex-start;
+  margin-left: 6px;
+  padding: 2px 0;
+  border: 0;
+  color: var(--link-color);
+  background: transparent;
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+.session-inspector-file-truncated {
+  margin-top: var(--space-3);
+  padding: 0 6px;
+  color: var(--text-dimmed);
+  font-size: var(--font-size-xs);
+}
+
+.session-inspector-file-delta {
+  display: inline-flex;
+  gap: 4px;
+  flex-shrink: 0;
+  align-self: center;
+  font-size: var(--font-size-xs);
+  font-variant-numeric: tabular-nums;
+}
+
+.session-file-diff {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+
+.session-file-diff-toolbar {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-wrap: wrap;
+}
+
+.session-file-diff-action {
+  padding: 2px 8px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-md);
+  color: var(--text-secondary);
+  background: transparent;
+  font-size: var(--font-size-xs);
+  cursor: pointer;
+}
+
+.session-file-diff-action:hover {
+  background: var(--bg-hover);
+}
+
+.session-file-diff-base {
+  color: var(--text-dimmed);
+  font-size: var(--font-size-xs);
+}
+
 .session-inspector-channel-dot {
   width: 8px;
   height: 8px;

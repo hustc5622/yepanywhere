@@ -1433,6 +1433,13 @@
   "sessionInspectorModified": "修改",
   "sessionInspectorRead": "读取",
   "sessionInspectorSearched": "搜索",
+  "sessionInspectorFileMaybe": "可能改动（shell）",
+  "sessionInspectorFilesTruncated": "较早的轮次未纳入扫描，列表可能不完整。",
+  "sessionInspectorJumpToMessage": "跳到消息",
+  "sessionInspectorShowAll": "显示全部",
+  "sessionFileDiffOpenFile": "查看完整文件",
+  "sessionFileDiffUnavailable": "该文件无法生成 diff",
+  "sessionFileDiffEmpty": "本会话对该文件没有净改动",
   "sessionInspectorOther": "其它",
   "sessionInspectorPassed": "通过",
   "sessionInspectorFailed": "失败",
@@ -1507,5 +1514,7 @@
   "feishuAuthState_reauth_required": "需要重新授权",
   "feishuAuthState_config_error": "需要检查应用配置",
   "feishuAuthState_refresh_uncertain": "续期中断，请重新授权恢复",
-  "feishuAuthState_refreshing": "正在续期"
+  "feishuAuthState_refreshing": "正在续期",
+  "sessionFileDiffPartial": "基线不完整",
+  "sessionFileDiffPartialHint": "本会话起始内容有一部分无法重建，diff 可能少算了改动。"
 }

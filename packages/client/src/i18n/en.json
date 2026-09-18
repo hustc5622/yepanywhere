@@ -1433,6 +1433,13 @@
   "sessionInspectorModified": "Modified",
   "sessionInspectorRead": "Read",
   "sessionInspectorSearched": "Searched",
+  "sessionInspectorFileMaybe": "maybe (shell)",
+  "sessionInspectorFilesTruncated": "Older turns were not scanned; the list may be incomplete.",
+  "sessionInspectorJumpToMessage": "Jump to message",
+  "sessionInspectorShowAll": "Show all",
+  "sessionFileDiffOpenFile": "Open file",
+  "sessionFileDiffUnavailable": "Diff unavailable for this file",
+  "sessionFileDiffEmpty": "This session made no net change to the file",
   "sessionInspectorOther": "Other",
   "sessionInspectorPassed": "Passed",
   "sessionInspectorFailed": "Failed",
@@ -1507,5 +1514,7 @@
   "feishuAuthState_reauth_required": "Authorization required",
   "feishuAuthState_config_error": "Application configuration needs attention",
   "feishuAuthState_refresh_uncertain": "Renewal interrupted; reconnect to recover",
-  "feishuAuthState_refreshing": "Renewing authorization"
+  "feishuAuthState_refreshing": "Renewing authorization",
+  "sessionFileDiffPartial": "Partial baseline",
+  "sessionFileDiffPartialHint": "Part of this session's starting content could not be reconstructed, so the diff may understate the changes."
 }

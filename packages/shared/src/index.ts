@@ -209,6 +209,27 @@ export type {
   ProjectGitStatusSummary,
 } from "./git-status.js";
 
+export type {
+  SessionFileActivity,
+  SessionFileActivityConfidence,
+  SessionFileActivityIndex,
+  SessionFileActivityKind,
+  SessionFileActivitySource,
+  SessionFileDiff,
+  NormalizedSessionFilePath,
+} from "./session-files.js";
+export {
+  SESSION_FILE_ACTIVITY_MAX_PATHS,
+  classifyFileActivityKind,
+  extractShellWritePaths,
+  extractToolCommand,
+  extractToolFilePaths,
+  looksLikeShellCommand,
+  normalizeSessionFilePath,
+  normalizeToolName,
+  prioritizeFileActivityKind,
+} from "./session-files.js";
+
 export {
   orderByParentChain,
   needsReorder,

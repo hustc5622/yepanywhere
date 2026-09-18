@@ -104,7 +104,9 @@ describe("SessionInspector", () => {
     fireEvent.click(screen.getByRole("tab", { name: "Files" }));
     const firstFile = screen.getByTitle(first);
     expect(firstFile.textContent).toContain("Edit - 2");
-    expect(screen.getByTitle(second).textContent).toContain("Modified - Edit");
+    // The activity kind now labels the group rather than every row.
+    expect(screen.getByText("Modified")).toBeDefined();
+    expect(screen.getByTitle(second).textContent).toContain("Edit");
     expect(screen.getByTitle(second).textContent).not.toContain("Edit - 2");
     expect(screen.getByTitle("src/main.ts")).toBeDefined();
     expect(screen.queryByText("[path hidden]")).toBeNull();

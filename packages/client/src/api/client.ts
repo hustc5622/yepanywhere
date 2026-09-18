@@ -36,6 +36,8 @@ import type {
   ReportsListResponse,
   SessionCreatedBy,
   SessionDisplayPage,
+  SessionFileActivityIndex,
+  SessionFileDiff,
   SessionKind,
   SessionLastTurnStatus,
   SessionLocateResponse,
@@ -1249,6 +1251,38 @@ export const api = {
       `/projects/${projectId}/sessions/${sessionId}/display/questions${query ? `?${query}` : ""}`,
     );
   },
+
+  getSessionFileIndex: (
+    projectId: string,
+    sessionId: string,
+    options?: { branchId?: string; signal?: AbortSignal },
+  ) => {
+    const params = new URLSearchParams();
+    if (options?.branchId) params.set("branchId", options.branchId);
+    const query = params.toString();
+    return fetchJSON<SessionFileActivityIndex>(
+      `/projects/${projectId}/sessions/${sessionId}/files${query ? `?${query}` : ""}`,
+      { signal: options?.signal },
+    );
+  },
+
+  getSessionFileDiff: (
+    projectId: string,
+    sessionId: string,
+    params: { path: string; fullContext?: boolean; signal?: AbortSignal },
+  ) =>
+    fetchJSON<SessionFileDiff>(
+      `/projects/${projectId}/sessions/${sessionId}/files/diff`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          path: params.path,
+          ...(params.fullContext ? { fullContext: true } : {}),
+        }),
+        ...(params.signal ? { signal: params.signal } : {}),
+      },
+    ),
 
   getSessionToolGroupDetails: (
     projectId: string,

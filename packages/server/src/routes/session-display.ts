@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
-import { stat } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
+import { join } from "node:path";
 import {
   type InputRequest,
   type ProviderName,
@@ -7,13 +8,16 @@ import {
   SESSION_DISPLAY_TOOL_DETAIL_PAGE_LIMIT,
   type SessionBranchState,
   type SessionDisplayPage,
+  type SessionFileActivityIndex,
   type SessionQuestionPage,
   SessionQuestionPageSchema,
   type SessionThinkingDetail,
   type SessionToolGroupDetailPage,
   isUrlProjectId,
+  normalizeSessionFilePath,
 } from "@yep-anywhere/shared";
 import type { Context, Hono } from "hono";
+import { computeEditAugment } from "../augments/edit-augments.js";
 import { renderMarkdownToHtml } from "../augments/markdown-augments.js";
 import type { CodexAppServerHistoryReader } from "../codex-history/CodexAppServerHistoryReader.js";
 import type {
@@ -38,6 +42,12 @@ import {
   findSessionSummaryAcrossProviders,
   resolveSessionSources,
 } from "../sessions/provider-resolution.js";
+import { buildSessionFileActivity } from "../sessions/session-file-activity.js";
+import {
+  type FileEditOp,
+  collectSessionFileEdits,
+  reconstructSessionBaseline,
+} from "../sessions/session-file-changes.js";
 import type { GetSessionOptions, LoadedSession } from "../sessions/types.js";
 import { isUserPromptMessage } from "../sessions/user-prompt-message.js";
 import { compactQuestionText } from "../sessions/user-questions.js";
@@ -242,6 +252,87 @@ export function registerSessionDisplayRoutes(
         assertCursorBranch(cursor, branchId);
         const page = await readQuestionPage(deps, resolved, cursor, branchId);
         return c.json(page);
+      } catch (error) {
+        return displayErrorResponse(c, error);
+      }
+    },
+  );
+
+  // Session-scoped file index. Derived server-side from the *whole* session so
+  // it does not depend on how much of the transcript the client has paged in.
+  routes.get("/projects/:projectId/sessions/:sessionId/files", async (c) => {
+    try {
+      const resolved = await resolveDisplaySession(
+        deps,
+        c.req.param("projectId"),
+        c.req.param("sessionId"),
+        false,
+      );
+      const branchId = c.req.query("branchId") || undefined;
+      const index = await readSessionFileIndex(resolved, branchId);
+      return c.json(index);
+    } catch (error) {
+      return displayErrorResponse(c, error);
+    }
+  });
+
+  // Diff of one indexed file against the state it had when the session began,
+  // reconstructed from the session's own edit calls.
+  routes.post(
+    "/projects/:projectId/sessions/:sessionId/files/diff",
+    async (c) => {
+      try {
+        const resolved = await resolveDisplaySession(
+          deps,
+          c.req.param("projectId"),
+          c.req.param("sessionId"),
+          false,
+        );
+        let body: { path?: unknown; fullContext?: unknown; branchId?: unknown };
+        try {
+          body = await c.req.json();
+        } catch {
+          throw new SessionDisplayRouteError(
+            400,
+            "SESSION_FILE_DIFF_INVALID_BODY",
+            "Invalid JSON body",
+          );
+        }
+        const path = typeof body.path === "string" ? body.path.trim() : "";
+        if (!path || path.startsWith("/") || path.split("/").includes("..")) {
+          throw new SessionDisplayRouteError(
+            400,
+            "SESSION_FILE_DIFF_INVALID_PATH",
+            "path must be a project-relative file path",
+          );
+        }
+        const branchId =
+          typeof body.branchId === "string" ? body.branchId : undefined;
+        const ops = await readSessionFileEdits(resolved, branchId, path);
+        if (!ops || ops.length === 0) {
+          throw new SessionDisplayRouteError(
+            404,
+            "SESSION_FILE_DIFF_NO_EDITS",
+            "This session recorded no edits for that file",
+          );
+        }
+        const current = await readWorktreeFile(resolved.project.path, path);
+        const baseline = reconstructSessionBaseline(current, ops);
+        const augment = await computeEditAugment(
+          "session-file-diff",
+          {
+            file_path: path,
+            old_string: baseline.content,
+            new_string: current,
+          },
+          body.fullContext === true ? 999_999 : 3,
+        );
+        return c.json({
+          path,
+          exact: baseline.exact,
+          diffHtml: augment.diffHtml,
+          structuredPatch: augment.structuredPatch,
+        });
       } catch (error) {
         return displayErrorResponse(c, error);
       }
@@ -1059,6 +1150,135 @@ function selectDisplayTurns(
     firstTurnId: turns.find((turn) => turn.question)?.id,
   };
 }
+
+const SESSION_FILE_INDEX_MAX_MESSAGES = 20_000;
+const SESSION_FILE_INDEX_CACHE_LIMIT = 32;
+
+interface CachedSessionFileIndex {
+  stamp: string;
+  index: SessionFileActivityIndex;
+}
+
+const sessionFileIndexCache = new Map<string, CachedSessionFileIndex>();
+
+/** Cheap change token so repeated inspector opens do not re-scan the session. */
+async function sessionFileIndexStamp(
+  resolved: ResolvedDisplaySession,
+): Promise<string> {
+  let stats = await resolved.source.reader.getSessionFileStats?.(
+    resolved.sessionId,
+  );
+  if (!stats) {
+    const file = await resolved.source.reader.getSessionFilePath?.(
+      resolved.sessionId,
+    );
+    if (file) {
+      try {
+        const fileStat = await stat(file);
+        stats = { mtime: fileStat.mtimeMs, size: fileStat.size };
+      } catch {}
+    }
+  }
+  return JSON.stringify([
+    stats?.mtime ?? resolved.summary.updatedAt,
+    stats?.size ?? resolved.summary.messageCount,
+  ]);
+}
+
+async function readSessionFileIndex(
+  resolved: ResolvedDisplaySession,
+  branchId: string | undefined,
+): Promise<SessionFileActivityIndex> {
+  const cacheKey = `${resolved.project.id}:${resolved.sessionId}:${branchId ?? ""}`;
+  const stamp = await sessionFileIndexStamp(resolved);
+  const cached = sessionFileIndexCache.get(cacheKey);
+  if (cached && cached.stamp === stamp) return cached.index;
+  return await scanSessionFileIndex(resolved, branchId, cacheKey, stamp);
+}
+
+async function scanSessionFileIndex(
+  resolved: ResolvedDisplaySession,
+  branchId: string | undefined,
+  cacheKey: string,
+  stamp: string,
+): Promise<SessionFileActivityIndex> {
+  const session = await loadSessionForFileIndex(resolved, branchId);
+  const { files, truncated } = buildSessionFileActivity(session.messages, {
+    projectPath: resolved.project.path,
+  });
+  const index: SessionFileActivityIndex = {
+    projectId: resolved.project.id,
+    sessionId: resolved.sessionId,
+    files,
+    truncated: truncated || session.hasOlderMessages,
+    generatedAt: new Date().toISOString(),
+  };
+
+  if (sessionFileIndexCache.size >= SESSION_FILE_INDEX_CACHE_LIMIT) {
+    const oldest = sessionFileIndexCache.keys().next().value;
+    if (oldest) sessionFileIndexCache.delete(oldest);
+  }
+  sessionFileIndexCache.set(cacheKey, { stamp, index });
+  return index;
+}
+
+async function loadSessionForFileIndex(
+  resolved: ResolvedDisplaySession,
+  branchId: string | undefined,
+): Promise<{ messages: Message[]; hasOlderMessages: boolean }> {
+  const loaded = await resolved.source.reader.getSession(
+    resolved.sessionId,
+    resolved.project.id,
+    undefined,
+    {
+      branchId,
+      maxMessages: SESSION_FILE_INDEX_MAX_MESSAGES,
+      includeOrphans: false,
+      deferMedia: true,
+      deferThinking: true,
+    },
+  );
+  if (!loaded) throw sessionNotFoundError();
+  const session = normalizeSession(loaded, {
+    deferMedia: true,
+    deferThinking: true,
+  });
+  return {
+    messages: session.messages,
+    hasOlderMessages: loaded.pagination?.hasOlderMessages === true,
+  };
+}
+
+/** Ordered edit operations this session applied to one file. */
+async function readSessionFileEdits(
+  resolved: ResolvedDisplaySession,
+  branchId: string | undefined,
+  path: string,
+): Promise<FileEditOp[] | undefined> {
+  const session = await loadSessionForFileIndex(resolved, branchId);
+  const edits = collectSessionFileEdits(session.messages, {
+    resolvePath: (rawPath) =>
+      normalizeSessionFilePath(rawPath, resolved.project.path)?.path ?? null,
+  });
+  return edits.get(path);
+}
+
+/** Current worktree content, or empty when the session deleted the file. */
+async function readWorktreeFile(
+  projectPath: string,
+  path: string,
+): Promise<string> {
+  try {
+    const target = join(projectPath, path);
+    const info = await stat(target);
+    if (!info.isFile() || info.size > SESSION_FILE_DIFF_MAX_BYTES) return "";
+    return await readFile(target, "utf-8");
+  } catch {
+    return "";
+  }
+}
+
+const SESSION_FILE_DIFF_MAX_BYTES = 2 * 1024 * 1024;
 
 async function readQuestionPage(
   deps: SessionDisplayRoutesDeps,

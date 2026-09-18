@@ -1,8 +1,14 @@
-import type { MarkdownAugment, SessionQuestion } from "@yep-anywhere/shared";
+import type {
+  MarkdownAugment,
+  SessionFileActivity,
+  SessionFileActivityKind,
+  SessionQuestion,
+} from "@yep-anywhere/shared";
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useGitStatus } from "../hooks/useGitStatus";
+import { useSessionFileIndex } from "../hooks/useSessionFileIndex";
 import { useI18n } from "../i18n";
 import { formatSmartTime } from "../lib/datetime";
 import {
@@ -23,7 +29,9 @@ import type {
   RenderItem,
   ToolCallItem,
 } from "../types/renderItems";
+import { FileViewerModal } from "./FilePathLink";
 import { ProviderBadge } from "./ProviderBadge";
+import { SessionFileDiffPanel } from "./SessionFileDiffPanel";
 import { CodexNativeGoalBlock } from "./blocks/codex/CodexNativeGoalBlock";
 import {
   type ChecklistItem,
@@ -32,7 +40,7 @@ import {
 
 type InspectorPresentation = "sidebar" | "drawer";
 type InspectorTab = "questions" | "files" | "checks" | "git";
-type FileActivityKind = "modified" | "read" | "searched" | "other";
+type FileActivityKind = SessionFileActivityKind;
 type CheckStatus = "passed" | "failed" | "running" | "pending";
 type CodexMessagePhase = "commentary" | "final_answer";
 type TFunction = ReturnType<typeof useI18n>["t"];
@@ -68,15 +76,6 @@ interface QuestionItem {
   timestamp?: string;
   clientUserMessageId?: string;
   codexCorrelationKey?: string;
-}
-
-interface FileActivity {
-  path: string;
-  kind: FileActivityKind;
-  tools: Set<string>;
-  count: number;
-  messageId: string;
-  lastIndex: number;
 }
 
 interface CheckItem {
@@ -185,7 +184,7 @@ export function SessionInspector({
     () => mergeQuestionItems(userQuestions, messageQuestions),
     [messageQuestions, userQuestions],
   );
-  const fileActivities = useMemo(
+  const fileActivitiesFallback = useMemo(
     () => buildFileActivities(renderItems),
     [renderItems],
   );
@@ -207,6 +206,20 @@ export function SessionInspector({
     [isCodexProvider, messages],
   );
   const legacyDetailsDeferred = !hasLegacyDetails && processState === "in-turn";
+
+  // Server-derived index covers the whole session, including files touched by
+  // turns the client never paged in and writes performed via shell commands.
+  const { index: fileIndex, loading: fileIndexLoading } = useSessionFileIndex(
+    projectId,
+    sessionId,
+    {
+      enabled: isOpen && activeTab === "files",
+      revision: `${messages.length}:${status}`,
+    },
+  );
+  const fileActivities = fileIndex?.files ?? fileActivitiesFallback;
+  const fileIndexPending =
+    !fileIndex && fileIndexLoading && fileActivitiesFallback.length === 0;
 
   useEffect(() => {
     if (
@@ -481,8 +494,9 @@ export function SessionInspector({
             title={t("sessionInspectorFiles")}
             count={fileActivities.length}
           >
-            {(legacyDetailsLoading || legacyDetailsDeferred) &&
-            !hasLegacyDetails ? (
+            {!fileIndex &&
+            !hasLegacyDetails &&
+            (legacyDetailsLoading || legacyDetailsDeferred) ? (
               <EmptyState
                 text={t(
                   legacyDetailsDeferred
@@ -491,32 +505,16 @@ export function SessionInspector({
                 )}
               />
             ) : fileActivities.length > 0 ? (
-              <ul className="session-inspector-list">
-                {fileActivities.slice(0, 10).map((activity) => (
-                  <li key={activity.path}>
-                    <button
-                      type="button"
-                      className="session-inspector-row"
-                      onClick={() => handleSelect(activity.messageId)}
-                      title={activity.path}
-                    >
-                      <span
-                        className={`session-inspector-file-dot kind-${activity.kind}`}
-                      />
-                      <span className="session-inspector-row-main">
-                        <span className="session-inspector-row-title">
-                          {shortPath(activity.path)}
-                        </span>
-                        <span className="session-inspector-row-meta">
-                          {getFileKindLabel(t, activity.kind)} -{" "}
-                          {[...activity.tools].slice(0, 3).join(", ")}
-                          {activity.count > 1 ? ` - ${activity.count}` : ""}
-                        </span>
-                      </span>
-                    </button>
-                  </li>
-                ))}
-              </ul>
+              <InspectorFilesTab
+                activities={fileActivities}
+                projectId={projectId}
+                sessionId={sessionId}
+                truncated={fileIndex?.truncated === true}
+                onSelectMessage={handleSelect}
+                t={t}
+              />
+            ) : fileIndexPending ? (
+              <EmptyState text={t("sessionInspectorLoadingDetails")} />
             ) : (
               <EmptyState text={t("sessionInspectorNoFiles")} />
             )}
@@ -710,6 +708,186 @@ function InspectorSection({
 
 function EmptyState({ text }: { text: string }) {
   return <div className="session-inspector-empty">{text}</div>;
+}
+
+const FILE_GROUP_ORDER: FileActivityKind[] = [
+  "modified",
+  "read",
+  "searched",
+  "other",
+];
+const FILE_GROUP_PAGE = 25;
+
+/**
+ * Files touched by the session, grouped by what happened to them.
+ *
+ * Rows open the file itself (the point of the panel); the secondary action
+ * jumps back to the message that touched it.
+ */
+function InspectorFilesTab({
+  activities,
+  projectId,
+  sessionId,
+  truncated,
+  onSelectMessage,
+  t,
+}: {
+  activities: SessionFileActivity[];
+  projectId: string;
+  sessionId: string;
+  truncated: boolean;
+  onSelectMessage: (messageId: string) => void;
+  t: TFunction;
+}) {
+  const [openFile, setOpenFile] = useState<{
+    path: string;
+    mode: "diff" | "file";
+  } | null>(null);
+  const [expanded, setExpanded] = useState<Record<string, boolean>>({});
+
+  const groups = useMemo(() => {
+    const byKind = new Map<FileActivityKind, SessionFileActivity[]>();
+    for (const activity of activities) {
+      const bucket = byKind.get(activity.kind);
+      if (bucket) bucket.push(activity);
+      else byKind.set(activity.kind, [activity]);
+    }
+    return FILE_GROUP_ORDER.flatMap((kind) => {
+      const items = byKind.get(kind);
+      return items && items.length > 0 ? [{ kind, items }] : [];
+    });
+  }, [activities]);
+
+  return (
+    <>
+      {groups.map(({ kind, items }) => {
+        const isExpanded = expanded[kind] === true;
+        const visible = isExpanded ? items : items.slice(0, FILE_GROUP_PAGE);
+        return (
+          <div className="session-inspector-file-group" key={kind}>
+            <div className="session-inspector-file-group-title">
+              {getFileKindLabel(t, kind)}
+              <span className="session-inspector-file-group-count">
+                {items.length}
+              </span>
+            </div>
+            <ul className="session-inspector-list">
+              {visible.map((activity) => (
+                <li className="session-inspector-file-row" key={activity.path}>
+                  <button
+                    type="button"
+                    className="session-inspector-row"
+                    onClick={() =>
+                      setOpenFile({
+                        path: activity.path,
+                        // Only files with a measurable delta have a diff to show.
+                        mode: hasDelta(activity) ? "diff" : "file",
+                      })
+                    }
+                    disabled={activity.outsideProject}
+                    title={activity.path}
+                  >
+                    <span
+                      className={`session-inspector-file-dot kind-${activity.kind}`}
+                    />
+                    <span className="session-inspector-row-main">
+                      <span className="session-inspector-row-title">
+                        {shortPath(activity.path)}
+                      </span>
+                      <span className="session-inspector-row-meta">
+                        {activity.tools.slice(0, 3).join(", ")}
+                        {activity.count > 1 ? ` - ${activity.count}` : ""}
+                        {activity.confidence === "low"
+                          ? ` - ${t("sessionInspectorFileMaybe")}`
+                          : ""}
+                      </span>
+                    </span>
+                    {hasDelta(activity) ? (
+                      <span className="session-inspector-file-delta">
+                        {activity.additions ? (
+                          <span className="git-lines-added">
+                            +{activity.additions}
+                          </span>
+                        ) : null}
+                        {activity.deletions ? (
+                          <span className="git-lines-deleted">
+                            -{activity.deletions}
+                          </span>
+                        ) : null}
+                      </span>
+                    ) : null}
+                  </button>
+                  <button
+                    type="button"
+                    className="session-inspector-file-jump"
+                    onClick={() => onSelectMessage(activity.messageId)}
+                    title={t("sessionInspectorJumpToMessage")}
+                    aria-label={t("sessionInspectorJumpToMessage")}
+                  >
+                    <JumpToMessageIcon />
+                  </button>
+                </li>
+              ))}
+            </ul>
+            {items.length > visible.length ? (
+              <button
+                type="button"
+                className="session-inspector-file-more"
+                onClick={() =>
+                  setExpanded((prev) => ({ ...prev, [kind]: true }))
+                }
+              >
+                {t("sessionInspectorShowAll")} ({items.length})
+              </button>
+            ) : null}
+          </div>
+        );
+      })}
+      {truncated ? (
+        <div className="session-inspector-file-truncated">
+          {t("sessionInspectorFilesTruncated")}
+        </div>
+      ) : null}
+      {openFile?.mode === "diff" ? (
+        <SessionFileDiffPanel
+          projectId={projectId}
+          sessionId={sessionId}
+          filePath={openFile.path}
+          onClose={() => setOpenFile(null)}
+          onOpenFile={() => setOpenFile({ path: openFile.path, mode: "file" })}
+        />
+      ) : openFile ? (
+        <FileViewerModal
+          projectId={projectId}
+          filePath={openFile.path}
+          onClose={() => setOpenFile(null)}
+        />
+      ) : null}
+    </>
+  );
+}
+
+function hasDelta(activity: SessionFileActivity): boolean {
+  return (activity.additions ?? 0) > 0 || (activity.deletions ?? 0) > 0;
+}
+
+function JumpToMessageIcon() {
+  return (
+    <svg
+      width="14"
+      height="14"
+      viewBox="0 0 16 16"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.5"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+    >
+      <path d="M14 3v4a3 3 0 0 1-3 3H3" />
+      <path d="m6 7-3 3 3 3" />
+    </svg>
+  );
 }
 
 function InspectorPlanProgress({
@@ -1049,8 +1227,11 @@ function getCodexMessagePhase(value: unknown): CodexMessagePhase | null {
   return value === "commentary" || value === "final_answer" ? value : null;
 }
 
-function buildFileActivities(items: RenderItem[]): FileActivity[] {
-  const grouped = new Map<string, FileActivity>();
+function buildFileActivities(items: RenderItem[]): SessionFileActivity[] {
+  const grouped = new Map<
+    string,
+    { activity: SessionFileActivity; lastIndex: number }
+  >();
 
   items.forEach((item, index) => {
     if (item.type !== "tool_call") return;
@@ -1064,27 +1245,39 @@ function buildFileActivities(items: RenderItem[]): FileActivity[] {
     for (const path of paths) {
       const existing = grouped.get(path);
       if (existing) {
-        existing.count += 1;
-        existing.tools.add(item.toolName);
+        existing.activity.count += 1;
+        if (!existing.activity.tools.includes(item.toolName)) {
+          existing.activity.tools.push(item.toolName);
+        }
         if (index >= existing.lastIndex) {
-          existing.kind = prioritizeFileKind(existing.kind, kind);
-          existing.messageId = messageId;
+          existing.activity.kind = prioritizeFileKind(
+            existing.activity.kind,
+            kind,
+          );
+          existing.activity.messageId = messageId;
           existing.lastIndex = index;
         }
       } else {
         grouped.set(path, {
-          path,
-          kind,
-          tools: new Set([item.toolName]),
-          count: 1,
-          messageId,
           lastIndex: index,
+          activity: {
+            path,
+            outsideProject: false,
+            kind,
+            tools: [item.toolName],
+            count: 1,
+            source: "tool",
+            confidence: "high",
+            messageId,
+          },
         });
       }
     }
   });
 
-  return [...grouped.values()].sort((a, b) => b.lastIndex - a.lastIndex);
+  return [...grouped.values()]
+    .sort((a, b) => b.lastIndex - a.lastIndex)
+    .map((entry) => entry.activity);
 }
 
 function buildCheckItems(items: RenderItem[]): CheckItem[] {
