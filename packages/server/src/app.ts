@@ -856,11 +856,16 @@ export function createApp(options: AppOptions): AppResult {
 
   // Bridge clients observe the shared Codex upstream and
   // replay lifecycle changes onto the EventBus. Teach them which sessions the
-  // Supervisor owns so they stay silent about ownership for owned sessions;
-  // otherwise a bridge poll racing the Supervisor's own ownership event flips
+  // agent runtime owns so they stay silent about ownership for owned sessions;
+  // otherwise a bridge poll racing the runtime's own ownership event flips
   // the client into a transient "external session" banner during resume.
-  const bridgeOwnershipResolver = (sessionId: string): boolean =>
-    Boolean(supervisor.getProcessForSession(sessionId));
+  //
+  // This must go through runtimeController, not the local Supervisor: with an
+  // external runtime the processes live in another process and the Supervisor
+  // created above owns nothing, so asking it would report every runtime-owned
+  // session as external.
+  const bridgeOwnershipResolver = async (sessionId: string): Promise<boolean> =>
+    Boolean(await runtimeController.getProcessForSession(sessionId));
   options.codexBridgeService?.setOwnershipResolver?.(bridgeOwnershipResolver);
 
   // Create external session tracker if eventBus is available

@@ -131,12 +131,16 @@ export abstract class BridgeHttpClient<
   private pendingChangeSignal: BridgeChangeSignal | null = null;
   protected knownSessions = new Map<string, TState>();
   /**
-   * Reports whether a session is currently owned by the local Supervisor.
-   * When it returns true, ownership is governed solely by the Supervisor and
-   * this client must not emit external/none for that session (see
+   * Reports whether a session is currently owned by this deployment's agent
+   * runtime. When it returns true, ownership is governed solely by the runtime
+   * and this client must not emit external/none for that session (see
    * setOwnershipResolver / emitChanges).
+   *
+   * May be async: with an external runtime the answer lives in another
+   * process. It is only consulted when a session's active flag flips or when a
+   * known row disappears, so the round trip is rare rather than per-poll.
    */
-  private ownershipResolver?: (sessionId: string) => boolean;
+  private ownershipResolver?: (sessionId: string) => boolean | Promise<boolean>;
 
   constructor(options: BridgeHttpClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -146,16 +150,28 @@ export abstract class BridgeHttpClient<
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
   }
 
-  setOwnershipResolver(resolver: (sessionId: string) => boolean): void {
+  setOwnershipResolver(
+    resolver: (sessionId: string) => boolean | Promise<boolean>,
+  ): void {
     this.ownershipResolver = resolver;
   }
 
   /**
-   * True when the local Supervisor owns the session, i.e. ownership is `self`
-   * and this bridge client must stay silent about ownership for it.
+   * True when this deployment's agent runtime owns the session, i.e. ownership
+   * is `self` and this bridge client must stay silent about ownership for it.
+   *
+   * A resolver that throws (external runtime unreachable) is treated as "not
+   * owned": that is the pre-existing answer for every session the runtime does
+   * not hold, and reporting a genuinely external session is recoverable on the
+   * next poll, whereas throwing here would abort the whole poll cycle.
    */
-  private isOwnedBySupervisor(sessionId: string): boolean {
-    return this.ownershipResolver?.(sessionId) ?? false;
+  private async isOwnedByRuntime(sessionId: string): Promise<boolean> {
+    if (!this.ownershipResolver) return false;
+    try {
+      return await this.ownershipResolver(sessionId);
+    } catch {
+      return false;
+    }
   }
 
   /** Fallback status when the sidecar is unreachable. */
@@ -491,14 +507,14 @@ export abstract class BridgeHttpClient<
 
       for (const entry of entries) {
         nextIds.add(entry.id);
-        this.emitChanges(entry);
+        await this.emitChanges(entry);
       }
 
       // Only a startup/interval request is a complete snapshot. Targeted SSE
       // refreshes intentionally omit the other known rows.
       if (!changeSignal) {
         for (const sessionId of Array.from(this.knownSessions.keys())) {
-          if (!nextIds.has(sessionId)) this.removeKnownSession(sessionId);
+          if (!nextIds.has(sessionId)) await this.removeKnownSession(sessionId);
         }
       }
     } finally {
@@ -510,11 +526,18 @@ export abstract class BridgeHttpClient<
     }
   }
 
-  private emitChanges(entry: BridgePollEntry<TState>): void {
+  private async emitChanges(entry: BridgePollEntry<TState>): Promise<void> {
     if (!this.eventBus) return;
 
     const { state } = entry;
     const previous = this.knownSessions.get(entry.id);
+    const activeChanged = !previous || previous.active !== state.active;
+    // Resolved up front so the emit sequence below stays uninterrupted: an
+    // await between two emits would let a queued poll interleave events for
+    // the same session.
+    const ownedByRuntime = activeChanged
+      ? await this.isOwnedByRuntime(entry.id)
+      : false;
     this.knownSessions.set(entry.id, state);
 
     const timestamp = new Date().toISOString();
@@ -526,14 +549,14 @@ export abstract class BridgeHttpClient<
       });
     }
 
-    if (!previous || previous.active !== state.active) {
-      // Ownership of Supervisor-owned sessions is governed solely by the
-      // Supervisor (owner: "self"). Emitting external/none here would race the
-      // Supervisor's ownership events and flip the client into a transient
-      // "external session" banner while an owned bridge turn drives the
-      // shared upstream server. Only report ownership for sessions we do not
-      // own; this mirrors the REST arbitration in deriveSessionRuntime.
-      if (!this.isOwnedBySupervisor(entry.id)) {
+    if (activeChanged) {
+      // Ownership of runtime-owned sessions is governed solely by the runtime
+      // (owner: "self"). Emitting external/none here would race the runtime's
+      // own ownership events and flip the client into a transient "external
+      // session" banner while an owned bridge turn drives the shared upstream
+      // server. Only report ownership for sessions we do not own; this mirrors
+      // the REST arbitration in deriveSessionRuntime.
+      if (!ownedByRuntime) {
         this.eventBus.emit({
           type: "session-status-changed",
           sessionId: entry.id,
@@ -595,13 +618,13 @@ export abstract class BridgeHttpClient<
   }
 
   /** Remove one targeted row without treating omitted known rows as deleted. */
-  protected removeKnownSession(sessionId: string): void {
+  protected async removeKnownSession(sessionId: string): Promise<void> {
     const previous = this.knownSessions.get(sessionId);
     if (!previous) return;
     if (
       previous.active &&
-      !this.isOwnedBySupervisor(sessionId) &&
-      this.eventBus
+      this.eventBus &&
+      !(await this.isOwnedByRuntime(sessionId))
     ) {
       this.eventBus.emit({
         type: "session-status-changed",

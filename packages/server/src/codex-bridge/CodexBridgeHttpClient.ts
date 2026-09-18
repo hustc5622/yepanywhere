@@ -173,7 +173,7 @@ export class CodexBridgeHttpClient
       );
       if (!targeted) return this.knownPollEntries();
       for (const sessionId of targeted.tombstones) {
-        this.removeKnownSession(sessionId);
+        await this.removeKnownSession(sessionId);
       }
       this.lastRevision = changeSignal.revision;
       // The sidecar snapshot ETag is defined by this same monotonically
