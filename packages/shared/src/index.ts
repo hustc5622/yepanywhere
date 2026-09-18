@@ -833,3 +833,10 @@ export type {
   SessionDisplayToolOutput,
 } from "./session-display.js";
 export * from "./feishu-user-auth.js";
+export {
+  extractBashCommandFromInput,
+  getShellLauncherPrefixLength,
+  isShellLauncherWrappedCommand,
+  tokenizeShellCommand,
+  unwrapShellLauncherCommand,
+} from "./shell-command.js";

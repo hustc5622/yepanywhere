@@ -1,3 +1,9 @@
+import {
+  extractBashCommandFromInput,
+  tokenizeShellCommand,
+  unwrapShellLauncherCommand,
+} from "@yep-anywhere/shared";
+
 const CODEX_TOOL_NAME_ALIASES: Record<string, string> = {
   exec: "CodexExec",
   shell_command: "Bash",
@@ -55,8 +61,6 @@ export interface CodexUpdatePlanInput {
   explanation?: string;
   plan: CodexUpdatePlanStep[];
 }
-
-const SHELL_EXECUTABLES = new Set(["bash", "sh", "zsh", "dash"]);
 
 /**
  * Parse the data-only JavaScript literal subset emitted by Codex code mode.
@@ -571,7 +575,7 @@ export function normalizeCodexToolInvocation(
     normalizedInput = normalized;
   }
 
-  const command = extractBashCommand(normalizedInput);
+  const command = extractBashCommandFromInput(normalizedInput);
   if (!command) {
     return { toolName: "Bash", input: normalizedInput };
   }
@@ -810,122 +814,6 @@ export function normalizeCodexCommandExecutionOutput(
   }
 
   return { content, structured, isError };
-}
-
-function extractBashCommand(input: unknown): string {
-  if (!isRecord(input)) return "";
-  if (typeof input.command === "string" && input.command.trim()) {
-    return input.command.trim();
-  }
-  if (typeof input.cmd === "string" && input.cmd.trim()) {
-    return input.cmd.trim();
-  }
-  return "";
-}
-
-function tokenizeShellCommand(command: string): string[] {
-  const tokens: string[] = [];
-  let current = "";
-  let quote: "'" | '"' | null = null;
-  let escaping = false;
-
-  for (let i = 0; i < command.length; i++) {
-    const char = command[i];
-    if (!char) continue;
-
-    if (escaping) {
-      current += char;
-      escaping = false;
-      continue;
-    }
-
-    if (char === "\\") {
-      escaping = true;
-      continue;
-    }
-
-    if (quote) {
-      if (char === quote) {
-        quote = null;
-      } else {
-        current += char;
-      }
-      continue;
-    }
-
-    if (char === "'" || char === '"') {
-      quote = char;
-      continue;
-    }
-
-    if (/\s/.test(char)) {
-      if (current.length > 0) {
-        tokens.push(current);
-        current = "";
-      }
-      continue;
-    }
-
-    current += char;
-  }
-
-  if (current.length > 0) {
-    tokens.push(current);
-  }
-
-  return tokens;
-}
-
-function getExecutableName(token: string): string {
-  const normalized = token.replace(/\\/g, "/");
-  return (normalized.split("/").pop() || token).toLowerCase();
-}
-
-function isShellExecutable(token: string): boolean {
-  return SHELL_EXECUTABLES.has(getExecutableName(token));
-}
-
-function getShellLauncherPrefixLength(tokens: string[]): number {
-  if (tokens.length < 3) {
-    return 0;
-  }
-
-  const first = tokens[0] || "";
-  const second = tokens[1] || "";
-  const third = tokens[2] || "";
-
-  // /usr/bin/env bash -lc "command"
-  if (
-    getExecutableName(first) === "env" &&
-    isShellExecutable(second) &&
-    third === "-lc" &&
-    tokens.length >= 4
-  ) {
-    return 3;
-  }
-
-  // /bin/bash -lc "command"
-  if (isShellExecutable(first) && second === "-lc" && tokens.length >= 3) {
-    return 2;
-  }
-
-  return 0;
-}
-
-function unwrapShellLauncherCommand(command: string): string {
-  let normalized = command.trim();
-
-  // Allow nested wrappers, e.g. `bash -lc "env bash -lc \"...\""`
-  for (let i = 0; i < 3; i++) {
-    const tokens = tokenizeShellCommand(normalized);
-    const launcherPrefixLength = getShellLauncherPrefixLength(tokens);
-    if (launcherPrefixLength === 0 || tokens.length <= launcherPrefixLength) {
-      break;
-    }
-    normalized = tokens.slice(launcherPrefixLength).join(" ").trim();
-  }
-
-  return normalized;
 }
 
 function parseLineRangeToken(
