@@ -1,0 +1,111 @@
+name: Architecture boundary pilot
+on:
+  push:
+    branches: [audit/architecture-ae69e182]
+    paths:
+      - '.github/workflows/architecture-pilot.yml'
+      - '.github/audit/dependency-boundaries.test.ts.fixture'
+permissions:
+  contents: write
+jobs:
+  validate-pilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      BASE_SHA: ae69e1822c2797a4c8ce8578bd6c3bfb00a2ee24
+      CANDIDATE_BRANCH: refactor/audit-session-boundary-ae69e182
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prepare immutable baseline and new guard
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/pilot-evidence"
+          cp .github/audit/dependency-boundaries.test.ts.fixture "$RUNNER_TEMP/guard.ts"
+          git checkout --detach "$BASE_SHA"
+          mkdir -p packages/server/test/architecture
+          cp "$RUNNER_TEMP/guard.ts" packages/server/test/architecture/dependency-boundaries.test.ts
+          printf 'base=%s\naudit_workflow_commit=%s\n' "$BASE_SHA" "$GITHUB_SHA" > "$RUNNER_TEMP/pilot-evidence/metadata.txt"
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Install frozen dependencies
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee "$RUNNER_TEMP/pilot-evidence/install.log"
+      - name: Prove guard rejects the original dependency direction
+        shell: bash
+        run: |
+          set +e
+          pnpm --filter @yep-anywhere/server test test/architecture/dependency-boundaries.test.ts > "$RUNNER_TEMP/pilot-evidence/negative-control.log" 2>&1
+          code=$?
+          set -e
+          cat "$RUNNER_TEMP/pilot-evidence/negative-control.log"
+          test "$code" -ne 0
+          grep -q 'services-do-not-import-routes' "$RUNNER_TEMP/pilot-evidence/negative-control.log"
+          grep -q 'SessionCommandService.ts' "$RUNNER_TEMP/pilot-evidence/negative-control.log"
+          printf 'negative_control=expected_failure\n' >> "$RUNNER_TEMP/pilot-evidence/metadata.txt"
+      - name: Apply minimal helper relocation
+        shell: bash
+        run: |
+          set -euo pipefail
+          git mv packages/server/src/routes/session-model.ts packages/server/src/sessions/session-model.ts
+          git mv packages/server/test/routes/session-model.test.ts packages/server/test/sessions/session-model.test.ts
+          python - <<'PY'
+          from pathlib import Path
+          changes = {
+              'packages/server/src/services/SessionCommandService.ts': ('../routes/session-model.js', '../sessions/session-model.js'),
+              'packages/server/test/sessions/session-model.test.ts': ('../../src/routes/session-model.js', '../../src/sessions/session-model.js'),
+          }
+          for name, (old, new) in changes.items():
+              path = Path(name)
+              text = path.read_text()
+              assert text.count(old) == 1, name
+              path.write_text(text.replace(old, new))
+          PY
+          pnpm exec biome check --write packages/server/src/services/SessionCommandService.ts packages/server/src/sessions/session-model.ts packages/server/test/sessions/session-model.test.ts packages/server/test/architecture/dependency-boundaries.test.ts
+      - name: Lint candidate
+        run: |
+          set -o pipefail
+          pnpm lint 2>&1 | tee "$RUNNER_TEMP/pilot-evidence/lint.log"
+          echo 'lint=success' >> "$RUNNER_TEMP/pilot-evidence/metadata.txt"
+      - name: Typecheck candidate
+        run: |
+          set -o pipefail
+          pnpm typecheck 2>&1 | tee "$RUNNER_TEMP/pilot-evidence/typecheck.log"
+          echo 'typecheck=success' >> "$RUNNER_TEMP/pilot-evidence/metadata.txt"
+      - name: Test candidate
+        run: |
+          set -o pipefail
+          timeout 600s pnpm test 2>&1 | tee "$RUNNER_TEMP/pilot-evidence/test.log"
+          echo 'tests=success' >> "$RUNNER_TEMP/pilot-evidence/metadata.txt"
+      - name: Publish only the validated candidate to a new branch
+        shell: bash
+        run: |
+          set -euo pipefail
+          git add packages/server/src/services/SessionCommandService.ts packages/server/src/sessions/session-model.ts packages/server/test/sessions/session-model.test.ts packages/server/test/architecture/dependency-boundaries.test.ts
+          git diff --cached --check
+          git diff --cached --stat | tee "$RUNNER_TEMP/pilot-evidence/change-stat.txt"
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'refactor: move session model policy below routes and guard dependency boundaries'
+          git diff --binary "$BASE_SHA" HEAD > "$RUNNER_TEMP/pilot-evidence/session-boundary-pilot.patch"
+          git rev-parse HEAD > "$RUNNER_TEMP/pilot-evidence/CANDIDATE_SHA.txt"
+          if git ls-remote --exit-code --heads origin "$CANDIDATE_BRANCH" >/dev/null 2>&1; then
+            echo 'Refusing to overwrite an existing candidate branch.'
+            exit 1
+          fi
+          git push origin "HEAD:refs/heads/$CANDIDATE_BRANCH"
+          printf 'candidate_branch=%s\nbuild=not-run\nbrowser=not-run\nlive-provider=not-run\nmain=unchanged\n' "$CANDIDATE_BRANCH" >> "$RUNNER_TEMP/pilot-evidence/metadata.txt"
+      - name: Upload pilot evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: architecture-pilot-ae69e182
+          path: ${{ runner.temp }}/pilot-evidence/
+          retention-days: 7
