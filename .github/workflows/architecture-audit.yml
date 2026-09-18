@@ -1,0 +1,94 @@
+name: Architecture audit baseline
+on:
+  push:
+    branches: [audit/architecture-ae69e182]
+    paths: ['.github/workflows/architecture-audit.yml']
+permissions:
+  contents: read
+jobs:
+  baseline:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ae69e1822c2797a4c8ce8578bd6c3bfb00a2ee24
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Archive immutable source and history
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/audit-source" "$RUNNER_TEMP/audit-results"
+          git rev-parse HEAD > "$RUNNER_TEMP/audit-source/BASE_SHA.txt"
+          git archive --format=tar.gz --output="$RUNNER_TEMP/audit-source/source.tar.gz" HEAD
+          git ls-tree -r --long HEAD > "$RUNNER_TEMP/audit-source/tree.txt"
+          git log -300 --date=iso-strict --format='COMMIT %H %ad %s' --numstat > "$RUNNER_TEMP/audit-source/history-300.txt"
+          sha256sum "$RUNNER_TEMP/audit-source/source.tar.gz" > "$RUNNER_TEMP/audit-source/source.sha256"
+      - name: Upload source snapshot
+        uses: actions/upload-artifact@v4
+        with:
+          name: architecture-source-ae69e182
+          path: ${{ runner.temp }}/audit-source/
+          retention-days: 7
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 9.15.1
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: pnpm
+      - name: Record environment
+        run: |
+          { node --version; pnpm --version; uname -a; } > "$RUNNER_TEMP/audit-results/environment.txt"
+      - name: Install fixed dependencies
+        id: install
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm install --frozen-lockfile 2>&1 | tee "$RUNNER_TEMP/audit-results/install.log"
+      - name: Archive TypeScript parser for offline audit
+        if: steps.install.outcome == 'success'
+        run: tar -chzf "$RUNNER_TEMP/audit-results/typescript-parser.tar.gz" node_modules/typescript
+      - name: Lint baseline
+        id: lint
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm lint 2>&1 | tee "$RUNNER_TEMP/audit-results/lint.log"
+      - name: Typecheck baseline
+        id: typecheck
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          pnpm typecheck 2>&1 | tee "$RUNNER_TEMP/audit-results/typecheck.log"
+      - name: Unit and integration tests
+        id: tests
+        if: steps.install.outcome == 'success'
+        continue-on-error: true
+        shell: bash
+        run: |
+          set -o pipefail
+          timeout 600s pnpm test 2>&1 | tee "$RUNNER_TEMP/audit-results/test.log"
+      - name: Record outcomes
+        if: always()
+        env:
+          INSTALL: ${{ steps.install.outcome }}
+          LINT: ${{ steps.lint.outcome }}
+          TYPECHECK: ${{ steps.typecheck.outcome }}
+          TESTS: ${{ steps.tests.outcome }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/audit-results"
+          printf 'base=ae69e1822c2797a4c8ce8578bd6c3bfb00a2ee24\ninstall=%s\nlint=%s\ntypecheck=%s\ntests=%s\nbuild=not-run\nbrowser=not-run-in-audit-workflow\nlive-provider=not-run\n' "$INSTALL" "$LINT" "$TYPECHECK" "$TESTS" | tee "$RUNNER_TEMP/audit-results/outcomes.txt"
+      - name: Upload baseline evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: architecture-baseline-ae69e182
+          path: ${{ runner.temp }}/audit-results/
+          retention-days: 7
