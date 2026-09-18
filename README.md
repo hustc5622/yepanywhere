@@ -7,21 +7,21 @@
 </p>
 
 <p align="center">
-  <em>移动优先。端到端加密。开源。</em>
+  <em>移动优先。自托管。开源。</em>
 </p>
 
 <p align="center">
   <a href="https://yepanywhere.com">yepanywhere.com</a>
 </p>
 
-Yep Anywhere 是 Claude Code、Codex、Gemini、Pi、Kimi 和 ZCode 的远程操作界面。它自托管、无需云账号，让智能体继续在你的开发机上运行，你可以从手机上查看进度、处理审批并继续对话。
+Yep Anywhere 是 Codex、Gemini、Pi、Kimi、ZCode（以及兼容保留的 Claude Code）的远程操作界面。它自托管、无需云账号，让智能体继续在你的开发机上运行，你可以从手机上查看进度、处理审批并继续对话。
 
 ## 功能
 
 - **跨工具衔接**：查看并继续 CLI、VS Code 或其他工具里启动的会话。不引入新数据库，直接复用 CLI 的会话持久化
 - **文件上传**：从手机相册直接发送截图、照片、PDF 和代码文件
 - **推送通知**：需要审批时收到提醒，并可在锁屏界面直接响应
-- **远程访问**：通过 Tailscale、局域网 IP 或自己的反向代理访问服务器。可选启用基于 cookie 的认证
+- **远程访问**：通过 Tailscale、局域网 IP 或自己的反向代理访问服务器。可选启用基于 cookie 的认证。传输加密由你的部署方式提供（TLS 反向代理或 Tailscale 等可信隧道）；服务本身的 WebSocket 帧是明文，依赖 HTTP upgrade 层的信任边界
 - **对话分叉/克隆**：从任意消息节点分出新对话，用来探索替代方案
 - **分层收件箱**：需要关注、进行中、最近活动、未读分层展示，少在终端标签页之间来回切换
 - **全局活动流**：跨会话查看所有智能体当前在做什么
@@ -36,12 +36,12 @@ Yep Anywhere 是 Claude Code、Codex、Gemini、Pi、Kimi 和 ZCode 的远程操
 
 | 提供商 | Diff | 审批 | 流式输出 | 说明 |
 |--------|------|------|----------|------|
-| Claude Code | 完整支持 | 支持 | 支持 | 主要提供商，功能支持最完整 |
-| Codex | 完整支持 | 支持 | 支持 | 支持 diff 和审批 |
+| Codex | 完整支持 | 支持 | 支持 | **默认提供商**，支持 diff 和审批 |
 | Gemini | 支持 | 依 provider 模式 | 支持 | 支持 CLI 与 ACP 接入 |
 | Pi | 完整支持 | 支持 | 支持 | 通过原生 RPC 与中性 LLM gateway 接入 |
 | Kimi | 完整支持 | 支持 | 支持 | 通过 ACP 接入 |
 | ZCode | 完整支持 | 支持 | 支持 | 通过 app-server 接入 |
+| Claude Code | 完整支持 | 支持 | 支持 | 仅兼容保留：可读取和继续既有会话，但不参与 provider 自动发现 |
 
 ## 截图
 
