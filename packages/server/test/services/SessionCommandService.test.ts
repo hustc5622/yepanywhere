@@ -182,6 +182,64 @@ describe("SessionCommandService runtime boundary", () => {
     },
   );
 
+  it("keeps the Pi gateway key pinned when a queued message restarts the process", async () => {
+    const projectPath = mkdtempSync(join(tmpdir(), "session-command-pi-key-"));
+    try {
+      const projectId = encodeProjectId(projectPath);
+      const project = {
+        id: projectId,
+        path: projectPath,
+        provider: "pi",
+      } as Project;
+      const metadata = new SessionMetadataService({ dataDir: projectPath });
+      await metadata.initialize();
+      await metadata.setProvider("pi-thread", "pi");
+      await metadata.setLlmGatewayKeyId("pi-thread", "gwkey-pinned");
+      const queueMessage = vi.fn(async () => ({
+        success: true as const,
+        process: { id: "process-pi" },
+        restarted: true,
+      }));
+      const service = new SessionCommandService({
+        runtimeController: {
+          getProcessSnapshotForSession: vi.fn(async () =>
+            processSnapshot({
+              sessionId: "pi-thread",
+              projectPath,
+              provider: "pi",
+            }),
+          ),
+          queueMessage,
+        } as unknown as RuntimeController,
+        scanner: {
+          getOrCreateProject: vi.fn(async () => project),
+        } as unknown as ProjectScanner,
+        readerFactory: () => ({}) as ISessionReader,
+        sessionInteractionService: interactionService(),
+        sessionMetadataService: metadata,
+      });
+
+      // A thinking change on a follow-up restarts the provider process; the
+      // restart must not silently fall back to the environment gateway key.
+      await expect(
+        service.send({
+          projectId,
+          sessionId: "pi-thread",
+          body: { message: "continue", thinking: "on:high" },
+        }),
+      ).resolves.toMatchObject({ ok: true });
+      expect(queueMessage).toHaveBeenCalledWith(
+        expect.objectContaining({
+          modelSettings: expect.objectContaining({
+            llmGatewayKeyId: "gwkey-pinned",
+          }),
+        }),
+      );
+    } finally {
+      rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+
   it.each([
     ["start", "priority"],
     ["start", "default"],

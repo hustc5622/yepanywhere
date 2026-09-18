@@ -1186,6 +1186,23 @@ export class PiProvider implements AgentProvider {
               channel.id,
               options.llmGatewayKeyId,
             );
+            if (
+              options.llmGatewayKeyId &&
+              !sessionKey &&
+              !options.llmGatewayKeyId.startsWith("env:")
+            ) {
+              // Silent fallback here means the session starts burning another
+              // credential than the user picked, which only shows up much
+              // later as a quota error on the wrong key. Make it visible.
+              getLogger().warn(
+                {
+                  event: "pi_gateway_key_unresolved",
+                  channelId: channel.id,
+                  llmGatewayKeyId: options.llmGatewayKeyId,
+                },
+                "Pi session key id did not resolve for this channel; using the environment key",
+              );
+            }
             return [[provider.id, sessionKey ?? channel.apiKey]];
           }),
         ),

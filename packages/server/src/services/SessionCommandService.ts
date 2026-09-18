@@ -1275,18 +1275,10 @@ export class SessionCommandService {
               this.deps.sessionMetadataService?.getCodexMcpMode?.(sessionId))
             : undefined,
         codexModelProvider: resumeCodexModelProvider,
-        // Resumes always follow the account recorded when the thread was
-        // created; a client cannot move an existing thread to another account.
-        codexAccountId:
-          providerName === "codex"
-            ? this.deps.sessionMetadataService?.getCodexAccountId?.(sessionId)
-            : undefined,
-        // Same rule for Pi's gateway key: an existing thread keeps running on
-        // the credential it was created with.
-        llmGatewayKeyId:
-          providerName === "pi"
-            ? this.deps.sessionMetadataService?.getLlmGatewayKeyId?.(sessionId)
-            : undefined,
+        // Resumes always follow the account / gateway key recorded when the
+        // thread was created; a client cannot move an existing thread onto
+        // another credential.
+        ...this.threadCredentialSettings(sessionId, providerName),
         codexEventAccountId: input.origin?.codexEventAccountId,
         feishuMcpConfig: input.origin?.feishuMcpConfig,
         llmGatewayConfig,
@@ -1385,6 +1377,11 @@ export class SessionCommandService {
           llmGatewayConfig,
         );
       }
+      await this.inheritThreadCredentials(
+        sessionId,
+        actualSessionId,
+        providerName,
+      );
       if (
         providerName === "codex" &&
         effectiveCodexForkExcludedTurns !== undefined
@@ -1726,6 +1723,10 @@ export class SessionCommandService {
                 sessionId,
               )
             : undefined,
+        // A queued message can still restart the process (thinking/effort or
+        // Feishu MCP changes). That restart goes through the same resume path,
+        // so the pinned credentials have to travel with it.
+        ...this.threadCredentialSettings(sessionId, providerName),
         llmGatewayConfig,
         executor:
           parsedBodyExecutor.executor ??
@@ -2391,6 +2392,57 @@ export class SessionCommandService {
         result.sessionId,
         result.permissionMode,
       );
+    }
+  }
+
+  /**
+   * Credentials a thread is pinned to for its whole life.
+   *
+   * A Codex thread stays on the account it was created with, and a Pi thread
+   * stays on the gateway key it was created with. Every path that can (re)start
+   * a provider process has to pass these along: a restart that omits them does
+   * not fail, it silently falls back to the default account / the channel's
+   * environment key and keeps running on the wrong credential.
+   */
+  private threadCredentialSettings(
+    sessionId: string,
+    provider: ProviderName | undefined,
+  ): { codexAccountId?: string; llmGatewayKeyId?: string } {
+    const metadata = this.deps.sessionMetadataService;
+    return {
+      codexAccountId:
+        provider === "codex"
+          ? metadata?.getCodexAccountId?.(sessionId)
+          : undefined,
+      llmGatewayKeyId:
+        provider === "pi"
+          ? metadata?.getLlmGatewayKeyId?.(sessionId)
+          : undefined,
+    };
+  }
+
+  /**
+   * Copy the pinned credentials onto a session id created by a fork/rewind.
+   *
+   * A native fork mints a new session id; without this the new branch has no
+   * recorded credential and its next resume falls back to the defaults.
+   */
+  private async inheritThreadCredentials(
+    sourceSessionId: string,
+    targetSessionId: string,
+    provider: ProviderName | undefined,
+  ): Promise<void> {
+    const metadata = this.deps.sessionMetadataService;
+    if (!metadata || sourceSessionId === targetSessionId) return;
+    const { codexAccountId, llmGatewayKeyId } = this.threadCredentialSettings(
+      sourceSessionId,
+      provider,
+    );
+    if (codexAccountId) {
+      await metadata.setCodexAccountId?.(targetSessionId, codexAccountId);
+    }
+    if (llmGatewayKeyId) {
+      await metadata.setLlmGatewayKeyId?.(targetSessionId, llmGatewayKeyId);
     }
   }
 
