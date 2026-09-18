@@ -613,6 +613,7 @@ reload_agent() {
   local label="$1"
   local plist="$2"
   local old_pid=""
+  local wait_i
 
   if ! $START_NOW; then
     dim "wrote $plist; active LaunchAgent was not reloaded"
@@ -630,6 +631,24 @@ reload_agent() {
       sleep 0.25
     done
   fi
+  # bootout is asynchronous: launchd may keep the label registered briefly
+  # after the process exits, and bootstrapping in that window fails with
+  # "Bootstrap failed: 5: Input/output error". Wait for the label to unload,
+  # then retry the bootstrap a few times while the bootout settles.
+  for wait_i in $(seq 1 40); do
+    launchctl print "$USER_DOMAIN/$label" >/dev/null 2>&1 || break
+    sleep 0.25
+  done
+  local try_i
+  for try_i in 1 2 3 4 5; do
+    if launchctl bootstrap "$USER_DOMAIN" "$plist" 2>/dev/null; then
+      launchctl enable "$USER_DOMAIN/$label"
+      launchctl kickstart -k "$USER_DOMAIN/$label"
+      return 0
+    fi
+    sleep 0.5
+  done
+  # Final attempt without output suppression so the real error is surfaced.
   launchctl bootstrap "$USER_DOMAIN" "$plist"
   launchctl enable "$USER_DOMAIN/$label"
   launchctl kickstart -k "$USER_DOMAIN/$label"

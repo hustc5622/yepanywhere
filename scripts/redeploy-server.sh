@@ -302,12 +302,42 @@ reload_launchd_label_from_plist() {
   # the plist after the old process has been safely stopped so environment
   # changes written during deploy take effect without a start-stop-start race.
   if launchd_label_loaded "$label"; then
+    local old_pid
+    old_pid="$(launchctl print "$domain/$label" 2>/dev/null |
+      awk '$1 == "pid" && $2 == "=" { print $3; exit }' || true)"
     if ! launchctl bootout "$domain/$label" >/dev/null 2>&1; then
       launchctl bootout "$domain" "$plist" >/dev/null 2>&1 || return 1
+    fi
+    # bootout is asynchronous: launchd keeps tearing the service down (and
+    # reaping its children) after it returns. Bootstrapping in that window
+    # fails with "Bootstrap failed: 5: Input/output error". Wait until the
+    # label is unloaded and the old process is gone before reloading.
+    local wait_i
+    for wait_i in $(seq 1 40); do
+      launchd_label_loaded "$label" || break
+      sleep 0.25
+    done
+    if [[ -n "$old_pid" ]]; then
+      for wait_i in $(seq 1 40); do
+        kill -0 "$old_pid" 2>/dev/null || break
+        sleep 0.25
+      done
     fi
   fi
 
   launchctl enable "$domain/$label" >/dev/null 2>&1 || true
+
+  # Even after the label is unloaded, launchd can transiently return EIO from
+  # bootstrap while the previous bootout is still settling in the domain.
+  # Retry briefly before giving up.
+  local try_i
+  for try_i in 1 2 3 4 5; do
+    if launchctl bootstrap "$domain" "$plist" 2>/dev/null; then
+      return 0
+    fi
+    sleep 0.5
+  done
+  # Final attempt without output suppression so the real error is surfaced.
   launchctl bootstrap "$domain" "$plist"
 }
 
