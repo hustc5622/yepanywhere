@@ -1865,28 +1865,30 @@ export function NewSessionForm({
   // Shared input area with toolbar (textarea + attach/voice on left, send on right)
   const inputArea = (
     <>
-      {hasInlineTokens && (
-        <ComposerTokenHighlight
-          textareaRef={textareaRef}
-          text={displayText}
-          names={pendingFileNames}
-          onTokenClick={handleTokenClick}
+      <div className="new-session-composer">
+        {hasInlineTokens && (
+          <ComposerTokenHighlight
+            textareaRef={textareaRef}
+            text={displayText}
+            names={pendingFileNames}
+            onTokenClick={handleTokenClick}
+          />
+        )}
+        <textarea
+          ref={textareaRef}
+          value={displayText}
+          onChange={(e) => {
+            setInterimTranscript("");
+            setMessage(e.target.value);
+          }}
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+          placeholder={resolvedPlaceholder}
+          disabled={isStarting}
+          rows={rows}
+          className={`new-session-form-textarea${hasInlineTokens ? " has-token-mirror" : ""}`}
         />
-      )}
-      <textarea
-        ref={textareaRef}
-        value={displayText}
-        onChange={(e) => {
-          setInterimTranscript("");
-          setMessage(e.target.value);
-        }}
-        onKeyDown={handleKeyDown}
-        onPaste={handlePaste}
-        placeholder={resolvedPlaceholder}
-        disabled={isStarting}
-        rows={rows}
-        className={`new-session-form-textarea${hasInlineTokens ? " has-token-mirror" : ""}`}
-      />
+      </div>
       <div className="new-session-form-toolbar">
         <div className="new-session-form-toolbar-left">
           <input

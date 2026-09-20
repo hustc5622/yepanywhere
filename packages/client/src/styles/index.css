@@ -1246,6 +1246,17 @@ h2 {
   margin-bottom: 1.5rem;
 }
 
+/* Keep the attachment mirror in the textarea's scrolling coordinate space.
+   A dedicated container also follows layout shifts from account/usage cards. */
+.new-session-composer {
+  position: relative;
+  min-width: 0;
+}
+
+.new-session-composer > textarea {
+  display: block;
+}
+
 .new-session-form-textarea {
   width: 100%;
   padding: 0.75rem;
