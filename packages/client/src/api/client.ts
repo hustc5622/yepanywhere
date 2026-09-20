@@ -451,12 +451,24 @@ export interface CodexUsageBucket {
   planType: string | null;
 }
 
+export interface CodexUsageResetCredit {
+  id: string;
+  status: string;
+  resetType: string;
+  expiresAt?: number | null;
+  title: string | null;
+  description: string | null;
+}
+
 export interface CodexUsageResponse {
   usage: {
     primary: CodexUsageWindow | null;
     secondary: CodexUsageWindow | null;
     planType: string | null;
-    resetCredits: { availableCount: number } | null;
+    resetCredits: {
+      availableCount: number;
+      credits?: CodexUsageResetCredit[] | null;
+    } | null;
     additionalBuckets: CodexUsageBucket[];
     updatedAt: string;
   } | null;
@@ -1016,6 +1028,17 @@ export const api = {
   activateCodexAccount: (accountId: string) =>
     fetchJSON<{ ok: boolean }>(`/codex-accounts/${accountId}/activate`, {
       method: "POST",
+    }),
+
+  resetCodexAccountUsage: (
+    accountId: string,
+    input: { confirmed: true; idempotencyKey: string; creditId?: string },
+  ) =>
+    fetchJSON<{
+      outcome: "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed";
+    }>(`/codex-accounts/${encodeURIComponent(accountId)}/usage/reset`, {
+      method: "POST",
+      body: JSON.stringify(input),
     }),
 
   // Selectable LLM gateway keys (Pi picks one per session)

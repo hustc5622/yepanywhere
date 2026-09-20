@@ -290,6 +290,41 @@ export class CodexAccountsService {
     this.usageCache.delete(accountId);
   }
 
+  async resetUsage(
+    accountId: string,
+    params: { idempotencyKey: string; creditId?: string },
+  ): Promise<{
+    outcome: "reset" | "nothingToReset" | "noCredit" | "alreadyRedeemed";
+  }> {
+    const profile = this.requireProfile(accountId);
+    const client = new CodexAppServerClient({
+      codexHome: profile.codexHome,
+      codexPathOverride: this.codexPathOverride,
+    });
+    try {
+      await client.start();
+      const result = await client.request<{ outcome: string }>(
+        "account/rateLimitResetCredit/consume",
+        params,
+      );
+      const outcome = result?.outcome;
+      if (
+        outcome !== "reset" &&
+        outcome !== "nothingToReset" &&
+        outcome !== "noCredit" &&
+        outcome !== "alreadyRedeemed"
+      ) {
+        throw new Error("Codex app-server returned an unknown reset outcome");
+      }
+      return { outcome };
+    } finally {
+      client.close();
+      // A timeout can still mean the backend consumed a credit. Never cache
+      // pre-reset usage, including another profile for the same account.
+      this.usageCache.clear();
+    }
+  }
+
   /**
    * Makes `accountId` the credentials used by Codex sessions by copying its
    * `auth.json` into the active `CODEX_HOME`. The previously active auth file

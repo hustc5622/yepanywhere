@@ -2,7 +2,10 @@ import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it } from "vitest";
-import { readCodexUsage } from "../../src/codex-bridge/CodexUsageService.js";
+import {
+  normalizeUsageSnapshot,
+  readCodexUsage,
+} from "../../src/codex-bridge/CodexUsageService.js";
 
 describe("readCodexUsage", () => {
   let tempDir: string | null = null;
@@ -32,7 +35,7 @@ describe("readCodexUsage", () => {
         resetsAt: 1_784_275_037,
       },
       planType: "pro",
-      resetCredits: { availableCount: 1 },
+      resetCredits: { availableCount: 1, credits: null },
       additionalBuckets: [
         {
           id: "codex_spark",
@@ -51,6 +54,89 @@ describe("readCodexUsage", () => {
         },
       ],
       updatedAt: expect.any(String),
+    });
+  });
+});
+
+describe("reset credit details", () => {
+  const normalize = (summary: unknown) =>
+    normalizeUsageSnapshot({
+      rate_limits: { primary: { used_percent: 10 } },
+      rate_limit_reset_credits: summary,
+    })?.resetCredits;
+
+  it("preserves camelCase and snake_case expiry details without inventing unknown dates", () => {
+    expect(
+      normalize({
+        available_count: 4,
+        credits: [
+          {
+            id: "dated",
+            status: "available",
+            resetType: "codexRateLimits",
+            expiresAt: 1791173941,
+            title: "Full reset",
+            description: "Gift",
+          },
+          {
+            id: "forever",
+            status: "available",
+            reset_type: "codexRateLimits",
+            expires_at: null,
+          },
+          { id: "unknown", status: "available" },
+          { id: "invalid", expiresAt: "tomorrow" },
+          null,
+          { expiresAt: 123 },
+        ],
+      }),
+    ).toEqual({
+      availableCount: 4,
+      credits: [
+        {
+          id: "dated",
+          status: "available",
+          resetType: "codexRateLimits",
+          expiresAt: 1791173941,
+          title: "Full reset",
+          description: "Gift",
+        },
+        {
+          id: "forever",
+          status: "available",
+          resetType: "codexRateLimits",
+          expiresAt: null,
+          title: null,
+          description: null,
+        },
+        {
+          id: "unknown",
+          status: "available",
+          resetType: "unknown",
+          expiresAt: undefined,
+          title: null,
+          description: null,
+        },
+        {
+          id: "invalid",
+          status: "unknown",
+          resetType: "unknown",
+          expiresAt: undefined,
+          title: null,
+          description: null,
+        },
+      ],
+    });
+  });
+
+  it("distinguishes unavailable details from an empty detail list", () => {
+    expect(normalize({ availableCount: 1 })).toEqual({
+      availableCount: 1,
+      credits: null,
+    });
+    expect(normalize({ availableCount: 0, credits: [] })).toEqual({
+      availableCount: 0,
+      credits: [],
     });
   });
 });

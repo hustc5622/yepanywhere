@@ -2,6 +2,7 @@ import { asRecord } from "../bridge-common/util.js";
 import { CodexAppServerClient } from "./CodexAppServerClient.js";
 import type {
   CodexUsageBucket,
+  CodexUsageResetCredit,
   CodexUsageResetCredits,
   CodexUsageSnapshot,
   CodexUsageWindow,
@@ -101,7 +102,34 @@ function normalizeResetCredits(value: unknown): CodexUsageResetCredits | null {
   const availableCount =
     getNumber(credits.availableCount) ?? getNumber(credits.available_count);
   if (availableCount === null) return null;
-  return { availableCount };
+  return {
+    availableCount,
+    credits: Array.isArray(credits.credits)
+      ? credits.credits.flatMap((value): CodexUsageResetCredit[] => {
+          const credit = asRecord(value);
+          const id = getString(credit?.id);
+          if (!credit || !id) return [];
+          const expiry =
+            credit.expiresAt !== undefined
+              ? credit.expiresAt
+              : credit.expires_at;
+          return [
+            {
+              id,
+              status: getString(credit.status) ?? "unknown",
+              resetType:
+                getString(credit.resetType) ??
+                getString(credit.reset_type) ??
+                "unknown",
+              expiresAt:
+                expiry === null ? null : (getNumber(expiry) ?? undefined),
+              title: getString(credit.title),
+              description: getString(credit.description),
+            },
+          ];
+        })
+      : null,
+  };
 }
 
 function getString(value: unknown): string | null {

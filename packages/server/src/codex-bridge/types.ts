@@ -80,6 +80,17 @@ export interface CodexUsageBucket {
 
 export interface CodexUsageResetCredits {
   availableCount: number;
+  credits?: CodexUsageResetCredit[] | null;
+}
+
+export interface CodexUsageResetCredit {
+  id: string;
+  status: string;
+  resetType: string;
+  /** Unix seconds; null means no expiry, undefined means unavailable. */
+  expiresAt?: number | null;
+  title: string | null;
+  description: string | null;
 }
 
 export interface CodexUsageSnapshot {

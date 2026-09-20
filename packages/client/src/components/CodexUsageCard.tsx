@@ -9,6 +9,7 @@ import {
   api,
 } from "../api/client";
 import { useI18n } from "../i18n";
+import { CodexResetCredits } from "./CodexResetCredits";
 
 function clampPercent(value: number): number {
   return Math.min(100, Math.max(0, value));
@@ -350,13 +351,6 @@ function AccountBlock({
               />
             ))}
           </div>
-          {usage?.resetCredits && usage.resetCredits.availableCount > 0 && (
-            <p className="codex-usage-reset-credit">
-              {t("newSessionCodexUsageResetCredits", {
-                count: usage.resetCredits.availableCount,
-              })}
-            </p>
-          )}
           {usage && usage.additionalBuckets.length > 0 && (
             <div className="codex-usage-additional">
               <span className="codex-usage-additional-title">
@@ -375,6 +369,14 @@ function AccountBlock({
             : (entry.error ?? t("newSessionCodexUsageUnavailable"))}
         </p>
       )}
+
+      <CodexResetCredits
+        key={`${entry.id}:${entry.account?.email ?? ""}`}
+        entry={entry}
+        busy={busy}
+        onBusyChange={onBusyChange}
+        onRefresh={onRefresh}
+      />
 
       {login?.status === "pending" && loginUrl ? (
         <div className="codex-account-login">
