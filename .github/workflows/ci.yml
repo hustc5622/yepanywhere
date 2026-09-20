@@ -143,7 +143,7 @@ jobs:
           set -e
           echo "$result" > "$RUNNER_TEMP/pilot/negative-exit-code.txt"
           test "$result" -ne 0
-          grep -F 'closed-drawer Git requests / 60s 13' "$RUNNER_TEMP/pilot/negative-control.log"
+          grep -F 'actually been called 13 times' "$RUNNER_TEMP/pilot/negative-control.log"
       - name: Apply single-boundary workload reduction
         if: steps.negative.outcome == 'success'
         shell: bash
