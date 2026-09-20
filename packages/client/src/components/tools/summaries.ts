@@ -1,7 +1,7 @@
 import { getDisplayBashCommandFromInput } from "../../lib/bashCommand";
 import { getCodexWebRunOverview } from "../../lib/codexWebRun";
 import type { ToolResultData } from "../../types/renderItems";
-import { toolRegistry } from "../renderers/tools";
+import type { ToolSummaryMethods } from "./metadata";
 
 /**
  * Safely call a renderer method, falling back to undefined on error.
@@ -27,9 +27,9 @@ export function getToolSummary(
   input: unknown,
   result: ToolResultData | undefined,
   status: "pending" | "complete" | "error" | "aborted",
-  _options?: { provider?: string },
+  options?: { provider?: string; summaries?: ToolSummaryMethods },
 ): string {
-  const renderer = toolRegistry.get(toolName);
+  const renderer = options?.summaries ?? {};
 
   if (status === "pending" || status === "aborted") {
     // Show input summary while pending or aborted (no result available)

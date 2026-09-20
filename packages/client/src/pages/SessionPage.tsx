@@ -30,6 +30,7 @@ import { SessionSearchBar } from "../components/SessionSearchBar";
 import { SessionTitleGenerationStatus } from "../components/SessionTitleGenerationStatus";
 import { SessionMessagesSkeleton } from "../components/Skeleton";
 import { ToolApprovalPanel } from "../components/ToolApprovalPanel";
+import { TranscriptRendererProvider } from "../components/TranscriptRendererProvider";
 import { ProjectedToolStepRow } from "../components/blocks/ProjectedToolGroupRow";
 import { AgentContentProvider } from "../contexts/AgentContentContext";
 import { SessionMetadataProvider } from "../contexts/SessionMetadataContext";
@@ -111,11 +112,13 @@ export function SessionPage() {
   // Wrap with StreamingMarkdownProvider for server-rendered markdown streaming
   return (
     <StreamingMarkdownProvider>
-      <SessionPageContent
-        key={`${projectId}:${sessionId}`}
-        projectId={projectId}
-        sessionId={sessionId}
-      />
+      <TranscriptRendererProvider>
+        <SessionPageContent
+          key={`${projectId}:${sessionId}`}
+          projectId={projectId}
+          sessionId={sessionId}
+        />
+      </TranscriptRendererProvider>
     </StreamingMarkdownProvider>
   );
 }

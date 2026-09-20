@@ -1,5 +1,13 @@
 import { describe, expect, it } from "vitest";
-import { getToolSummary } from "../summaries";
+import { toolRegistry } from "../../renderers/tools";
+import { getToolSummary as summarize } from "../summaries";
+
+function getToolSummary(...args: Parameters<typeof summarize>) {
+  return summarize(args[0], args[1], args[2], args[3], {
+    ...args[4],
+    summaries: toolRegistry.get(args[0]),
+  });
+}
 
 describe("getToolSummary", () => {
   it("prefers linked file name for write_stdin summaries", () => {

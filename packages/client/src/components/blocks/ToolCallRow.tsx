@@ -122,6 +122,7 @@ const ToolCallRowContent = memo(function ToolCallRowContent({
   const summary = useMemo(() => {
     return getToolSummary(toolName, toolInput, toolResult, status, {
       provider: sessionProvider,
+      summaries: toolRegistry.get(toolName),
     });
   }, [toolName, toolInput, toolResult, status, sessionProvider]);
 

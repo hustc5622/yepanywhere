@@ -392,7 +392,13 @@ export function ToolApprovalPanel({
 
   const displayToolName = request.toolName;
   const summary = request.toolName
-    ? getToolSummary(request.toolName, request.toolInput, undefined, "pending")
+    ? getToolSummary(
+        request.toolName,
+        request.toolInput,
+        undefined,
+        "pending",
+        { summaries: toolRegistry.get(request.toolName) },
+      )
     : request.prompt;
   const approvalPrompt = getApprovalPrompt(request);
   const approvalAction = getApprovalAction(request);

@@ -139,6 +139,100 @@ describe("production dependency boundaries", () => {
   }
 });
 
+describe("client renderer dependency boundaries", () => {
+  const files = sourceFiles(resolve(root, "packages/client/src"));
+  const known = new Set(files);
+  const graph = new Map<string, string[]>();
+  for (const file of files) {
+    const source = ts.createSourceFile(
+      file,
+      readFileSync(resolve(root, file), "utf8"),
+      ts.ScriptTarget.Latest,
+      true,
+    );
+    const edges: string[] = [];
+    for (const node of source.statements) {
+      if (
+        !(ts.isImportDeclaration(node) || ts.isExportDeclaration(node)) ||
+        !node.moduleSpecifier ||
+        !ts.isStringLiteral(node.moduleSpecifier)
+      )
+        continue;
+      if (
+        ts.isExportDeclaration(node) &&
+        (node.isTypeOnly ||
+          (node.exportClause &&
+            ts.isNamedExports(node.exportClause) &&
+            node.exportClause.elements.every((item) => item.isTypeOnly)))
+      )
+        continue;
+      if (ts.isImportDeclaration(node)) {
+        const clause = node.importClause;
+        if (
+          clause?.isTypeOnly ||
+          (clause &&
+            !clause.name &&
+            clause.namedBindings &&
+            ts.isNamedImports(clause.namedBindings) &&
+            clause.namedBindings.elements.length > 0 &&
+            clause.namedBindings.elements.every((item) => item.isTypeOnly))
+        )
+          continue;
+      }
+      const base = resolveReference(file, node.moduleSpecifier.text);
+      if (!base) continue;
+      const target = [
+        base,
+        `${base}.ts`,
+        `${base}.tsx`,
+        `${base}/index.ts`,
+        `${base}/index.tsx`,
+        base.replace(/\.js$/, ".ts"),
+        base.replace(/\.js$/, ".tsx"),
+      ].find((candidate) => known.has(candidate));
+      if (target) edges.push(target);
+    }
+    graph.set(file, edges);
+  }
+
+  it("has no static runtime import cycles (type-only edges are excluded)", () => {
+    const done = new Set<string>();
+    const active: string[] = [];
+    const cycles: string[][] = [];
+    const visit = (file: string) => {
+      const index = active.indexOf(file);
+      if (index >= 0) {
+        cycles.push([...active.slice(index), file]);
+        return;
+      }
+      if (done.has(file)) return;
+      active.push(file);
+      for (const target of graph.get(file) ?? []) visit(target);
+      active.pop();
+      done.add(file);
+    };
+    for (const file of files) visit(file);
+    expect(cycles).toEqual([]);
+  });
+
+  it("keeps tool summary aggregation and metadata independent of JSX renderers", () => {
+    for (const file of ["summaries.ts", "metadata.ts"]) {
+      const seen = new Set<string>();
+      const visit = (path: string) => {
+        if (seen.has(path)) return;
+        seen.add(path);
+        for (const target of graph.get(path) ?? []) visit(target);
+      };
+      visit(`packages/client/src/components/tools/${file}`);
+      expect(
+        [...seen].filter(
+          (path) => path.includes("/renderers/") || path.endsWith(".tsx"),
+        ),
+      ).toEqual([]);
+    }
+  });
+});
+
 describe("boundary detector regression cases", () => {
   it("detects static, type-only, re-export and literal dynamic references", () => {
     const samples = [

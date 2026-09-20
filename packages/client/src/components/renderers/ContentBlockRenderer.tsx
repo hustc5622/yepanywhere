@@ -1,5 +1,5 @@
 import { memo } from "react";
-import { registry } from "./index";
+import { registry } from "./configuredRegistry";
 import type { ContentBlock, RenderContext } from "./types";
 
 interface Props {

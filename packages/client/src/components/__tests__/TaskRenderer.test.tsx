@@ -9,6 +9,7 @@ import { I18nProvider } from "../../i18n";
 import { preprocessMessages } from "../../lib/preprocessMessages";
 import type { Message } from "../../types";
 import { RenderItemComponent } from "../RenderItemComponent";
+import { TranscriptRendererProvider } from "../TranscriptRendererProvider";
 import { taskRenderer } from "../renderers/tools/TaskRenderer";
 import type { RenderContext } from "../renderers/types";
 
@@ -76,7 +77,9 @@ function TestWrapper({
               projectId="proj-1"
               sessionId="session-1"
             >
-              {children}
+              <TranscriptRendererProvider>
+                {children}
+              </TranscriptRendererProvider>
             </AgentContentProvider>
           </SchemaValidationProvider>
         </ToastProvider>

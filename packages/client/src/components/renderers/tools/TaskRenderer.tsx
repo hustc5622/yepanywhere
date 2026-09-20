@@ -9,6 +9,7 @@ import {
 } from "react";
 import type { ZodError } from "zod";
 import { AgentContentContext } from "../../../contexts/AgentContentContext";
+import { useNestedRenderers } from "../../../contexts/NestedRendererContext";
 import { useSchemaValidationContext } from "../../../contexts/SchemaValidationContext";
 import { useSessionMetadata } from "../../../contexts/SessionMetadataContext";
 import type { AgentContent } from "../../../hooks/useSessionMessages";
@@ -26,10 +27,17 @@ import {
 } from "../../../lib/subagentStats";
 import { validateToolResult } from "../../../lib/validateToolResult";
 import type { Message } from "../../../types";
-import { RenderItemComponent } from "../../RenderItemComponent";
 import { SchemaWarning } from "../../SchemaWarning";
-import { ContentBlockRenderer } from "../ContentBlockRenderer";
+import type { ContentBlock, RenderContext } from "../types";
 import type { TaskInput, TaskResult, ToolRenderer } from "./types";
+
+function NestedContentBlock(props: {
+  block: ContentBlock;
+  context: RenderContext;
+}) {
+  const { ContentBlock: Renderer } = useNestedRenderers();
+  return <Renderer {...props} />;
+}
 
 const MAX_PROMPT_LENGTH = 200;
 const MAX_ERROR_SUMMARY_LENGTH = 80;
@@ -255,6 +263,7 @@ function SubagentTranscript({
   messages: Message[];
   isStreaming: boolean;
 }) {
+  const { RenderItem: RenderItemComponent } = useNestedRenderers();
   const [expandedThinkingItemIds, setExpandedThinkingItemIds] = useState<
     ReadonlySet<string>
   >(() => new Set());
@@ -533,7 +542,7 @@ function SubagentCard({
           ) : !errorInfo && hasFallback ? (
             <div className="task-content">
               {fallbackContent?.map((block) => (
-                <ContentBlockRenderer
+                <NestedContentBlock
                   key={
                     block.id ??
                     `${agentId}-${block.type}-${block.text?.slice(0, 20) ?? ""}`
