@@ -30,23 +30,36 @@ export function useSessionFileIndex(
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState<Error | null>(null);
   const requestIdRef = useRef(0);
+  const targetRef = useRef({ key, enabled });
+  targetRef.current = { key, enabled };
 
   const fetchIndex = useCallback(async () => {
-    if (!enabled || !projectId || !sessionId) return;
+    if (
+      !enabled ||
+      !projectId ||
+      !sessionId ||
+      targetRef.current.key !== key ||
+      !targetRef.current.enabled
+    )
+      return;
     const requestId = ++requestIdRef.current;
+    const isCurrent = () =>
+      requestId === requestIdRef.current &&
+      targetRef.current.key === key &&
+      targetRef.current.enabled;
     setLoading(true);
     try {
       const data = await api.getSessionFileIndex(projectId, sessionId, {
         ...(branchId ? { branchId } : {}),
       });
-      if (requestId !== requestIdRef.current) return;
+      if (!isCurrent()) return;
       setCached({ key, index: data });
       setError(null);
     } catch (err) {
-      if (requestId !== requestIdRef.current) return;
+      if (!isCurrent()) return;
       setError(err instanceof Error ? err : new Error(String(err)));
     } finally {
-      if (requestId === requestIdRef.current) setLoading(false);
+      if (isCurrent()) setLoading(false);
     }
   }, [branchId, enabled, projectId, sessionId, key]);
 
@@ -76,5 +89,10 @@ export function useSessionFileIndex(
       requestIdRef.current += 1;
     };
   }, [fetchIndex, revision, enabled]);
-  return { index, loading, error, refetch: fetchIndex };
+  return {
+    index,
+    loading: enabled && Boolean(projectId && sessionId) && loading,
+    error: enabled ? error : null,
+    refetch: fetchIndex,
+  };
 }

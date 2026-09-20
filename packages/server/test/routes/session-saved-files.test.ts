@@ -99,6 +99,28 @@ async function captureChange(
 
 describe("saved session file routes", () => {
   it.each(["codex", "pi"] as const)(
+    "shares concurrent %s snapshot selection scans",
+    async (provider) => {
+      await captureChange("visible", provider);
+      const { app, base, reader } = setup(provider);
+      const responses = await Promise.all([
+        app.request(base),
+        app.request(base),
+        app.request(base),
+      ]);
+      expect(responses.map((response) => response.status)).toEqual([
+        200, 200, 200,
+      ]);
+      expect(reader.getSession).toHaveBeenCalledTimes(1);
+      await app.request(base);
+      expect(reader.getSession).toHaveBeenCalledTimes(1);
+      await captureChange("visible", provider, "new version");
+      await app.request(base);
+      expect(reader.getSession).toHaveBeenCalledTimes(2);
+    },
+  );
+
+  it.each(["codex", "pi"] as const)(
     "lists and previews %s snapshots independently of current disk state",
     async (provider) => {
       const { id } = await captureChange("visible", provider);

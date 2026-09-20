@@ -180,6 +180,27 @@ function createRoutes(
 }
 
 describe("session display routes", () => {
+  it("shares concurrent file-index scans and isolates app instances", async () => {
+    const { app, getSession } = createRoutes(2);
+    const path = `/projects/${PROJECT_ID}/sessions/${SESSION_ID}/files`;
+    const responses = await Promise.all([
+      app.request(path),
+      app.request(path),
+      app.request(path),
+    ]);
+    expect(responses.map((response) => response.status)).toEqual([
+      200, 200, 200,
+    ]);
+    expect(getSession).toHaveBeenCalledTimes(1);
+    await app.request(path);
+    expect(getSession).toHaveBeenCalledTimes(1);
+    await app.request(`${path}?branchId=other`);
+    expect(getSession).toHaveBeenCalledTimes(2);
+    const other = createRoutes(2);
+    await other.app.request(path);
+    expect(other.getSession).toHaveBeenCalledTimes(1);
+  });
+
   it("bounds legacy overlay cleanup by native turns and keeps the inferred live turn", async () => {
     const { getSession } = createRoutes(2);
     const loaded = await getSession();

@@ -8,6 +8,55 @@ vi.mock("../../api/client", () => ({ api: { getSessionFileIndex: vi.fn() } }));
 afterEach(() => {
   cleanup();
   vi.resetAllMocks();
+  vi.useRealTimers();
+});
+
+it("stops while disabled and ignores a prior request after reopening", async () => {
+  let finish!: (value: SessionFileActivityIndex) => void;
+  vi.mocked(api.getSessionFileIndex)
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    )
+    .mockResolvedValue(index("new"));
+  const { result, rerender } = renderHook(
+    ({ enabled }) => useSessionFileIndex("p", "s", { enabled }),
+    { initialProps: { enabled: true } },
+  );
+  rerender({ enabled: false });
+  expect(result.current.loading).toBe(false);
+  rerender({ enabled: true });
+  await waitFor(() => expect(result.current.index?.generatedAt).toBe("new"));
+  await act(async () => finish(index("stale")));
+  expect(result.current.index?.generatedAt).toBe("new");
+});
+
+it("waits for slow scans before scheduling another poll", async () => {
+  vi.useFakeTimers();
+  let finish!: (value: SessionFileActivityIndex) => void;
+  vi.mocked(api.getSessionFileIndex)
+    .mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finish = resolve;
+        }),
+    )
+    .mockResolvedValue(index("next"));
+  const { result, rerender } = renderHook(
+    ({ enabled }) => useSessionFileIndex("p", "s", { enabled }),
+    { initialProps: { enabled: true } },
+  );
+  await act(() => vi.advanceTimersByTimeAsync(30_000));
+  expect(api.getSessionFileIndex).toHaveBeenCalledTimes(1);
+  await act(async () => finish(index("slow")));
+  expect(result.current.index?.generatedAt).toBe("slow");
+  await act(() => vi.advanceTimersByTimeAsync(5_000));
+  expect(api.getSessionFileIndex).toHaveBeenCalledTimes(2);
+  rerender({ enabled: false });
+  await act(() => vi.advanceTimersByTimeAsync(30_000));
+  expect(api.getSessionFileIndex).toHaveBeenCalledTimes(2);
 });
 const index = (generatedAt: string): SessionFileActivityIndex => ({
   projectId: "p",

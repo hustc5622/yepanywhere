@@ -39,6 +39,7 @@ import {
   decodeSessionDisplayDetailRef,
   selectSessionDisplayToolMessages,
 } from "../sessions/display-projection.js";
+import { FileIndexCache } from "../sessions/file-index-cache.js";
 import {
   annotateBranchMessages,
   normalizeSession,
@@ -135,6 +136,12 @@ export function registerSessionDisplayRoutes(
   routes: Hono,
   deps: SessionDisplayRoutesDeps,
 ): void {
+  // Cache ownership follows this app's readers/store, not the whole process.
+  const fileIndexCaches: FileIndexCaches = {
+    saved: new FileIndexCache(16),
+    activity: new FileIndexCache(32),
+  };
+
   if (deps.displayService) {
     const service = deps.displayService;
     service.configureSource(createSessionDisplaySource(deps));
@@ -284,6 +291,7 @@ export function registerSessionDisplayRoutes(
       ) {
         const { selected, session } = await savedRecordsForSession(
           deps,
+          fileIndexCaches,
           resolved,
           branchId,
         );
@@ -299,7 +307,11 @@ export function registerSessionDisplayRoutes(
           generatedAt: new Date().toISOString(),
         });
       }
-      const index = await readSessionFileIndex(resolved, branchId);
+      const index = await readSessionFileIndex(
+        resolved,
+        branchId,
+        fileIndexCaches.activity,
+      );
       return c.json(index);
     } catch (error) {
       return displayErrorResponse(c, error);
@@ -319,6 +331,7 @@ export function registerSessionDisplayRoutes(
         const path = c.req.query("path") ?? "";
         const { store, selected, change } = await selectSavedChange(
           deps,
+          fileIndexCaches,
           resolved,
           c.req.query("branchId"),
           path,
@@ -396,6 +409,7 @@ export function registerSessionDisplayRoutes(
         ) {
           const { store, selected, change } = await selectSavedChange(
             deps,
+            fileIndexCaches,
             resolved,
             branchId,
             path,
@@ -1268,17 +1282,19 @@ function selectDisplayTurns(
   };
 }
 
-const savedFileSelectionCache = new Map<
-  string,
-  {
-    stamp: string;
-    selected: Awaited<ReturnType<typeof readSavedFileRecords>>;
-    hasOlderMessages: boolean;
-  }
->();
+interface SavedFileSelection {
+  selected: Awaited<ReturnType<typeof readSavedFileRecords>>;
+  hasOlderMessages: boolean;
+}
+
+interface FileIndexCaches {
+  saved: FileIndexCache<SavedFileSelection>;
+  activity: FileIndexCache<SessionFileActivityIndex>;
+}
 
 async function savedRecordsForSession(
   deps: SessionDisplayRoutesDeps,
+  caches: FileIndexCaches,
   resolved: ResolvedDisplaySession,
   branchId?: string,
 ) {
@@ -1304,40 +1320,28 @@ async function savedRecordsForSession(
     resolved.sessionId,
     branchId,
   ]);
-  const cached = savedFileSelectionCache.get(key);
-  if (cached?.stamp === stamp)
-    return {
+  const cached = await caches.saved.get(key, stamp, async () => {
+    const session = await loadSessionForFileIndex(resolved, branchId);
+    const selected = await readSavedFileRecords(
       store,
-      selected: cached.selected,
-      session: { hasOlderMessages: cached.hasOlderMessages },
-    };
-  const session = await loadSessionForFileIndex(resolved, branchId);
-  const selected = await readSavedFileRecords(
-    store,
-    provider,
-    resolved.sessionId,
-    resolved.project.path,
-    session.messages,
-    ids,
-  );
-  if (savedFileSelectionCache.size >= 16) {
-    const first = savedFileSelectionCache.keys().next().value;
-    if (first) savedFileSelectionCache.delete(first);
-  }
-  savedFileSelectionCache.set(key, {
-    stamp,
-    selected,
-    hasOlderMessages: session.hasOlderMessages,
+      provider,
+      resolved.sessionId,
+      resolved.project.path,
+      session.messages,
+      ids,
+    );
+    return { selected, hasOlderMessages: session.hasOlderMessages };
   });
   return {
     store,
-    selected,
-    session: { hasOlderMessages: session.hasOlderMessages },
+    selected: cached.selected,
+    session: { hasOlderMessages: cached.hasOlderMessages },
   };
 }
 
 async function selectSavedChange(
   deps: SessionDisplayRoutesDeps,
+  caches: FileIndexCaches,
   resolved: ResolvedDisplaySession,
   branchId: string | undefined,
   path: string,
@@ -1351,6 +1355,7 @@ async function selectSavedChange(
     );
   const { store, selected } = await savedRecordsForSession(
     deps,
+    caches,
     resolved,
     branchId,
   );
@@ -1370,14 +1375,6 @@ async function selectSavedChange(
 }
 
 const SESSION_FILE_INDEX_MAX_MESSAGES = 20_000;
-const SESSION_FILE_INDEX_CACHE_LIMIT = 32;
-
-interface CachedSessionFileIndex {
-  stamp: string;
-  index: SessionFileActivityIndex;
-}
-
-const sessionFileIndexCache = new Map<string, CachedSessionFileIndex>();
 
 /** Cheap change token so repeated inspector opens do not re-scan the session. */
 async function sessionFileIndexStamp(
@@ -1406,19 +1403,23 @@ async function sessionFileIndexStamp(
 async function readSessionFileIndex(
   resolved: ResolvedDisplaySession,
   branchId: string | undefined,
+  cache: FileIndexCache<SessionFileActivityIndex>,
 ): Promise<SessionFileActivityIndex> {
-  const cacheKey = `${resolved.project.id}:${resolved.sessionId}:${branchId ?? ""}`;
+  const cacheKey = JSON.stringify([
+    resolved.source.provider,
+    resolved.project.id,
+    resolved.sessionId,
+    branchId,
+  ]);
   const stamp = await sessionFileIndexStamp(resolved);
-  const cached = sessionFileIndexCache.get(cacheKey);
-  if (cached && cached.stamp === stamp) return cached.index;
-  return await scanSessionFileIndex(resolved, branchId, cacheKey, stamp);
+  return cache.get(cacheKey, stamp, () =>
+    scanSessionFileIndex(resolved, branchId),
+  );
 }
 
 async function scanSessionFileIndex(
   resolved: ResolvedDisplaySession,
   branchId: string | undefined,
-  cacheKey: string,
-  stamp: string,
 ): Promise<SessionFileActivityIndex> {
   const session = await loadSessionForFileIndex(resolved, branchId);
   const { files, truncated } = buildSessionFileActivity(session.messages, {
@@ -1432,11 +1433,6 @@ async function scanSessionFileIndex(
     generatedAt: new Date().toISOString(),
   };
 
-  if (sessionFileIndexCache.size >= SESSION_FILE_INDEX_CACHE_LIMIT) {
-    const oldest = sessionFileIndexCache.keys().next().value;
-    if (oldest) sessionFileIndexCache.delete(oldest);
-  }
-  sessionFileIndexCache.set(cacheKey, { stamp, index });
   return index;
 }
 
