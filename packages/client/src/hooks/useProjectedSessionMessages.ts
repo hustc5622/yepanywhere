@@ -11,6 +11,7 @@ import {
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import { extractCodexTurnContextUsage } from "../lib/codexMessageContext";
+import { DisplaySnapshotCache } from "../lib/displaySnapshotCache";
 import type { Message, Session } from "../types";
 import type {
   AgentContentMap,
@@ -19,21 +20,7 @@ import type {
 } from "./useLegacySessionMessages";
 import { contextUsageFromStatus } from "./useLegacySessionMessages";
 
-const snapshots = new Map<string, SessionDisplaySnapshot>();
-const MAX_CACHE_BYTES = 32 * 1024 * 1024;
-function cache(key: string, snapshot: SessionDisplaySnapshot): void {
-  snapshots.delete(key);
-  snapshots.set(key, snapshot);
-  let bytes = 0;
-  for (const value of snapshots.values())
-    bytes += JSON.stringify(value).length * 2;
-  while (snapshots.size > 5 || bytes > MAX_CACHE_BYTES) {
-    const first = snapshots.entries().next().value;
-    if (!first) break;
-    bytes -= JSON.stringify(first[1]).length * 2;
-    snapshots.delete(first[0]);
-  }
-}
+const snapshots = new DisplaySnapshotCache();
 export function resetDisplaySnapshotCacheForTests(): void {
   snapshots.clear();
 }
@@ -131,7 +118,7 @@ export function useProjectedSessionMessages(
       snapshotRef.current = next;
       setSnapshot(next);
       setLoading(false);
-      cache(key, next);
+      snapshots.set(key, next);
       setMessages((current) =>
         current.filter(
           (message) =>
