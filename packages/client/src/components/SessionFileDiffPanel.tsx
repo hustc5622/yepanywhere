@@ -7,6 +7,7 @@ import { DetailPanel } from "./ui/DetailPanel";
 interface Props {
   projectId: string;
   sessionId: string;
+  branchId?: string;
   filePath: string;
   onClose: () => void;
   /** Switch to the plain file viewer for the same path. */
@@ -22,6 +23,7 @@ interface Props {
 export function SessionFileDiffPanel({
   projectId,
   sessionId,
+  branchId,
   filePath,
   onClose,
   onOpenFile,
@@ -39,6 +41,7 @@ export function SessionFileDiffPanel({
     api
       .getSessionFileDiff(projectId, sessionId, {
         path: filePath,
+        branchId,
         fullContext,
         signal: controller.signal,
       })
@@ -53,7 +56,7 @@ export function SessionFileDiffPanel({
         setLoading(false);
       });
     return () => controller.abort();
-  }, [filePath, fullContext, projectId, sessionId]);
+  }, [filePath, fullContext, projectId, sessionId, branchId]);
 
   return (
     <DetailPanel title={filePath} ariaLabel={filePath} onClose={onClose}>

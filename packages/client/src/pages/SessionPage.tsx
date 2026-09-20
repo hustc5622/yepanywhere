@@ -2808,6 +2808,7 @@ function SessionPageContent({
       {isWideScreen ? (
         isInspectorExpanded ? (
           <SessionInspector
+            branchId={selectedBranchId}
             presentation="sidebar"
             onClose={() => setInspectorExpanded(false)}
             messages={inspectorMessages}
@@ -2839,6 +2840,7 @@ function SessionPageContent({
         ) : null
       ) : (
         <SessionInspector
+          branchId={selectedBranchId}
           presentation="drawer"
           isOpen={isInspectorDrawerOpen}
           onClose={() => setInspectorDrawerOpen(false)}

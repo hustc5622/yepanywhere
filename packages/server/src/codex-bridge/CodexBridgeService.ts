@@ -36,6 +36,7 @@ import { encodeProjectId } from "../projects/paths.js";
 import { ensureRuntimeToken } from "../runtime/token.js";
 import { findCodexCliPath } from "../sdk/cli-detection.js";
 import { sanitizeManagedAttachmentPrompt } from "../sdk/messageQueue.js";
+import { SessionFileLifecycle } from "../session-files/lifecycle.js";
 import { validateQuestionAnswers } from "../sessions/question-answers.js";
 import type { SessionSummary } from "../supervisor/types.js";
 import type { EventBus } from "../watcher/index.js";
@@ -92,6 +93,8 @@ import type {
 } from "./types.js";
 
 export interface CodexBridgeServiceOptions {
+  /** Optional adapter for isolated lifecycle tests/custom storage. */
+  fileLifecycle?: SessionFileLifecycle;
   enabled: boolean;
   host: string;
   port: number;
@@ -140,6 +143,8 @@ interface ClientRequestRecord {
   threadId?: string;
   /** thread/start hint for older app-server responses without Thread.ephemeral. */
   ephemeral?: boolean;
+  /** Environment hint when older thread responses omit environment metadata. */
+  fileEnvironmentRemote?: boolean;
   resumeConfig?: Record<string, unknown>;
   eventScope?: CodexBridgeClientRequestScope;
   mcpStartupCompatibilityServerIds?: string[];
@@ -380,7 +385,11 @@ export class CodexBridgeService implements CodexBridgeController {
   private persistChain: Promise<void> = Promise.resolve();
   private readonly eventNotifier = new BridgeEventNotifier();
 
+  private readonly fileLifecycle: SessionFileLifecycle;
+  private readonly remoteFileThreads = new Set<string>();
+
   constructor(options: CodexBridgeServiceOptions) {
+    this.fileLifecycle = options.fileLifecycle ?? new SessionFileLifecycle();
     this.enabled = options.enabled;
     this.host = options.host;
     this.port = options.port;
@@ -1324,30 +1333,16 @@ export class CodexBridgeService implements CodexBridgeController {
 
       upstream.on("message", (data, isBinary) => {
         if (connection.closed || connection.upstream !== upstream) return;
-        if (this.journalMode === "legacy-blocking") {
-          this.enqueueFrameTask(connection, "server", async () => {
-            if (connection.closed || connection.upstream !== upstream) return;
-            const forwardedFrames = await this.observeServerDataLegacy(
-              connection,
-              data,
-              isBinary,
-            );
-            this.sendServerFramesToDownstream(connection, forwardedFrames);
-            this.maybeCloseDetachedConnection(connection, "server-frame");
-          });
-          return;
-        }
-        try {
-          const forwardedFrames = this.observeServerDataLightweight(
-            connection,
-            data,
-            isBinary,
-          );
+        this.enqueueFrameTask(connection, "server", async () => {
+          if (connection.closed || connection.upstream !== upstream) return;
+          await this.observeFileSnapshotFrame(connection, data);
+          const forwardedFrames =
+            this.journalMode === "legacy-blocking"
+              ? await this.observeServerDataLegacy(connection, data, isBinary)
+              : this.observeServerDataLightweight(connection, data, isBinary);
           this.sendServerFramesToDownstream(connection, forwardedFrames);
           this.maybeCloseDetachedConnection(connection, "server-frame");
-        } catch (error) {
-          this.handleFrameProcessingError(connection, "server", error);
-        }
+        });
       });
 
       upstream.on("close", () => {
@@ -1415,6 +1410,9 @@ export class CodexBridgeService implements CodexBridgeController {
   private closeConnection(connection: BridgeConnection, reason: string): void {
     if (connection.closed) return;
     connection.closed = true;
+    const captureClose = this.fileLifecycle.close(String(connection.id));
+    this.eventTasks.add(captureClose);
+    void captureClose.then(() => this.eventTasks.delete(captureClose));
 
     this.connections.delete(connection.id);
     for (const pending of connection.pendingInternalRequests.values()) {
@@ -1510,6 +1508,108 @@ export class CodexBridgeService implements CodexBridgeController {
     this.closeConnection(connection, `${direction}-frame-error`);
   }
 
+  private canCaptureLocalFiles(
+    params?: Record<string, unknown> | null,
+  ): boolean {
+    if (this.fileEnvironmentRemote(params) === true) return false;
+    if (!this.upstreamUrlOverride) return true;
+    try {
+      return ["localhost", "127.0.0.1", "[::1]"].includes(
+        new URL(this.upstreamUrlOverride).hostname,
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  private fileEnvironmentRemote(
+    params?: Record<string, unknown> | null,
+  ): boolean | undefined {
+    if (params?.environmentId) return true;
+    if (Array.isArray(params?.environments))
+      return params.environments.length > 0;
+    return undefined;
+  }
+
+  private async observeFileSnapshotFrame(
+    connection: BridgeConnection,
+    data: RawData,
+  ): Promise<void> {
+    for (const message of parseJsonRpcEnvelope(data)?.messages ?? []) {
+      const params = asRecord(message.params);
+      const threadId = getString(params?.threadId);
+      const turn = asRecord(params?.turn);
+      const turnId = getString(turn?.id);
+      if (
+        threadId &&
+        turnId &&
+        message.method === "turn/started" &&
+        !this.remoteFileThreads.has(threadId) &&
+        this.canCaptureLocalFiles(params)
+      ) {
+        const record = this.sessions.get(threadId);
+        if (record?.projectPathKnown && !record.ephemeral) {
+          await this.fileLifecycle.begin(
+            {
+              provider: "codex",
+              sessionId: threadId,
+              branchId: threadId,
+              turnId,
+            },
+            record.projectPath,
+            String(connection.id),
+            turnId,
+            true,
+          );
+        }
+        await this.fileLifecycle.bind(threadId, turnId);
+      } else if (threadId && turnId && message.method === "turn/completed") {
+        await this.fileLifecycle.finish(
+          threadId,
+          turnId,
+          turn?.status === "failed"
+            ? "failed"
+            : turn?.status === "interrupted"
+              ? "interrupted"
+              : "completed",
+        );
+      } else if (
+        threadId &&
+        message.method === "error" &&
+        params?.willRetry === false &&
+        typeof params.turnId === "string"
+      ) {
+        await this.fileLifecycle.finish(threadId, params.turnId, "failed");
+      } else if (!message.method && message.id !== undefined) {
+        const request = connection.pendingClientRequests.get(idKey(message.id));
+        if (request?.method !== "turn/start" || !request.threadId) continue;
+        if (message.error)
+          await this.fileLifecycle.reject(
+            request.threadId,
+            `${connection.id}:${idKey(message.id)}`,
+          );
+        else {
+          const resultTurn = asRecord(asRecord(message.result)?.turn);
+          const id = getString(resultTurn?.id);
+          if (id) {
+            await this.fileLifecycle.bind(request.threadId, id);
+            if (resultTurn?.status && resultTurn.status !== "inProgress") {
+              await this.fileLifecycle.finish(
+                request.threadId,
+                id,
+                resultTurn.status === "failed"
+                  ? "failed"
+                  : resultTurn.status === "interrupted"
+                    ? "interrupted"
+                    : "completed",
+              );
+            }
+          }
+        }
+      }
+    }
+  }
+
   private async observeClientData(
     connection: BridgeConnection,
     data: RawData,
@@ -1579,9 +1679,47 @@ export class CodexBridgeService implements CodexBridgeController {
         const eventScope = connection.legacyEventSpine
           ? await connection.legacyEventSpine.observeClientRequest(message)
           : undefined;
+        if (
+          message.method === "turn/start" &&
+          threadId &&
+          !this.canCaptureLocalFiles(params)
+        )
+          this.remoteFileThreads.add(threadId);
+        if (
+          message.method === "turn/start" &&
+          threadId &&
+          !this.remoteFileThreads.has(threadId) &&
+          this.canCaptureLocalFiles(params)
+        ) {
+          const record = this.sessions.get(threadId);
+          const cwd =
+            getString(params?.cwd) ??
+            (record?.projectPathKnown ? record.projectPath : undefined);
+          if (cwd && !record?.ephemeral)
+            await this.fileLifecycle.begin(
+              {
+                provider: "codex",
+                sessionId: threadId,
+                branchId: threadId,
+                turnId: `pending:${connection.id}:${idKey(message.id)}`,
+              },
+              cwd,
+              String(connection.id),
+              `${connection.id}:${idKey(message.id)}`,
+            );
+        }
         connection.pendingClientRequests.set(idKey(message.id), {
           method: message.method,
           sessionId: eventScope?.sessionId ?? sessionId,
+          ...(isMcpThreadLifecycleMethod(message.method)
+            ? {
+                fileEnvironmentRemote:
+                  this.fileEnvironmentRemote(params) ??
+                  (threadId && this.remoteFileThreads.has(threadId)
+                    ? true
+                    : undefined),
+              }
+            : {}),
           ...(threadId ? { threadId } : {}),
           ...(message.method === "thread/start"
             ? { ephemeral: params?.ephemeral === true }
@@ -2232,7 +2370,7 @@ export class CodexBridgeService implements CodexBridgeController {
           rawMethod === "thread/name/updated" ||
           rawMethod === "thread/goal/updated"
         ? [
-            connection.id,
+            String(connection.id),
             sessionId ?? "connection",
             safeCodexBridgeMethod(rawMethod),
             itemId ?? "",
@@ -2315,6 +2453,7 @@ export class CodexBridgeService implements CodexBridgeController {
 
     this.upsertThread(connection, thread, {
       cwd: getString(result.cwd) ?? getString(thread.cwd),
+      fileEnvironmentRemote: request.fileEnvironmentRemote,
       model: getString(result.model),
       reasoningEffort: getString(result.reasoningEffort),
       serviceTier: getString(result.serviceTier),
@@ -3028,10 +3167,19 @@ export class CodexBridgeService implements CodexBridgeController {
       reasoningEffort?: string;
       serviceTier?: string;
       ephemeral?: boolean;
+      fileEnvironmentRemote?: boolean;
     },
   ): void {
     const id = getString(thread.id);
     if (!id) return;
+
+    // Environment selection is sticky: turn/start may omit it entirely.
+    // Prefer actual thread metadata, including an explicit empty selection;
+    // absent metadata must not erase a previously observed remote environment.
+    const remote =
+      this.fileEnvironmentRemote(thread) ?? extra.fileEnvironmentRemote;
+    if (remote === true) this.remoteFileThreads.add(id);
+    else if (remote === false) this.remoteFileThreads.delete(id);
 
     const cwd = extra.cwd ?? getString(thread.cwd);
     const subagent = getCodexSubagentMetadata(thread);

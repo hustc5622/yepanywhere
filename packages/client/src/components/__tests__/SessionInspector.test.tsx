@@ -56,7 +56,7 @@ function renderInspector(
 }
 
 describe("SessionInspector", () => {
-  it("indexes every file in a multi-file Codex Edit and separates external files with the same name", () => {
+  it("keeps transcript fallback for multi-file edits from other providers and separates external files with the same name", () => {
     const first = "/tmp/one/api_request.py";
     const second = "/tmp/two/api_request.py";
     const messages: Message[] = [
@@ -100,7 +100,7 @@ describe("SessionInspector", () => {
         },
       },
     ];
-    renderInspector("codex", messages);
+    renderInspector("claude", messages);
     fireEvent.click(screen.getByRole("tab", { name: "Files" }));
     const firstFile = screen.getByTitle(first);
     expect(firstFile.textContent).toContain("Edit - 2");
@@ -187,7 +187,7 @@ describe("SessionInspector", () => {
     const { rerender } = render(renderSessionInspector("in-turn"));
 
     expect(onLoadLegacyDetails).not.toHaveBeenCalled();
-    fireEvent.click(screen.getByRole("tab", { name: "Files" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Checks" }));
     expect(
       screen.getByText(
         "Complete details will load when the current turn finishes.",

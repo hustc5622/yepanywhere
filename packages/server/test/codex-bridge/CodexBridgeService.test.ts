@@ -1,5 +1,6 @@
 import {
   existsSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
   rmSync,
@@ -24,6 +25,8 @@ import {
   getCodexEventDiagnostics,
   replayCodexSession,
 } from "../../src/codex-events/index.js";
+import { SessionFileLifecycle } from "../../src/session-files/lifecycle.js";
+import { SessionFileStore } from "../../src/session-files/store.js";
 import type { EventBus } from "../../src/watcher/index.js";
 
 const BRIDGE_CONTROL_TOKEN = "codex-bridge-control-test-token";
@@ -104,6 +107,225 @@ describe("CodexBridgeService", () => {
     await closeWebSocketServer(upstreamWss);
     await closeServer(upstreamServer);
   });
+
+  it.each(["legacy-blocking", "lifecycle"] as const)(
+    "captures a baseline before forwarding turn/start in %s mode",
+    async (journalMode) => {
+      const root = mkdtempSync(join(tmpdir(), "bridge-file-capture-"));
+      const cwd = join(root, "project");
+      mkdirSync(cwd);
+      writeFileSync(join(cwd, "report.md"), "before");
+      const store = new SessionFileStore(join(root, "store"));
+      await bridge.shutdown();
+      bridge = new CodexBridgeService({
+        enabled: true,
+        host: "127.0.0.1",
+        port: bridgePort,
+        upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
+        journalMode,
+        fileLifecycle: new SessionFileLifecycle(store),
+      });
+      let client: WebSocket | undefined;
+      try {
+        await bridge.start();
+        client = await connect(`ws://127.0.0.1:${bridgePort}`);
+        await waitFor(() => upstreamSocket !== null);
+        const started = waitForJson(client);
+        client.send(
+          JSON.stringify({ id: 1, method: "thread/start", params: { cwd } }),
+        );
+        await waitFor(() =>
+          upstreamMessages.some((m) => m.method === "thread/start"),
+        );
+        upstreamSocket?.send(
+          JSON.stringify({
+            id: 1,
+            result: { thread: { id: "capture-thread", cwd }, cwd },
+          }),
+        );
+        await started;
+        client.send(
+          JSON.stringify({
+            id: 2,
+            method: "turn/start",
+            params: { threadId: "capture-thread", input: [] },
+          }),
+        );
+        await waitFor(() =>
+          upstreamMessages.some((m) => m.method === "turn/start"),
+        );
+        expect(existsSync(join(store.directory, "executions"))).toBe(true);
+        writeFileSync(join(cwd, "report.md"), "after");
+        upstreamSocket?.send(
+          JSON.stringify({
+            id: 2,
+            result: { turn: { id: "capture-turn", status: "inProgress" } },
+          }),
+        );
+        upstreamSocket?.send(
+          JSON.stringify({
+            method: "turn/completed",
+            params: {
+              threadId: "capture-thread",
+              turn: { id: "capture-turn", status: "interrupted" },
+            },
+          }),
+        );
+        const scope = {
+          provider: "codex" as const,
+          sessionId: "capture-thread",
+        };
+        await vi.waitFor(async () =>
+          expect(await store.listRecords(scope)).toHaveLength(1),
+        );
+        const ids = await store.listRecords(scope);
+        const record = await store.readRecord(scope, ids[0] ?? "missing");
+        expect(record).toMatchObject({
+          scope: { turnId: "capture-turn" },
+          execution: { status: "interrupted", coverage: "full" },
+        });
+        expect(record.changes).toEqual([
+          expect.objectContaining({ path: "report.md", kind: "modified" }),
+        ]);
+        expect(
+          (
+            await store.readBlob(record.changes[0]?.before?.blob ?? "missing")
+          ).toString(),
+        ).toBe("before");
+      } finally {
+        client?.close();
+        await bridge.shutdown();
+        rmSync(root, { recursive: true, force: true });
+      }
+    },
+  );
+
+  describe.each(["legacy-blocking", "lifecycle"] as const)(
+    "file environment inheritance in %s mode",
+    (journalMode) => {
+      it.each(["request", "response", "resume", "fork", "notification"])(
+        "does not capture local files for a remote environment from %s",
+        async (source) => {
+          const root = mkdtempSync(join(tmpdir(), "bridge-file-environment-"));
+          const cwd = join(root, "project");
+          mkdirSync(cwd);
+          writeFileSync(join(cwd, "local-only.md"), "local content");
+          const store = new SessionFileStore(join(root, "store"));
+          const lifecycle = new SessionFileLifecycle(store);
+          const begin = vi.spyOn(lifecycle, "begin");
+          await bridge.shutdown();
+          bridge = new CodexBridgeService({
+            enabled: true,
+            host: "127.0.0.1",
+            port: bridgePort,
+            upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
+            journalMode,
+            fileLifecycle: lifecycle,
+          });
+          let client: WebSocket | undefined;
+          try {
+            await bridge.start();
+            client = await connect(`ws://127.0.0.1:${bridgePort}`);
+            await waitFor(() => upstreamSocket !== null);
+            const environments = [{ environmentId: "remote-host", cwd }];
+            const thread = { id: "remote-thread", cwd };
+            const started = waitForJson(client);
+            if (source === "notification") {
+              upstreamSocket?.send(
+                JSON.stringify({
+                  method: "thread/started",
+                  params: { thread: { ...thread, environments } },
+                }),
+              );
+            } else {
+              const method =
+                source === "resume"
+                  ? "thread/resume"
+                  : source === "fork"
+                    ? "thread/fork"
+                    : "thread/start";
+              client.send(
+                JSON.stringify({
+                  id: 1,
+                  method,
+                  params: {
+                    cwd,
+                    ...(method !== "thread/start"
+                      ? { threadId: "parent" }
+                      : {}),
+                    ...(source === "request" ? { environments } : {}),
+                  },
+                }),
+              );
+              await waitFor(() => upstreamMessages.some((m) => m.id === 1));
+              upstreamSocket?.send(
+                JSON.stringify({
+                  id: 1,
+                  result: {
+                    thread: {
+                      ...thread,
+                      ...(source !== "request" ? { environments } : {}),
+                    },
+                    cwd,
+                  },
+                }),
+              );
+            }
+            await started;
+            client.send(
+              JSON.stringify({
+                id: 2,
+                method: "turn/start",
+                params: { threadId: thread.id, input: [] },
+              }),
+            );
+            await waitFor(() => upstreamMessages.some((m) => m.id === 2));
+            expect(begin).not.toHaveBeenCalled();
+            // The notification also omits environments; it must not start a
+            // late local capture after the request correctly skipped one.
+            const turnStarted = waitForJson(client);
+            upstreamSocket?.send(
+              JSON.stringify({
+                method: "turn/started",
+                params: {
+                  threadId: thread.id,
+                  turn: { id: "remote-turn", status: "inProgress" },
+                },
+              }),
+            );
+            await turnStarted;
+            expect(begin).not.toHaveBeenCalled();
+            expect(existsSync(join(store.directory, "executions"))).toBe(false);
+
+            // An authoritative empty environment selection restores local
+            // capture, rather than permanently blacklisting this thread.
+            const localThread = waitForJson(client);
+            upstreamSocket?.send(
+              JSON.stringify({
+                method: "thread/started",
+                params: { thread: { ...thread, environments: [] } },
+              }),
+            );
+            await localThread;
+            client.send(
+              JSON.stringify({
+                id: 3,
+                method: "turn/start",
+                params: { threadId: thread.id, input: [], environments: [] },
+              }),
+            );
+            await waitFor(() => upstreamMessages.some((m) => m.id === 3));
+            expect(begin).toHaveBeenCalledOnce();
+            expect(existsSync(join(store.directory, "executions"))).toBe(true);
+          } finally {
+            client?.close();
+            await bridge.shutdown();
+            rmSync(root, { recursive: true, force: true });
+          }
+        },
+      );
+    },
+  );
 
   it("defaults to lifecycle without constructing canonical ingress or touching the legacy store", async () => {
     const port = await findAvailablePort();

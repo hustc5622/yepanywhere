@@ -20,12 +20,20 @@ import type { Context, Hono } from "hono";
 import { computeEditAugment } from "../augments/edit-augments.js";
 import { renderMarkdownToHtml } from "../augments/markdown-augments.js";
 import type { CodexAppServerHistoryReader } from "../codex-history/CodexAppServerHistoryReader.js";
+import { getDataDir } from "../config.js";
 import type {
   DisplaySelection,
   SessionDisplayService,
   SessionDisplaySource,
 } from "../display/SessionDisplayService.js";
 import type { ProjectScanner } from "../projects/scanner.js";
+import {
+  decodeSavedText,
+  readSavedFileRecords,
+  savedFileActivities,
+} from "../session-files/reader.js";
+import { SessionFileStore } from "../session-files/store.js";
+import { RelativePathSchema } from "../session-files/types.js";
 import {
   buildSessionDisplayProjection,
   decodeSessionDisplayDetailRef,
@@ -86,6 +94,7 @@ export interface SessionDisplayRuntimeState {
 }
 
 export interface SessionDisplayRoutesDeps {
+  sessionFileStore?: SessionFileStore;
   displayService?: SessionDisplayService;
   scanner: Pick<ProjectScanner, "getOrCreateProject">;
   providerResolution: ProviderResolutionDeps;
@@ -114,7 +123,7 @@ interface ResolvedDisplaySession {
 
 class SessionDisplayRouteError extends Error {
   constructor(
-    readonly status: 400 | 404 | 409 | 413 | 503,
+    readonly status: 400 | 404 | 409 | 413 | 415 | 503,
     readonly code: string,
     message: string,
   ) {
@@ -269,12 +278,80 @@ export function registerSessionDisplayRoutes(
         false,
       );
       const branchId = c.req.query("branchId") || undefined;
+      if (
+        resolved.source.provider === "codex" ||
+        resolved.source.provider === "pi"
+      ) {
+        const { selected, session } = await savedRecordsForSession(
+          deps,
+          resolved,
+          branchId,
+        );
+        const all = savedFileActivities(selected.records);
+        return c.json({
+          projectId: resolved.project.id,
+          sessionId: resolved.sessionId,
+          files: all.slice(0, 500),
+          source: "snapshot",
+          coverageIncomplete: selected.incomplete || session.hasOlderMessages,
+          truncated:
+            selected.truncated || session.hasOlderMessages || all.length > 500,
+          generatedAt: new Date().toISOString(),
+        });
+      }
       const index = await readSessionFileIndex(resolved, branchId);
       return c.json(index);
     } catch (error) {
       return displayErrorResponse(c, error);
     }
   });
+
+  routes.get(
+    "/projects/:projectId/sessions/:sessionId/files/content",
+    async (c) => {
+      try {
+        const resolved = await resolveDisplaySession(
+          deps,
+          c.req.param("projectId"),
+          c.req.param("sessionId"),
+          false,
+        );
+        const path = c.req.query("path") ?? "";
+        const { store, selected, change } = await selectSavedChange(
+          deps,
+          resolved,
+          c.req.query("branchId"),
+          path,
+          c.req.query("recordId"),
+        );
+        const version = change.after ?? change.before;
+        if (!version)
+          throw new SessionDisplayRouteError(
+            404,
+            "SESSION_FILE_VERSION_MISSING",
+            "Saved version is unavailable",
+          );
+        const bytes = await store.readBlob(version.blob);
+        const content = decodeSavedText(bytes);
+        const renderedMarkdownHtml =
+          content !== undefined && /\.(md|markdown)$/i.test(path)
+            ? await renderMarkdownToHtml(content)
+            : undefined;
+        return c.json({
+          path,
+          recordId: selected.id,
+          content,
+          renderedMarkdownHtml,
+          binary: content === undefined,
+          bytes: bytes.length,
+          deleted: !change.after,
+          complete: selected.record.complete,
+        });
+      } catch (error) {
+        return displayErrorResponse(c, error);
+      }
+    },
+  );
 
   // Diff of one indexed file against the state it had when the session began,
   // reconstructed from the session's own edit calls.
@@ -288,7 +365,12 @@ export function registerSessionDisplayRoutes(
           c.req.param("sessionId"),
           false,
         );
-        let body: { path?: unknown; fullContext?: unknown; branchId?: unknown };
+        let body: {
+          path?: unknown;
+          fullContext?: unknown;
+          branchId?: unknown;
+          recordId?: unknown;
+        };
         try {
           body = await c.req.json();
         } catch {
@@ -308,6 +390,41 @@ export function registerSessionDisplayRoutes(
         }
         const branchId =
           typeof body.branchId === "string" ? body.branchId : undefined;
+        if (
+          resolved.source.provider === "codex" ||
+          resolved.source.provider === "pi"
+        ) {
+          const { store, selected, change } = await selectSavedChange(
+            deps,
+            resolved,
+            branchId,
+            path,
+            typeof body.recordId === "string" ? body.recordId : undefined,
+          );
+          const before = change.before
+            ? decodeSavedText(await store.readBlob(change.before.blob))
+            : "";
+          const after = change.after
+            ? decodeSavedText(await store.readBlob(change.after.blob))
+            : "";
+          if (before === undefined || after === undefined)
+            throw new SessionDisplayRouteError(
+              415,
+              "SESSION_FILE_BINARY",
+              "Binary file diff is unavailable",
+            );
+          const augment = await computeEditAugment(
+            "session-snapshot-diff",
+            { file_path: path, old_string: before, new_string: after },
+            body.fullContext === true ? 999_999 : 3,
+          );
+          return c.json({
+            path,
+            exact: selected.record.complete,
+            diffHtml: augment.diffHtml,
+            structuredPatch: augment.structuredPatch,
+          });
+        }
         const ops = await readSessionFileEdits(resolved, branchId, path);
         if (!ops || ops.length === 0) {
           throw new SessionDisplayRouteError(
@@ -1149,6 +1266,107 @@ function selectDisplayTurns(
     hasOlder: selectedQuestionOffset > 0,
     firstTurnId: turns.find((turn) => turn.question)?.id,
   };
+}
+
+const savedFileSelectionCache = new Map<
+  string,
+  {
+    stamp: string;
+    selected: Awaited<ReturnType<typeof readSavedFileRecords>>;
+    hasOlderMessages: boolean;
+  }
+>();
+
+async function savedRecordsForSession(
+  deps: SessionDisplayRoutesDeps,
+  resolved: ResolvedDisplaySession,
+  branchId?: string,
+) {
+  const provider = resolved.source.provider;
+  if (provider !== "codex" && provider !== "pi")
+    throw new SessionDisplayRouteError(
+      404,
+      "SESSION_FILE_SNAPSHOTS_UNAVAILABLE",
+      "Saved files are unavailable for this provider",
+    );
+  const store =
+    deps.sessionFileStore ??
+    new SessionFileStore(join(getDataDir(), "session-file-snapshots"));
+  const ids = await store.listRecords({
+    provider,
+    sessionId: resolved.sessionId,
+  });
+  const stamp = `${await sessionFileIndexStamp(resolved)}:${createHash("sha256").update(ids.join(",")).digest("hex")}`;
+  const key = JSON.stringify([
+    store.directory,
+    resolved.project.path,
+    provider,
+    resolved.sessionId,
+    branchId,
+  ]);
+  const cached = savedFileSelectionCache.get(key);
+  if (cached?.stamp === stamp)
+    return {
+      store,
+      selected: cached.selected,
+      session: { hasOlderMessages: cached.hasOlderMessages },
+    };
+  const session = await loadSessionForFileIndex(resolved, branchId);
+  const selected = await readSavedFileRecords(
+    store,
+    provider,
+    resolved.sessionId,
+    resolved.project.path,
+    session.messages,
+    ids,
+  );
+  if (savedFileSelectionCache.size >= 16) {
+    const first = savedFileSelectionCache.keys().next().value;
+    if (first) savedFileSelectionCache.delete(first);
+  }
+  savedFileSelectionCache.set(key, {
+    stamp,
+    selected,
+    hasOlderMessages: session.hasOlderMessages,
+  });
+  return {
+    store,
+    selected,
+    session: { hasOlderMessages: session.hasOlderMessages },
+  };
+}
+
+async function selectSavedChange(
+  deps: SessionDisplayRoutesDeps,
+  resolved: ResolvedDisplaySession,
+  branchId: string | undefined,
+  path: string,
+  recordId?: string,
+) {
+  if (!RelativePathSchema.safeParse(path).success)
+    throw new SessionDisplayRouteError(
+      400,
+      "SESSION_FILE_INVALID_PATH",
+      "Expected a workspace-relative path",
+    );
+  const { store, selected } = await savedRecordsForSession(
+    deps,
+    resolved,
+    branchId,
+  );
+  const match = selected.records.find(
+    (entry) =>
+      (!recordId || entry.id === recordId) &&
+      entry.record.changes.some((change) => change.path === path),
+  );
+  const change = match?.record.changes.find((entry) => entry.path === path);
+  if (!match || !change)
+    throw new SessionDisplayRouteError(
+      404,
+      "SESSION_FILE_VERSION_MISSING",
+      "No saved version in the selected session branch",
+    );
+  return { store, selected: match, change };
 }
 
 const SESSION_FILE_INDEX_MAX_MESSAGES = 20_000;

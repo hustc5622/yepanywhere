@@ -1517,5 +1517,17 @@
   "feishuAuthState_refresh_uncertain": "续期中断，请重新授权恢复",
   "feishuAuthState_refreshing": "正在续期",
   "sessionFileDiffPartial": "基线不完整",
-  "sessionFileDiffPartialHint": "本会话起始内容有一部分无法重建，diff 可能少算了改动。"
+  "sessionFileDiffPartialHint": "本会话起始内容有一部分无法重建，diff 可能少算了改动。",
+  "sessionSavedVersion": "会话保存版本",
+  "sessionSavedDiff": "本次执行的变更",
+  "sessionSavedCurrent": "当前工作区文件",
+  "sessionSavedObserved": "执行期间观测到变更",
+  "sessionSavedPartial": "采集覆盖不完整，部分变更可能未记录。",
+  "sessionSavedNoFiles": "当前分支暂无已采集的文件变更，历史改动不回填。",
+  "sessionSavedUnavailable": "无法加载该保存版本或差异。",
+  "sessionSavedBinary": "已保存二进制文件，暂不支持预览。",
+  "sessionSavedDeletedPreview": "本次执行删除了此文件，当前展示删除前保存的版本。",
+  "sessionSavedAdded": "新增",
+  "sessionSavedModified": "修改",
+  "sessionSavedDeleted": "删除"
 }

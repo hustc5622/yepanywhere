@@ -32,6 +32,7 @@ import type {
 import { FileViewerModal } from "./FilePathLink";
 import { ProviderBadge } from "./ProviderBadge";
 import { SessionFileDiffPanel } from "./SessionFileDiffPanel";
+import { SessionSavedFilePanel } from "./SessionSavedFilePanel";
 import { CodexNativeGoalBlock } from "./blocks/codex/CodexNativeGoalBlock";
 import {
   type ChecklistItem,
@@ -60,6 +61,7 @@ interface SessionInspectorProps {
   activeToolApproval?: ActiveToolApproval;
   projectId: string;
   sessionId: string;
+  branchId?: string;
   provider?: ProviderName;
   model?: string;
   reasoningEffort?: string;
@@ -148,6 +150,7 @@ export function SessionInspector({
   activeToolApproval,
   projectId,
   sessionId,
+  branchId,
   provider,
   model,
   reasoningEffort,
@@ -209,17 +212,20 @@ export function SessionInspector({
 
   // Server-derived index covers the whole session, including files touched by
   // turns the client never paged in and writes performed via shell commands.
-  const { index: fileIndex, loading: fileIndexLoading } = useSessionFileIndex(
-    projectId,
-    sessionId,
-    {
-      enabled: isOpen && activeTab === "files",
-      revision: `${messages.length}:${status}`,
-    },
-  );
-  const fileActivities = fileIndex?.files ?? fileActivitiesFallback;
+  const {
+    index: fileIndex,
+    loading: fileIndexLoading,
+    error: fileIndexError,
+  } = useSessionFileIndex(projectId, sessionId, {
+    enabled: isOpen && activeTab === "files",
+    branchId,
+    revision: `${messages.length}:${status}`,
+  });
+  const snapshotProvider = provider === "codex" || provider === "pi";
+  const fileActivities =
+    fileIndex?.files ?? (snapshotProvider ? [] : fileActivitiesFallback);
   const fileIndexPending =
-    !fileIndex && fileIndexLoading && fileActivitiesFallback.length === 0;
+    !fileIndex && fileIndexLoading && fileActivities.length === 0;
 
   useEffect(() => {
     if (
@@ -494,7 +500,14 @@ export function SessionInspector({
             title={t("sessionInspectorFiles")}
             count={fileActivities.length}
           >
-            {!fileIndex &&
+            {fileIndex?.coverageIncomplete ? (
+              <EmptyState text={t("sessionSavedPartial")} />
+            ) : null}
+            {snapshotProvider && fileIndexError ? (
+              <EmptyState text={t("sessionSavedUnavailable")} />
+            ) : null}
+            {!snapshotProvider &&
+            !fileIndex &&
             !hasLegacyDetails &&
             (legacyDetailsLoading || legacyDetailsDeferred) ? (
               <EmptyState
@@ -506,6 +519,8 @@ export function SessionInspector({
               />
             ) : fileActivities.length > 0 ? (
               <InspectorFilesTab
+                key={`${sessionId}:${branchId ?? ""}`}
+                branchId={branchId}
                 activities={fileActivities}
                 projectId={projectId}
                 sessionId={sessionId}
@@ -516,7 +531,13 @@ export function SessionInspector({
             ) : fileIndexPending ? (
               <EmptyState text={t("sessionInspectorLoadingDetails")} />
             ) : (
-              <EmptyState text={t("sessionInspectorNoFiles")} />
+              <EmptyState
+                text={t(
+                  snapshotProvider
+                    ? "sessionSavedNoFiles"
+                    : "sessionInspectorNoFiles",
+                )}
+              />
             )}
           </InspectorSection>
         ) : null}
@@ -728,6 +749,7 @@ function InspectorFilesTab({
   activities,
   projectId,
   sessionId,
+  branchId,
   truncated,
   onSelectMessage,
   t,
@@ -735,13 +757,14 @@ function InspectorFilesTab({
   activities: SessionFileActivity[];
   projectId: string;
   sessionId: string;
+  branchId?: string;
   truncated: boolean;
   onSelectMessage: (messageId: string) => void;
   t: TFunction;
 }) {
   const [openFile, setOpenFile] = useState<{
     path: string;
-    mode: "diff" | "file";
+    mode: "diff" | "file" | "saved";
   } | null>(null);
   const [expanded, setExpanded] = useState<Record<string, boolean>>({});
 
@@ -757,6 +780,10 @@ function InspectorFilesTab({
       return items && items.length > 0 ? [{ kind, items }] : [];
     });
   }, [activities]);
+
+  const selectedActivity = activities.find(
+    (file) => file.path === openFile?.path,
+  );
 
   return (
     <>
@@ -781,7 +808,11 @@ function InspectorFilesTab({
                       setOpenFile({
                         path: activity.path,
                         // Only files with a measurable delta have a diff to show.
-                        mode: hasDelta(activity) ? "diff" : "file",
+                        mode: activity.savedVersions?.length
+                          ? "saved"
+                          : hasDelta(activity)
+                            ? "diff"
+                            : "file",
                       })
                     }
                     disabled={activity.outsideProject}
@@ -795,7 +826,9 @@ function InspectorFilesTab({
                         {shortPath(activity.path)}
                       </span>
                       <span className="session-inspector-row-meta">
-                        {activity.tools.slice(0, 3).join(", ")}
+                        {activity.source === "snapshot"
+                          ? t("sessionSavedObserved")
+                          : activity.tools.slice(0, 3).join(", ")}
                         {activity.count > 1 ? ` - ${activity.count}` : ""}
                         {activity.confidence === "low"
                           ? ` - ${t("sessionInspectorFileMaybe")}`
@@ -848,15 +881,27 @@ function InspectorFilesTab({
           {t("sessionInspectorFilesTruncated")}
         </div>
       ) : null}
-      {openFile?.mode === "diff" ? (
+      {openFile?.mode === "saved" && selectedActivity ? (
+        <SessionSavedFilePanel
+          projectId={projectId}
+          sessionId={sessionId}
+          branchId={branchId}
+          file={selectedActivity}
+          onClose={() => setOpenFile(null)}
+          onOpenCurrent={() =>
+            setOpenFile({ path: openFile.path, mode: "file" })
+          }
+        />
+      ) : openFile?.mode === "diff" ? (
         <SessionFileDiffPanel
           projectId={projectId}
           sessionId={sessionId}
+          branchId={branchId}
           filePath={openFile.path}
           onClose={() => setOpenFile(null)}
           onOpenFile={() => setOpenFile({ path: openFile.path, mode: "file" })}
         />
-      ) : openFile ? (
+      ) : openFile?.mode === "file" ? (
         <FileViewerModal
           projectId={projectId}
           filePath={openFile.path}

@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PiProvider } from "../../src/sdk/providers/pi.js";
+import { SessionFileStore } from "../../src/session-files/store.js";
 
 /**
  * Pi persists a prompt under its own entry id and never stores Yep's client
@@ -107,6 +108,7 @@ describe("PiProvider persisted user entry echo", () => {
     await writeFile(fakePiPath, FAKE_PI_RPC);
     await chmod(fakePiPath, 0o755);
 
+    vi.stubEnv("YEP_ANYWHERE_DATA_DIR", join(root, "data"));
     vi.stubEnv("YEP_LLM_GATEWAY_API_KEY", "test-only-secret");
     vi.stubEnv("YEP_LLM_GATEWAY_API_BASE", "https://gateway.example/v1");
     vi.stubEnv("YEP_LLM_GATEWAY_MODELS", "");
@@ -183,6 +185,23 @@ describe("PiProvider persisted user entry echo", () => {
         supersedesMessageId: "client-2",
       });
       expect(secondUsers[1]?.tempId).toBeUndefined();
+
+      const fileStore = new SessionFileStore(
+        join(root, "data", "session-file-snapshots"),
+      );
+      const fileScope = {
+        provider: "pi" as const,
+        sessionId: "pi-echo-session",
+      };
+      const fileRecords = await Promise.all(
+        (await fileStore.listRecords(fileScope)).map((id) =>
+          fileStore.readRecord(fileScope, id),
+        ),
+      );
+      expect(fileRecords.map((record) => record.scope.turnId).sort()).toEqual([
+        "user-entry-1",
+        "user-entry-2",
+      ]);
 
       const cursors = (
         await readFile(join(projectPath, "get-entries.log"), "utf8")

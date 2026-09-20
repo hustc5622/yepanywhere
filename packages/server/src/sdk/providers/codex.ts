@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 /**
  * Codex Provider implementation using codex app-server JSON-RPC.
  *
@@ -89,6 +90,7 @@ import { getDataDir } from "../../config.js";
 import { getLogger } from "../../logging/logger.js";
 import { encodeProjectId } from "../../projects/paths.js";
 import { ensureRuntimeToken } from "../../runtime/token.js";
+import { SessionFileLifecycle } from "../../session-files/lifecycle.js";
 import {
   GeneratedArtifactMaterializer,
   UploadManager,
@@ -2845,6 +2847,7 @@ export class CodexProvider implements AgentProvider {
     let appServer: CodexAppServerClient | undefined;
     let startupStage = "transport-selection";
     let transportKind: "stdio" | "bridge-websocket" = "stdio";
+    const fileLifecycle = new SessionFileLifecycle();
 
     let sessionId = options.resumeSessionId ?? "";
     let eventIngress: CodexEventIngress | null = null;
@@ -3520,6 +3523,43 @@ export class CodexProvider implements AgentProvider {
               ? activeEventIngress.notificationFromEvent(event)
               : raw;
           const params = asRecord(notification.params);
+          if (
+            transportKind === "stdio" &&
+            notification.method === "turn/started"
+          ) {
+            const nativeId = asRecord(params?.turn)?.id;
+            if (typeof nativeId === "string") {
+              await fileLifecycle.begin(
+                {
+                  provider: "codex",
+                  sessionId,
+                  branchId: sessionId,
+                  turnId: nativeId,
+                },
+                options.cwd,
+                "codex-provider",
+                nativeId,
+                true,
+              );
+              await fileLifecycle.bind(sessionId, nativeId);
+            }
+          }
+          if (
+            transportKind === "stdio" &&
+            notification.method === "turn/completed"
+          ) {
+            const turn = asRecord(params?.turn);
+            if (typeof turn?.id === "string")
+              await fileLifecycle.finish(
+                sessionId,
+                turn.id,
+                turn.status === "failed"
+                  ? "failed"
+                  : turn.status === "interrupted"
+                    ? "interrupted"
+                    : "completed",
+              );
+          }
           if (notification.method === "turn/started") {
             const turn = asRecord(params?.turn);
             if (typeof turn?.id === "string")
@@ -3607,6 +3647,20 @@ export class CodexProvider implements AgentProvider {
               ? { clientMessageId: update.metadata.clientMessageId }
               : {}),
           });
+        if (transportKind === "stdio") {
+          await fileLifecycle.begin(
+            {
+              provider: "codex",
+              sessionId,
+              branchId: sessionId,
+              turnId: `pending:${message.uuid ?? randomUUID()}`,
+            },
+            options.cwd,
+            "codex-provider",
+            message.uuid ?? randomUUID(),
+          );
+          if (signal.aborted) break;
+        }
         let turnResult: TurnStartResponse | undefined;
         let activeTurnId: string;
         let sourceEvent: "turn/start" | "turn/steer" = "turn/start";
@@ -3692,6 +3746,8 @@ export class CodexProvider implements AgentProvider {
         }
 
         runtimeState.activeTurnId = activeTurnId;
+        if (transportKind === "stdio")
+          await fileLifecycle.bind(sessionId, activeTurnId);
         // Publish the provider-accepted echo only after turn/start returns the
         // authoritative turn identity. Process separately publishes the
         // optimistic admission echo with the same UUID. A resumed active turn
@@ -3746,6 +3802,12 @@ export class CodexProvider implements AgentProvider {
         let turnComplete =
           turnResult !== undefined && turnResult.turn.status !== "inProgress";
         let emittedTurnError = false;
+        let fileTurnStatus: "completed" | "failed" | "interrupted" =
+          turnResult?.turn.status === "failed"
+            ? "failed"
+            : turnResult?.turn.status === "interrupted"
+              ? "interrupted"
+              : "completed";
 
         while (!turnComplete && !signal.aborted) {
           const rawNotification = await nextNotification();
@@ -3929,9 +3991,21 @@ export class CodexProvider implements AgentProvider {
             if (canonicalNotification.method === "error") {
               emittedTurnError = true;
             }
+            const fileTurn = asRecord(
+              asRecord(canonicalNotification.params)?.turn,
+            );
+            fileTurnStatus =
+              canonicalNotification.method === "error" ||
+              fileTurn?.status === "failed"
+                ? "failed"
+                : fileTurn?.status === "interrupted"
+                  ? "interrupted"
+                  : "completed";
             turnComplete = true;
           }
         }
+        if (transportKind === "stdio" && !signal.aborted)
+          await fileLifecycle.finish(sessionId, activeTurnId, fileTurnStatus);
         runtimeState.activeTurnId = null;
 
         // If turn failed without an emitted error notification, surface start response error.
@@ -3995,6 +4069,7 @@ export class CodexProvider implements AgentProvider {
       runtimeState.activeTurnId = null;
       runtimeState.ready = false;
       await appServer?.closeAndWait();
+      await fileLifecycle.close("codex-provider");
     }
 
     yield logMessage({

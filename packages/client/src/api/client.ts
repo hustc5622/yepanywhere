@@ -45,6 +45,7 @@ import type {
   SessionQuestionPage,
   SessionRetryStatus,
   SessionRuntime,
+  SessionSavedFileContent,
   SessionThinkingDetail,
   SessionToolGroupDetailPage,
   SlashCommand,
@@ -1266,10 +1267,37 @@ export const api = {
     );
   },
 
+  getSessionSavedFile: (
+    projectId: string,
+    sessionId: string,
+    options: {
+      path: string;
+      recordId: string;
+      branchId?: string;
+      signal?: AbortSignal;
+    },
+  ) => {
+    const query = new URLSearchParams({
+      path: options.path,
+      recordId: options.recordId,
+    });
+    if (options.branchId) query.set("branchId", options.branchId);
+    return fetchJSON<SessionSavedFileContent>(
+      `/projects/${projectId}/sessions/${sessionId}/files/content?${query}`,
+      { signal: options.signal },
+    );
+  },
+
   getSessionFileDiff: (
     projectId: string,
     sessionId: string,
-    params: { path: string; fullContext?: boolean; signal?: AbortSignal },
+    params: {
+      path: string;
+      fullContext?: boolean;
+      branchId?: string;
+      recordId?: string;
+      signal?: AbortSignal;
+    },
   ) =>
     fetchJSON<SessionFileDiff>(
       `/projects/${projectId}/sessions/${sessionId}/files/diff`,
@@ -1278,6 +1306,8 @@ export const api = {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           path: params.path,
+          branchId: params.branchId,
+          recordId: params.recordId,
           ...(params.fullContext ? { fullContext: true } : {}),
         }),
         ...(params.signal ? { signal: params.signal } : {}),

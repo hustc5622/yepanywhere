@@ -1,3 +1,4 @@
+import { SessionFileStore } from "../../../src/session-files/store.js";
 /**
  * Unit tests for CodexProvider.
  *
@@ -15,7 +16,7 @@ import {
 } from "node:fs";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import type { GeneratedArtifactManifest } from "@yep-anywhere/shared";
 import { afterAll, beforeAll, describe, expect, it, vi } from "vitest";
@@ -195,6 +196,54 @@ describe("CodexProvider", () => {
   });
 
   describe("startSession", () => {
+    it("captures document writes before turn/start and persists the native turn identity", async () => {
+      const root = mkdtempSync(join(tmpdir(), "codex-file-lifecycle-"));
+      const data = mkdtempSync(join(tmpdir(), "codex-file-store-"));
+      const previousData = process.env.YEP_ANYWHERE_DATA_DIR;
+      const previousFile = process.env.CODEX_FAKE_SNAPSHOT_FILE;
+      const previousCapture = process.env.CODEX_FAKE_CAPTURE;
+      process.env.CODEX_FAKE_CAPTURE = join(data, "requests.json");
+      process.env.YEP_ANYWHERE_DATA_DIR = data;
+      process.env.CODEX_FAKE_SNAPSHOT_FILE = join(root, "report.md");
+      let session:
+        | Awaited<ReturnType<CodexProvider["startSession"]>>
+        | undefined;
+      try {
+        const provider = new CodexProvider({
+          codexPath: writeFakeCodexAppServer(root),
+          eventSpine: { store: new InMemoryCodexEventStore() },
+        });
+        session = await provider.startSession({
+          cwd: root,
+          initialMessage: { text: "write document", uuid: "file-user" },
+        });
+        for await (const message of session.iterator) {
+          if (message.type === "result") break;
+        }
+        const store = new SessionFileStore(
+          join(data, "session-file-snapshots"),
+        );
+        const scope = { provider: "codex" as const, sessionId: "thread-new" };
+        const ids = await store.listRecords(scope);
+        expect(ids).toHaveLength(1);
+        const record = await store.readRecord(scope, ids[0] ?? "missing");
+        expect(record).toMatchObject({
+          scope: { turnId: "turn-rewrite" },
+          execution: { status: "completed", coverage: "full" },
+        });
+        expect(record.changes).toContainEqual(
+          expect.objectContaining({ path: "report.md", kind: "added" }),
+        );
+      } finally {
+        session?.abort();
+        restoreEnv("YEP_ANYWHERE_DATA_DIR", previousData);
+        restoreEnv("CODEX_FAKE_SNAPSHOT_FILE", previousFile);
+        restoreEnv("CODEX_FAKE_CAPTURE", previousCapture);
+        rmSync(root, { recursive: true, force: true });
+        rmSync(data, { recursive: true, force: true });
+      }
+    });
+
     function writeFakeCodexAppServer(tempDir: string): string {
       const fakeCodexPath = join(tempDir, "fake-codex.js");
       writeFileSync(
@@ -461,6 +510,7 @@ function handle(message) {
     return;
   }
   if (message.method === "turn/start") {
+    if (process.env.CODEX_FAKE_SNAPSHOT_FILE) fs.writeFileSync(process.env.CODEX_FAKE_SNAPSHOT_FILE, "Codex generated document");
     activeThreadId = message.params.threadId;
     const eventMode = process.env.CODEX_FAKE_EVENT_MODE === "1";
     const activeTurn = process.env.CODEX_FAKE_ACTIVE_TURN === "1";

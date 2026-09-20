@@ -216,6 +216,8 @@ export type {
   SessionFileActivityKind,
   SessionFileActivitySource,
   SessionFileDiff,
+  SessionSavedFileVersion,
+  SessionSavedFileContent,
   NormalizedSessionFilePath,
 } from "./session-files.js";
 export {

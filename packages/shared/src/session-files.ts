@@ -14,7 +14,25 @@ export type SessionFileActivityKind =
   | "other";
 
 /** Where the path was observed. `shell` results are heuristic. */
-export type SessionFileActivitySource = "tool" | "shell";
+export type SessionFileActivitySource = "tool" | "shell" | "snapshot";
+
+export interface SessionSavedFileVersion {
+  recordId: string;
+  timestamp: string;
+  kind: "added" | "modified" | "deleted";
+  complete: boolean;
+}
+
+export interface SessionSavedFileContent {
+  path: string;
+  recordId: string;
+  content?: string;
+  renderedMarkdownHtml?: string;
+  binary: boolean;
+  bytes: number;
+  deleted: boolean;
+  complete: boolean;
+}
 
 export type SessionFileActivityConfidence = "high" | "low";
 
@@ -40,6 +58,8 @@ export interface SessionFileActivity {
   deletions?: number;
   /** Number of edit operations this session applied to the file. */
   edits?: number;
+  /** Newest first. Each version is one observed execution delta, never a merged worktree diff. */
+  savedVersions?: SessionSavedFileVersion[];
 }
 
 export interface SessionFileDiff {
@@ -61,6 +81,8 @@ export interface SessionFileActivityIndex {
   /** True when the underlying message scan hit its cap. */
   truncated: boolean;
   generatedAt: string;
+  source?: "snapshot" | "transcript";
+  coverageIncomplete?: boolean;
 }
 
 export const SESSION_FILE_ACTIVITY_MAX_PATHS = 2_000;

@@ -1517,5 +1517,17 @@
   "feishuAuthState_refresh_uncertain": "Renewal interrupted; reconnect to recover",
   "feishuAuthState_refreshing": "Renewing authorization",
   "sessionFileDiffPartial": "Partial baseline",
-  "sessionFileDiffPartialHint": "Part of this session's starting content could not be reconstructed, so the diff may understate the changes."
+  "sessionFileDiffPartialHint": "Part of this session's starting content could not be reconstructed, so the diff may understate the changes.",
+  "sessionSavedVersion": "Saved session version",
+  "sessionSavedDiff": "Changes in this execution",
+  "sessionSavedCurrent": "Current workspace file",
+  "sessionSavedObserved": "Observed during execution",
+  "sessionSavedPartial": "Capture coverage is incomplete; some changes may be missing.",
+  "sessionSavedNoFiles": "No captured file changes in this branch. Historical changes are not backfilled.",
+  "sessionSavedUnavailable": "This saved version or diff is unavailable.",
+  "sessionSavedBinary": "Binary file captured. Preview is not supported yet.",
+  "sessionSavedDeletedPreview": "Deleted in this execution. Showing the saved version before deletion.",
+  "sessionSavedAdded": "Added",
+  "sessionSavedModified": "Modified",
+  "sessionSavedDeleted": "Deleted"
 }

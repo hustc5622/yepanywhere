@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { PiProvider } from "../../src/sdk/providers/pi.js";
+import { SessionFileStore } from "../../src/session-files/store.js";
 
 const FAKE_PI_RPC = String.raw`#!/usr/bin/env node
 const fs = require("node:fs");
@@ -53,6 +54,7 @@ process.stdin.on("data", (chunk) => {
     } else if (command.type === "get_state") {
       output({ type: "response", id: command.id, command: "get_state", success: true, data: { sessionId: "pi-fork-session", thinkingLevel: "high", isStreaming: false, isCompacting: false, steeringMode: "all", followUpMode: "all", autoCompactionEnabled: true, messageCount: 0, pendingMessageCount: 0 } });
     } else if (command.type === "prompt") {
+      fs.writeFileSync("report.md", "Pi produced this document");
       output({ type: "response", id: command.id, command: "prompt", success: true });
       output({ type: "message_start", message: { role: "assistant", content: [] } });
       output({ type: "message_update", usage: { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, totalTokens: 2 }, assistantMessageEvent: { type: "text_start", contentIndex: 0 } });
@@ -130,6 +132,7 @@ describe("PiProvider RPC integration", () => {
       })}\n`,
     );
 
+    vi.stubEnv("YEP_ANYWHERE_DATA_DIR", join(root, "data"));
     vi.stubEnv("YEP_LLM_GATEWAY_API_KEY", "test-only-secret");
     vi.stubEnv("YEP_LLM_GATEWAY_API_BASE", "https://gateway.example/v1");
     // The picker only offers a curated set of production model families; an
@@ -235,6 +238,24 @@ describe("PiProvider RPC integration", () => {
         respectProviderDecision: false,
       }),
     );
+
+    const fileStore = new SessionFileStore(
+      join(root, "data", "session-file-snapshots"),
+    );
+    const fileScope = { provider: "pi" as const, sessionId: "pi-fork-session" };
+    const fileRecords = await fileStore.listRecords(fileScope);
+    expect(fileRecords).toHaveLength(1);
+    const changeRecord = await fileStore.readRecord(
+      fileScope,
+      fileRecords[0] ?? "missing",
+    );
+    expect(changeRecord).toMatchObject({
+      execution: { status: "completed", coverage: "full" },
+      scope: { turnId: "yep-user" },
+    });
+    expect(changeRecord.changes).toEqual([
+      expect.objectContaining({ path: "report.md", kind: "added" }),
+    ]);
 
     const log = (await readFile(logPath, "utf8"))
       .trim()
