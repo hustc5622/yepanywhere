@@ -7,6 +7,7 @@ import type {
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import { useDocumentVisibility } from "../hooks/useDocumentVisibility";
 import { useGitStatus } from "../hooks/useGitStatus";
 import { useSessionFileIndex } from "../hooks/useSessionFileIndex";
 import { useI18n } from "../i18n";
@@ -163,50 +164,57 @@ export function SessionInspector({
   const { t, locale } = useI18n();
   const [activeTab, setActiveTab] = useState<InspectorTab>("questions");
   const [copiedSessionId, setCopiedSessionId] = useState(false);
+  const pageVisible = useDocumentVisibility();
+  const isVisible = isOpen && pageVisible;
   const {
     gitStatus,
     loading: gitLoading,
     error: gitError,
-  } = useGitStatus(projectId);
+  } = useGitStatus(isVisible && activeTab === "git" ? projectId : undefined);
   const isCodexProvider = provider === "codex" || provider === "codex-oss";
 
   const renderItems = useMemo(
     () =>
-      preprocessMessages(messages, {
-        markdown: markdownAugments,
-        activeToolApproval,
-      }),
-    [activeToolApproval, markdownAugments, messages],
+      isVisible
+        ? preprocessMessages(messages, {
+            markdown: markdownAugments,
+            activeToolApproval,
+          })
+        : [],
+    [isVisible, activeToolApproval, markdownAugments, messages],
   );
 
   const messageQuestions = useMemo(
-    () => buildQuestionItems(renderItems),
-    [renderItems],
+    () => (isVisible ? buildQuestionItems(renderItems) : []),
+    [isVisible, renderItems],
   );
   const questions = useMemo(
-    () => mergeQuestionItems(userQuestions, messageQuestions),
-    [messageQuestions, userQuestions],
+    () =>
+      isVisible ? mergeQuestionItems(userQuestions, messageQuestions) : [],
+    [isVisible, messageQuestions, userQuestions],
   );
-  const fileActivitiesFallback = useMemo(
-    () => buildFileActivities(renderItems),
-    [renderItems],
+  const checks = useMemo(
+    () =>
+      isVisible && activeTab === "checks" ? buildCheckItems(renderItems) : [],
+    [isVisible, activeTab, renderItems],
   );
-  const checks = useMemo(() => buildCheckItems(renderItems), [renderItems]);
   const subagents = useMemo(
-    () => buildSubagentItems(renderItems),
-    [renderItems],
+    () => (isVisible ? buildSubagentItems(renderItems) : []),
+    [isVisible, renderItems],
   );
   const planProgress = useMemo(
-    () => buildPlanProgress(renderItems, t),
-    [renderItems, t],
+    () => (isVisible ? buildPlanProgress(renderItems, t) : null),
+    [isVisible, renderItems, t],
   );
   const currentCodexGoal = useMemo(
-    () => (isCodexProvider ? buildCurrentCodexGoal(renderItems) : null),
-    [isCodexProvider, renderItems],
+    () =>
+      isVisible && isCodexProvider ? buildCurrentCodexGoal(renderItems) : null,
+    [isVisible, isCodexProvider, renderItems],
   );
   const codexChannelSummaries = useMemo(
-    () => (isCodexProvider ? buildCodexChannelSummaries(messages) : []),
-    [isCodexProvider, messages],
+    () =>
+      isVisible && isCodexProvider ? buildCodexChannelSummaries(messages) : [],
+    [isVisible, isCodexProvider, messages],
   );
   const legacyDetailsDeferred = !hasLegacyDetails && processState === "in-turn";
 
@@ -217,11 +225,18 @@ export function SessionInspector({
     loading: fileIndexLoading,
     error: fileIndexError,
   } = useSessionFileIndex(projectId, sessionId, {
-    enabled: isOpen && activeTab === "files",
+    enabled: isVisible && activeTab === "files",
     branchId,
-    revision: `${messages.length}:${status}`,
+    revision: `${messages.length}:${status.owner}:${processState ?? ""}`,
   });
   const snapshotProvider = provider === "codex" || provider === "pi";
+  const fileActivitiesFallback = useMemo(
+    () =>
+      isVisible && activeTab === "files" && !snapshotProvider && !fileIndex
+        ? buildFileActivities(renderItems)
+        : [],
+    [isVisible, activeTab, snapshotProvider, fileIndex, renderItems],
+  );
   const fileActivities =
     fileIndex?.files ?? (snapshotProvider ? [] : fileActivitiesFallback);
   const fileIndexPending =
@@ -229,7 +244,7 @@ export function SessionInspector({
 
   useEffect(() => {
     if (
-      !isOpen ||
+      !isVisible ||
       hasLegacyDetails ||
       legacyDetailsDeferred ||
       legacyDetailsLoading ||
@@ -240,7 +255,7 @@ export function SessionInspector({
     void onLoadLegacyDetails?.();
   }, [
     hasLegacyDetails,
-    isOpen,
+    isVisible,
     legacyDetailsDeferred,
     legacyDetailsError,
     legacyDetailsLoading,
@@ -268,6 +283,8 @@ export function SessionInspector({
       console.error("Failed to copy session ID:", error);
     }
   };
+
+  if (presentation === "drawer" && !isOpen) return null;
 
   const body = (
     <>
@@ -664,7 +681,6 @@ export function SessionInspector({
   );
 
   if (presentation === "drawer") {
-    if (!isOpen) return null;
     return (
       <div
         className="session-inspector-overlay"

@@ -42,6 +42,7 @@ import { useActivityBusState } from "../hooks/useActivityBusState";
 import { useConnection } from "../hooks/useConnection";
 import { useDeveloperMode } from "../hooks/useDeveloperMode";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
+import { useDocumentVisibility } from "../hooks/useDocumentVisibility";
 import { useDraftAttachments } from "../hooks/useDraftAttachments";
 import type { DraftControls } from "../hooks/useDraftPersistence";
 import { useEngagementTracking } from "../hooks/useEngagementTracking";
@@ -55,6 +56,7 @@ import {
   type StreamingMarkdownCallbacks,
   useSession,
 } from "../hooks/useSession";
+import { useSessionInspectorHistory } from "../hooks/useSessionInspectorHistory";
 import { useSessionInspectorPreference } from "../hooks/useSessionInspectorPreference";
 import { useI18n } from "../i18n";
 import { useNavigationLayout } from "../layouts";
@@ -89,7 +91,6 @@ import {
 import {
   buildSessionDisplayRenderItems,
   mergeSessionInspectorMessages,
-  resolveSessionInspectorNavigation,
 } from "../lib/sessionDisplay";
 import { generateUUID } from "../lib/uuid";
 import type { Message, Session, SessionNavigationState } from "../types";
@@ -171,17 +172,6 @@ function calculateDisplayForkExcludedTurns(
   if (index < 0) return null;
   const excluded = questions.length - index;
   return excluded > 0 ? excluded : null;
-}
-
-function isRetryableInspectorHistoryError(error: unknown): boolean {
-  const code =
-    error && typeof error === "object"
-      ? (error as { code?: unknown }).code
-      : undefined;
-  return (
-    code === "SESSION_HISTORY_CURSOR_STALE" ||
-    code === "SESSION_HISTORY_CHANGED"
-  );
 }
 
 function getApprovalAgentName(
@@ -425,32 +415,23 @@ function SessionPageContent({
     setIsExpanded: setInspectorExpanded,
   } = useSessionInspectorPreference();
   const [isSessionSearchOpen, setSessionSearchOpen] = useState(false);
-  const [legacyInspectorMessages, setLegacyInspectorMessages] = useState<
-    Message[] | null
-  >(null);
-  const [legacyInspectorLoading, setLegacyInspectorLoading] = useState(false);
-  const [legacyInspectorError, setLegacyInspectorError] = useState(false);
-  const legacyInspectorLoadGenerationRef = useRef(0);
-  const legacyInspectorRevisionRef = useRef<string | null>(null);
-  // biome-ignore lint/correctness/useExhaustiveDependencies: session/branch identity intentionally invalidates the derived Inspector index
-  useEffect(() => {
-    legacyInspectorLoadGenerationRef.current += 1;
-    legacyInspectorRevisionRef.current = null;
-    setLegacyInspectorMessages(null);
-    setLegacyInspectorLoading(false);
-    setLegacyInspectorError(false);
-  }, [actualSessionId, selectedBranchId]);
-  useEffect(() => {
-    if (processState !== "in-turn") return;
-    // The lightweight display and live tail remain authoritative while a turn
-    // is changing. A complete Inspector index spans multiple persisted-history
-    // pages, so cancel its logical generation instead of mixing pages from
-    // different active snapshots or surfacing a transient stale cursor.
-    legacyInspectorLoadGenerationRef.current += 1;
-    legacyInspectorRevisionRef.current = null;
-    setLegacyInspectorLoading(false);
-    setLegacyInspectorError(false);
-  }, [processState]);
+  const pageVisible = useDocumentVisibility();
+  const isInspectorVisible =
+    pageVisible && (isWideScreen ? isInspectorExpanded : isInspectorDrawerOpen);
+  const {
+    messages: legacyInspectorMessages,
+    loading: legacyInspectorLoading,
+    error: legacyInspectorError,
+    load: loadLegacyInspectorHistory,
+  } = useSessionInspectorHistory({
+    projectId,
+    sessionId: actualSessionId,
+    branchId: selectedBranchId,
+    revision: displayPage?.revision,
+    processState,
+    enabled: isInspectorVisible,
+    onError: () => showToast(t("sessionInspectorDetailsLoadFailed"), "error"),
+  });
   const handleTargetFocused = useCallback(() => {
     setTargetMessageId(null);
   }, []);
@@ -465,156 +446,12 @@ function SessionPageContent({
     setSessionSearchOpen(false);
   }, []);
 
-  const loadLegacyInspectorHistory = useCallback(
-    async (force = false) => {
-      if (
-        !displayPage ||
-        processState === "in-turn" ||
-        (!force && legacyInspectorMessages) ||
-        legacyInspectorLoading
-      )
-        return;
-      const generation = ++legacyInspectorLoadGenerationRef.current;
-      const projectedRevision = displayPage.revision;
-      setLegacyInspectorLoading(true);
-      setLegacyInspectorError(false);
-      try {
-        let loaded: Message[] | null = null;
-        let lastError: unknown;
-        for (let attempt = 0; attempt < 2; attempt += 1) {
-          try {
-            let data = await api.getSession(
-              projectId,
-              actualSessionId,
-              undefined,
-              {
-                view: "canonical",
-                inspectorProjection: true,
-                tailCompactions: 2,
-                maxMessages: 100,
-                branchId: selectedBranchId,
-              },
-            );
-            if (generation !== legacyInspectorLoadGenerationRef.current) return;
-            let snapshot = data.messages.map((message) => ({
-              ...message,
-              _source: "jsonl" as const,
-            }));
-            for (let pageIndex = 0; pageIndex < 1_000; pageIndex += 1) {
-              const paginationInfo = data.pagination;
-              if (
-                !paginationInfo?.hasOlderMessages ||
-                !paginationInfo.truncatedBeforeMessageId
-              ) {
-                break;
-              }
-              data = await api.getSession(
-                projectId,
-                actualSessionId,
-                undefined,
-                {
-                  view: "canonical",
-                  inspectorProjection: true,
-                  tailCompactions: 2,
-                  maxMessages: 100,
-                  beforeMessageId: paginationInfo.truncatedBeforeMessageId,
-                  rolloutRevision: paginationInfo.rolloutRevision,
-                  branchId: selectedBranchId,
-                },
-              );
-              if (generation !== legacyInspectorLoadGenerationRef.current)
-                return;
-              snapshot = [
-                ...data.messages.map((message) => ({
-                  ...message,
-                  _source: "jsonl" as const,
-                })),
-                ...snapshot,
-              ];
-            }
-            if (data.pagination?.hasOlderMessages) {
-              throw new Error(
-                "Session index exceeds the safe pagination budget",
-              );
-            }
-            loaded = snapshot;
-            break;
-          } catch (error) {
-            lastError = error;
-            if (generation !== legacyInspectorLoadGenerationRef.current) return;
-            if (attempt === 0 && isRetryableInspectorHistoryError(error)) {
-              continue;
-            }
-            throw error;
-          }
-        }
-        if (!loaded)
-          throw lastError ?? new Error("Session index is unavailable");
-        if (generation !== legacyInspectorLoadGenerationRef.current) return;
-        const seen = new Set<string>();
-        setLegacyInspectorMessages(
-          resolveSessionInspectorNavigation(
-            loaded.filter((message) => {
-              const id = getMessageId(message);
-              if (seen.has(id)) return false;
-              seen.add(id);
-              return true;
-            }),
-          ),
-        );
-        legacyInspectorRevisionRef.current = projectedRevision;
-      } catch (error) {
-        if (generation !== legacyInspectorLoadGenerationRef.current) return;
-        console.error("Failed to load session inspector index:", error);
-        if (force && legacyInspectorMessages) {
-          // Keep the last complete safe index and wait for the next revision
-          // instead of turning one transient idle refresh into a retry loop.
-          legacyInspectorRevisionRef.current = projectedRevision;
-          return;
-        }
-        setLegacyInspectorError(true);
-        showToast(t("sessionInspectorDetailsLoadFailed"), "error");
-      } finally {
-        if (generation === legacyInspectorLoadGenerationRef.current) {
-          setLegacyInspectorLoading(false);
-        }
-      }
-    },
-    [
-      actualSessionId,
-      displayPage,
-      legacyInspectorLoading,
-      legacyInspectorMessages,
-      projectId,
-      processState,
-      selectedBranchId,
-      showToast,
-      t,
-    ],
-  );
-
-  useEffect(() => {
-    if (
-      !displayPage ||
-      !legacyInspectorMessages ||
-      legacyInspectorLoading ||
-      processState !== "idle" ||
-      legacyInspectorRevisionRef.current === displayPage.revision
-    ) {
-      return;
-    }
-    void loadLegacyInspectorHistory(true);
-  }, [
-    displayPage,
-    legacyInspectorLoading,
-    legacyInspectorMessages,
-    loadLegacyInspectorHistory,
-    processState,
-  ]);
-
   const inspectorMessages = useMemo(
-    () => mergeSessionInspectorMessages(legacyInspectorMessages, messages),
-    [legacyInspectorMessages, messages],
+    () =>
+      isInspectorVisible
+        ? mergeSessionInspectorMessages(legacyInspectorMessages, messages)
+        : [],
+    [isInspectorVisible, legacyInspectorMessages, messages],
   );
 
   // React Router can reuse this component when only the session parameter
@@ -2821,7 +2658,11 @@ function SessionPageContent({
             hasLegacyDetails={!displayPage || legacyInspectorMessages !== null}
             legacyDetailsLoading={legacyInspectorLoading}
             legacyDetailsError={legacyInspectorError}
-            onLoadLegacyDetails={() => loadLegacyInspectorHistory()}
+            onLoadLegacyDetails={
+              legacyInspectorError
+                ? () => loadLegacyInspectorHistory(true)
+                : undefined
+            }
             markdownAugments={markdownAugments}
             activeToolApproval={activeToolApproval}
             projectId={projectId}
@@ -2852,7 +2693,11 @@ function SessionPageContent({
           hasLegacyDetails={!displayPage || legacyInspectorMessages !== null}
           legacyDetailsLoading={legacyInspectorLoading}
           legacyDetailsError={legacyInspectorError}
-          onLoadLegacyDetails={() => loadLegacyInspectorHistory()}
+          onLoadLegacyDetails={
+            legacyInspectorError
+              ? () => loadLegacyInspectorHistory(true)
+              : undefined
+          }
           markdownAugments={markdownAugments}
           activeToolApproval={activeToolApproval}
           projectId={projectId}
