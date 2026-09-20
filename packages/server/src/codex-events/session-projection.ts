@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { isSafeGeneratedArtifactFileName } from "@yep-anywhere/shared";
 import {
   type GeneratedArtifactManifest,
   type SessionLastTurnStatus,
@@ -1642,30 +1643,6 @@ function isSafeGeneratedArtifactKind(
     value === "text" ||
     value === "video"
   );
-}
-
-function isSafeGeneratedArtifactFileName(value: string): boolean {
-  if (
-    value.length === 0 ||
-    value.length > 120 ||
-    value === "." ||
-    value === ".." ||
-    value.includes("..")
-  ) {
-    return false;
-  }
-  for (const character of value) {
-    const code = character.charCodeAt(0);
-    if (
-      code <= 0x1f ||
-      code === 0x7f ||
-      character === "/" ||
-      character === "\\"
-    ) {
-      return false;
-    }
-  }
-  return true;
 }
 
 function generatedArtifactSourceKey(

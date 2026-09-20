@@ -1,5 +1,26 @@
 import { describe, expect, it } from "vitest";
-import { isGeneratedArtifactDownloadUrl } from "../src/generated-artifact.js";
+import {
+  isGeneratedArtifactDownloadUrl,
+  isSafeGeneratedArtifactFileName,
+} from "../src/generated-artifact.js";
+
+it("keeps public filename validation consistent at the manifest and download boundaries", () => {
+  for (const name of ["报告.pdf", "a".repeat(120), "my report.md"])
+    expect(isSafeGeneratedArtifactFileName(name)).toBe(true);
+  for (const name of [
+    "",
+    ".",
+    "..",
+    "a..b",
+    "../file",
+    "dir/file",
+    "dir\\file",
+    "bad\u0000name",
+    "bad\u007fname",
+    "a".repeat(121),
+  ])
+    expect(isSafeGeneratedArtifactFileName(name)).toBe(false);
+});
 
 describe("isGeneratedArtifactDownloadUrl", () => {
   it("accepts only a canonical relative managed upload route", () => {

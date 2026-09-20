@@ -58,7 +58,10 @@ export type {
   GeneratedArtifactSourceType,
   GeneratedArtifactWarning,
 } from "./generated-artifact.js";
-export { isGeneratedArtifactDownloadUrl } from "./generated-artifact.js";
+export {
+  isGeneratedArtifactDownloadUrl,
+  isSafeGeneratedArtifactFileName,
+} from "./generated-artifact.js";
 export type {
   CodexThreadItemRenderPolicy,
   CodexThreadItemType,
@@ -842,3 +845,5 @@ export {
   tokenizeShellCommand,
   unwrapShellLauncherCommand,
 } from "./shell-command.js";
+
+export { getSessionArchiveBlock } from "./session-archive.js";

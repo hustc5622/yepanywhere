@@ -7,6 +7,7 @@ import {
   type UploadErrorMessage,
   type UploadProgressMessage,
   type UploadServerMessage,
+  isSafeGeneratedArtifactFileName,
   isUrlProjectId,
 } from "@yep-anywhere/shared";
 import type { Context } from "hono";
@@ -315,7 +316,7 @@ export function createUploadRoutes(deps: UploadDeps): Hono {
         !isSafeUploadPathSegment(sessionId) ||
         !/^ga_[a-f0-9]{32}$/.test(artifactId) ||
         !/^[a-f0-9]{64}$/.test(sha256) ||
-        !isSafeGeneratedArtifactPublicFileName(fileName)
+        !isSafeGeneratedArtifactFileName(fileName)
       ) {
         return c.json({ error: "Invalid generated artifact" }, 400);
       }
@@ -528,17 +529,6 @@ function isSafeManagedUploadFilename(value: string): boolean {
     ) &&
     !hasUnsafeUploadPathCharacter(value.slice(37)) &&
     !value.includes("..")
-  );
-}
-
-function isSafeGeneratedArtifactPublicFileName(value: string): boolean {
-  return (
-    value.length > 0 &&
-    value.length <= 120 &&
-    value !== "." &&
-    value !== ".." &&
-    !value.includes("..") &&
-    !hasUnsafeUploadPathCharacter(value)
   );
 }
 

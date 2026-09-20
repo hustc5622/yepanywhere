@@ -32,6 +32,7 @@ import {
   type GeneratedArtifactSource,
   type UploadedFile,
   isGeneratedArtifactDownloadUrl,
+  isSafeGeneratedArtifactFileName,
   isUrlProjectId,
 } from "@yep-anywhere/shared";
 import { getDataDir } from "../config.js";
@@ -1826,30 +1827,6 @@ function matchesGeneratedArtifactExpectation(
     (expected.expiresAtMs === undefined ||
       record.expiresAtMs === expected.expiresAtMs)
   );
-}
-
-function isSafeGeneratedArtifactFileName(value: string): boolean {
-  if (
-    value.length === 0 ||
-    value.length > 120 ||
-    value === "." ||
-    value === ".." ||
-    value.includes("..")
-  ) {
-    return false;
-  }
-  for (const character of value) {
-    const code = character.charCodeAt(0);
-    if (
-      code <= 0x1f ||
-      code === 0x7f ||
-      character === "/" ||
-      character === "\\"
-    ) {
-      return false;
-    }
-  }
-  return true;
 }
 
 function isSafeMimeType(value: string): boolean {

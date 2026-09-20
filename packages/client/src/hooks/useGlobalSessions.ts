@@ -1,4 +1,8 @@
-import { type SessionKind, sessionMatchesKind } from "@yep-anywhere/shared";
+import {
+  type SessionKind,
+  getSessionArchiveBlock,
+  sessionMatchesKind,
+} from "@yep-anywhere/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type GlobalSessionItem,
@@ -86,53 +90,13 @@ function isBusyActivity(activity: GlobalSessionItem["activity"]): boolean {
   );
 }
 
-function getArchiveBlockForActivity(
-  ownership: GlobalSessionItem["ownership"],
-  activity: GlobalSessionItem["activity"],
-): Partial<
-  Pick<
-    NonNullable<GlobalSessionItem["runtime"]>,
-    "archiveBlockCode" | "archiveBlockReason"
-  >
-> {
-  if (activity === "waiting-input") {
-    return {
-      archiveBlockCode: "waiting_input",
-      archiveBlockReason:
-        "This session is waiting for input. Respond or stop it before archiving.",
-    };
-  }
-  if (activity === "hold") {
-    return {
-      archiveBlockCode: "agent_on_hold",
-      archiveBlockReason:
-        "This session is on hold. Resume or stop it before archiving.",
-    };
-  }
-  if (activity === "in-turn") {
-    return {
-      archiveBlockCode: "agent_in_turn",
-      archiveBlockReason:
-        "This session is currently running. Wait for it to finish or stop it before archiving.",
-    };
-  }
-  if (ownership.owner === "external") {
-    return {
-      archiveBlockCode: "external_active",
-      archiveBlockReason:
-        "This session is controlled by an active external process. Wait for it to finish before archiving.",
-    };
-  }
-  return {};
-}
-
 function updateRuntimeSnapshot(
   session: GlobalSessionItem,
   ownership: GlobalSessionItem["ownership"],
   activity: GlobalSessionItem["activity"],
 ): GlobalSessionItem["runtime"] {
   const isBusy = isBusyActivity(activity) || ownership.owner === "external";
-  const block = isBusy ? getArchiveBlockForActivity(ownership, activity) : {};
+  const block = isBusy ? getSessionArchiveBlock(ownership, activity) : {};
   return {
     ...session.runtime,
     ownership,
