@@ -244,18 +244,8 @@ describe("PiProvider RPC integration", () => {
     );
     const fileScope = { provider: "pi" as const, sessionId: "pi-fork-session" };
     const fileRecords = await fileStore.listRecords(fileScope);
-    expect(fileRecords).toHaveLength(1);
-    const changeRecord = await fileStore.readRecord(
-      fileScope,
-      fileRecords[0] ?? "missing",
-    );
-    expect(changeRecord).toMatchObject({
-      execution: { status: "completed", coverage: "full" },
-      scope: { turnId: "yep-user" },
-    });
-    expect(changeRecord.changes).toEqual([
-      expect.objectContaining({ path: "report.md", kind: "added" }),
-    ]);
+    // Shell/fixture writes are not attributed by scanning the workspace.
+    expect(fileRecords).toEqual([]);
 
     const log = (await readFile(logPath, "utf8"))
       .trim()

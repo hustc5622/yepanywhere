@@ -2,6 +2,7 @@ import type {
   MarkdownAugment,
   SessionFileActivity,
   SessionFileActivityKind,
+  SessionFileCoverageReason,
   SessionQuestion,
 } from "@yep-anywhere/shared";
 import type { ReactNode } from "react";
@@ -46,6 +47,18 @@ type FileActivityKind = SessionFileActivityKind;
 type CheckStatus = "passed" | "failed" | "running" | "pending";
 type CodexMessagePhase = "commentary" | "final_answer";
 type TFunction = ReturnType<typeof useI18n>["t"];
+
+const COVERAGE_REASON_KEYS: Record<
+  SessionFileCoverageReason,
+  Parameters<TFunction>[0]
+> = {
+  "byte-budget": "sessionSavedCoverageBudget",
+  "too-large": "sessionSavedCoverageFileSize",
+  "entry-limit": "sessionSavedCoverageEntries",
+  "file-unavailable": "sessionSavedCoverageUnavailable",
+  "execution-partial": "sessionSavedCoverageExecution",
+  "workspace-mismatch": "sessionSavedCoverageWorkspace",
+};
 
 interface SessionInspectorProps {
   presentation: InspectorPresentation;
@@ -517,8 +530,32 @@ export function SessionInspector({
             title={t("sessionInspectorFiles")}
             count={fileActivities.length}
           >
+            {fileIndex?.source === "operation" ? (
+              <EmptyState text={t("sessionOperationCoverage")} />
+            ) : null}
+            {fileIndex?.source === "snapshot" ? (
+              <EmptyState text={t("sessionOperationLegacy")} />
+            ) : null}
+            {fileIndex?.unavailableOperations ? (
+              <EmptyState
+                text={t("sessionOperationUnknown", {
+                  count: fileIndex.unavailableOperations,
+                })}
+              />
+            ) : null}
             {fileIndex?.coverageIncomplete ? (
-              <EmptyState text={t("sessionSavedPartial")} />
+              <EmptyState
+                text={[
+                  t("sessionSavedPartial"),
+                  ...Array.from(
+                    new Set(fileIndex.coverageReasons ?? []),
+                  ).flatMap((reason) =>
+                    COVERAGE_REASON_KEYS[reason]
+                      ? [t(COVERAGE_REASON_KEYS[reason])]
+                      : [],
+                  ),
+                ].join(" ")}
+              />
             ) : null}
             {snapshotProvider && fileIndexError ? (
               <EmptyState text={t("sessionSavedUnavailable")} />
@@ -550,9 +587,11 @@ export function SessionInspector({
             ) : (
               <EmptyState
                 text={t(
-                  snapshotProvider
-                    ? "sessionSavedNoFiles"
-                    : "sessionInspectorNoFiles",
+                  fileIndex?.source === "operation"
+                    ? "sessionOperationNoFiles"
+                    : snapshotProvider
+                      ? "sessionSavedNoFiles"
+                      : "sessionInspectorNoFiles",
                 )}
               />
             )}
@@ -842,25 +881,50 @@ function InspectorFilesTab({
                         {shortPath(activity.path)}
                       </span>
                       <span className="session-inspector-row-meta">
-                        {activity.source === "snapshot"
-                          ? t("sessionSavedObserved")
-                          : activity.tools.slice(0, 3).join(", ")}
+                        {activity.source === "operation"
+                          ? t("sessionOperationTotals")
+                          : activity.source === "snapshot"
+                            ? t("sessionSavedObserved")
+                            : activity.tools.slice(0, 3).join(", ")}
+                        {activity.unknownOperations
+                          ? ` · ${t("sessionOperationUnknown", { count: activity.unknownOperations })}`
+                          : ""}
                         {activity.count > 1 ? ` - ${activity.count}` : ""}
                         {activity.confidence === "low"
                           ? ` - ${t("sessionInspectorFileMaybe")}`
                           : ""}
                       </span>
                     </span>
-                    {hasDelta(activity) ? (
-                      <span className="session-inspector-file-delta">
-                        {activity.additions ? (
+                    {activity.additions !== undefined ||
+                    activity.deletions !== undefined ||
+                    activity.unknownOperations ? (
+                      <span
+                        className="session-inspector-file-delta"
+                        title={
+                          activity.source === "operation"
+                            ? t("sessionOperationTotals")
+                            : activity.source === "snapshot"
+                              ? t("sessionSavedLineCounts")
+                              : undefined
+                        }
+                      >
+                        {activity.additions !== undefined ? (
                           <span className="git-lines-added">
                             +{activity.additions}
                           </span>
                         ) : null}
-                        {activity.deletions ? (
+                        {activity.deletions !== undefined ? (
                           <span className="git-lines-deleted">
                             -{activity.deletions}
+                          </span>
+                        ) : null}
+                        {activity.unknownOperations ? (
+                          <span>
+                            {t(
+                              activity.knownOperations
+                                ? "sessionOperationPartialStats"
+                                : "sessionOperationUnknownStats",
+                            )}
                           </span>
                         ) : null}
                       </span>

@@ -51,6 +51,52 @@ beforeEach(() => {
 afterEach(cleanup);
 
 describe("SessionSavedFilePanel", () => {
+  it("opens an operation patch without requesting missing full content", async () => {
+    vi.mocked(api.getSessionFileDiff).mockResolvedValue({
+      path: "report.md",
+      exact: true,
+      diffHtml: "<pre>operation patch</pre>",
+      structuredPatch: [],
+    });
+    const operationFile: SessionFileActivity = {
+      ...file,
+      source: "operation",
+      savedVersions: [
+        {
+          recordId: "op:record",
+          timestamp: "2026-09-21T00:00:00Z",
+          kind: "modified",
+          complete: true,
+          contentAvailable: false,
+          additions: 2,
+          deletions: 1,
+        },
+      ],
+    };
+    render(
+      <I18nProvider>
+        <SessionSavedFilePanel
+          projectId="p"
+          sessionId="s"
+          file={operationFile}
+          onClose={vi.fn()}
+          onOpenCurrent={vi.fn()}
+        />
+      </I18nProvider>,
+    );
+    expect(await screen.findByText("operation patch")).toBeDefined();
+    expect(api.getSessionSavedFile).not.toHaveBeenCalled();
+    expect(
+      screen
+        .getByRole("button", { name: "Saved session version" })
+        .hasAttribute("disabled"),
+    ).toBe(true);
+    expect(screen.getByText(/\+2 \/ -1/)).toBeDefined();
+    expect(
+      screen.getByRole("button", { name: "Changes in this operation" }),
+    ).toBeDefined();
+  });
+
   it("loads selected saved versions and diff with the branch, keeping current-file access explicit", async () => {
     vi.mocked(api.getSessionSavedFile).mockImplementation(
       async (_p, _s, options) => ({

@@ -198,10 +198,8 @@ describe("PiProvider persisted user entry echo", () => {
           fileStore.readRecord(fileScope, id),
         ),
       );
-      expect(fileRecords.map((record) => record.scope.turnId).sort()).toEqual([
-        "user-entry-1",
-        "user-entry-2",
-      ]);
+      // User-entry echoes still work, but no longer start workspace snapshots.
+      expect(fileRecords).toEqual([]);
 
       const cursors = (
         await readFile(join(projectPath, "get-entries.log"), "utf8")

@@ -1,6 +1,7 @@
 import { constants } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
+import { installPiFileOperationTools } from "./pi-file-operations.mjs";
 
 /**
  * Yep's temporary, process-local Pi integration.
@@ -458,6 +459,8 @@ export default function yepPiExtension(pi) {
   }
 
   registerPartialOutputRelay(pi);
+  const fileOperationDirectory = process.env.YEP_PI_FILE_OPERATIONS_DIRECTORY;
+  Reflect.deleteProperty(process.env, "YEP_PI_FILE_OPERATIONS_DIRECTORY");
 
   pi.on("tool_call", async (event, ctx) => {
     const approved = await ctx.ui.confirm(
@@ -472,6 +475,16 @@ export default function yepPiExtension(pi) {
     }
     return undefined;
   });
+  return installPiFileOperationTools(pi, fileOperationDirectory).catch(
+    (error) => {
+      // An older/standalone Pi installation may not export operation adapters.
+      // Keep its native tools usable and report that capture is unavailable.
+      console.error(
+        "[Yep] File operation capture unavailable:",
+        error instanceof Error ? error.message : String(error),
+      );
+    },
+  );
 }
 
 export { APPROVAL_TITLE_PREFIX, PARTIAL_OUTPUT_PREFIX };

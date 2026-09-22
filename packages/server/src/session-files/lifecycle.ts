@@ -8,7 +8,10 @@ import { recordSnapshotChanges } from "./changes.js";
 import { SessionFileStore } from "./store.js";
 import type { FileChangeRecord, FileChangeScope } from "./types.js";
 
-type Status = NonNullable<FileChangeRecord["execution"]>["status"];
+type Status = Exclude<
+  NonNullable<FileChangeRecord["execution"]>["status"],
+  "active"
+>;
 interface Execution {
   id: string;
   scope: FileChangeScope;
@@ -19,6 +22,7 @@ interface Execution {
   before?: string;
   after?: string;
   recordId?: string;
+  lastSnapshot?: string;
   coverage: "full" | "partial";
   status: "active" | Status;
   captureError?: string;
@@ -32,11 +36,13 @@ interface Execution {
 export class SessionFileLifecycle {
   private active = new Map<string, Execution>();
   private chain: Promise<void> = Promise.resolve();
+  private timers = new Map<string, ReturnType<typeof setTimeout>>();
 
   constructor(
     readonly store = new SessionFileStore(
       join(getDataDir(), "session-file-snapshots"),
     ),
+    private readonly options: { checkpointIntervalMs?: number } = {},
   ) {}
 
   begin(
@@ -80,7 +86,70 @@ export class SessionFileLifecycle {
       execution.nativeTurnId = turnId;
       execution.scope.turnId = turnId;
       await this.save(execution);
+      this.scheduleCheckpoint(execution);
     });
+  }
+
+  /** Publish cumulative observations while a long turn is still executing. */
+  checkpoint(sessionId: string, executionId?: string): Promise<void> {
+    return this.run(async () => {
+      const execution = this.active.get(sessionId);
+      if (
+        !execution?.before ||
+        !execution.nativeTurnId ||
+        (executionId && execution.id !== executionId)
+      )
+        return;
+      try {
+        const previousId = execution.lastSnapshot ?? execution.before;
+        const after = await captureWorkspace(
+          this.store,
+          execution.workspace,
+          {},
+          { reuseSnapshotId: previousId },
+        );
+        const previous = await this.store.readSnapshot(previousId);
+        if (
+          JSON.stringify(previous.files) !==
+          JSON.stringify(after.snapshot.files)
+        ) {
+          const delta = await recordSnapshotChanges(
+            this.store,
+            execution.scope,
+            execution.before,
+            after.id,
+            {
+              status: "active",
+              coverage: execution.coverage,
+              captureId: execution.id,
+            },
+          );
+          execution.recordId = delta.id;
+          execution.lastSnapshot = after.id;
+          await this.save(execution);
+        }
+      } catch (error) {
+        this.failed(execution, error);
+        await this.save(execution);
+      }
+    });
+  }
+
+  private scheduleCheckpoint(execution: Execution): void {
+    const interval = this.options.checkpointIntervalMs ?? 15_000;
+    if (interval <= 0 || !execution.before || this.timers.has(execution.id))
+      return;
+    const timer = setTimeout(() => {
+      void this.checkpoint(execution.scope.sessionId, execution.id).finally(
+        () => {
+          this.timers.delete(execution.id);
+          if (this.active.get(execution.scope.sessionId) === execution)
+            this.scheduleCheckpoint(execution);
+        },
+      );
+    }, interval);
+    timer.unref?.();
+    this.timers.set(execution.id, timer);
   }
 
   finish(
@@ -119,6 +188,8 @@ export class SessionFileLifecycle {
 
   private async settle(execution: Execution, status: Status): Promise<void> {
     this.active.delete(execution.scope.sessionId);
+    clearTimeout(this.timers.get(execution.id));
+    this.timers.delete(execution.id);
     execution.status = status;
     if (status === "disconnected" || status === "rejected")
       execution.coverage = "partial";
@@ -134,6 +205,7 @@ export class SessionFileLifecycle {
           {
             status,
             coverage: execution.coverage,
+            captureId: execution.id,
           },
         );
         execution.recordId = delta.id;

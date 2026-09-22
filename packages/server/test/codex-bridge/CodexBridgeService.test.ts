@@ -25,8 +25,7 @@ import {
   getCodexEventDiagnostics,
   replayCodexSession,
 } from "../../src/codex-events/index.js";
-import { SessionFileLifecycle } from "../../src/session-files/lifecycle.js";
-import { SessionFileStore } from "../../src/session-files/store.js";
+import { SessionFileOperationStore } from "../../src/session-files/operation-store.js";
 import type { EventBus } from "../../src/watcher/index.js";
 
 const BRIDGE_CONTROL_TOKEN = "codex-bridge-control-test-token";
@@ -109,13 +108,13 @@ describe("CodexBridgeService", () => {
   });
 
   it.each(["legacy-blocking", "lifecycle"] as const)(
-    "captures a baseline before forwarding turn/start in %s mode",
+    "records only confirmed tool changes without scanning the workspace in %s mode",
     async (journalMode) => {
       const root = mkdtempSync(join(tmpdir(), "bridge-file-capture-"));
       const cwd = join(root, "project");
       mkdirSync(cwd);
       writeFileSync(join(cwd, "report.md"), "before");
-      const store = new SessionFileStore(join(root, "store"));
+      const store = new SessionFileOperationStore(join(root, "store"));
       await bridge.shutdown();
       bridge = new CodexBridgeService({
         enabled: true,
@@ -123,7 +122,7 @@ describe("CodexBridgeService", () => {
         port: bridgePort,
         upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
         journalMode,
-        fileLifecycle: new SessionFileLifecycle(store),
+        fileOperationStore: store,
       });
       let client: WebSocket | undefined;
       try {
@@ -154,12 +153,34 @@ describe("CodexBridgeService", () => {
         await waitFor(() =>
           upstreamMessages.some((m) => m.method === "turn/start"),
         );
-        expect(existsSync(join(store.directory, "executions"))).toBe(true);
+        expect(existsSync(join(store.directory, "executions"))).toBe(false);
         writeFileSync(join(cwd, "report.md"), "after");
         upstreamSocket?.send(
           JSON.stringify({
             id: 2,
             result: { turn: { id: "capture-turn", status: "inProgress" } },
+          }),
+        );
+        writeFileSync(join(cwd, "external.md"), "another session");
+        upstreamSocket?.send(
+          JSON.stringify({
+            method: "item/completed",
+            params: {
+              threadId: "capture-thread",
+              turnId: "capture-turn",
+              item: {
+                type: "fileChange",
+                id: "patch-1",
+                status: "completed",
+                changes: [
+                  {
+                    path: "report.md",
+                    kind: { type: "update" },
+                    diff: "--- report.md\n+++ report.md\n@@ -1 +1 @@\n-before\n+after\n",
+                  },
+                ],
+              },
+            },
           }),
         );
         upstreamSocket?.send(
@@ -172,26 +193,27 @@ describe("CodexBridgeService", () => {
           }),
         );
         const scope = {
-          provider: "codex" as const,
+          provider: "codex",
+          sourceId: "local",
           sessionId: "capture-thread",
         };
         await vi.waitFor(async () =>
-          expect(await store.listRecords(scope)).toHaveLength(1),
+          expect((await store.snapshot(scope)).operations).toHaveLength(1),
         );
-        const ids = await store.listRecords(scope);
-        const record = await store.readRecord(scope, ids[0] ?? "missing");
+        const record = (await store.snapshot(scope)).operations[0]?.record;
         expect(record).toMatchObject({
-          scope: { turnId: "capture-turn" },
-          execution: { status: "interrupted", coverage: "full" },
+          identity: { turnId: "capture-turn" },
+          outcome: "applied",
         });
-        expect(record.changes).toEqual([
-          expect.objectContaining({ path: "report.md", kind: "modified" }),
+        expect(record?.changes).toEqual([
+          expect.objectContaining({
+            path: "report.md",
+            kind: "modified",
+            patch: expect.objectContaining({
+              text: expect.stringContaining("-before"),
+            }),
+          }),
         ]);
-        expect(
-          (
-            await store.readBlob(record.changes[0]?.before?.blob ?? "missing")
-          ).toString(),
-        ).toBe("before");
       } finally {
         client?.close();
         await bridge.shutdown();
@@ -210,9 +232,8 @@ describe("CodexBridgeService", () => {
           const cwd = join(root, "project");
           mkdirSync(cwd);
           writeFileSync(join(cwd, "local-only.md"), "local content");
-          const store = new SessionFileStore(join(root, "store"));
-          const lifecycle = new SessionFileLifecycle(store);
-          const begin = vi.spyOn(lifecycle, "begin");
+          const store = new SessionFileOperationStore(join(root, "store"));
+          const begin = vi.spyOn(store, "append");
           await bridge.shutdown();
           bridge = new CodexBridgeService({
             enabled: true,
@@ -220,7 +241,7 @@ describe("CodexBridgeService", () => {
             port: bridgePort,
             upstreamUrl: `ws://127.0.0.1:${upstreamPort}`,
             journalMode,
-            fileLifecycle: lifecycle,
+            fileOperationStore: store,
           });
           let client: WebSocket | undefined;
           try {
@@ -315,8 +336,29 @@ describe("CodexBridgeService", () => {
               }),
             );
             await waitFor(() => upstreamMessages.some((m) => m.id === 3));
-            expect(begin).toHaveBeenCalledOnce();
-            expect(existsSync(join(store.directory, "executions"))).toBe(true);
+            upstreamSocket?.send(
+              JSON.stringify({
+                method: "item/completed",
+                params: {
+                  threadId: thread.id,
+                  turnId: "local-turn",
+                  item: {
+                    type: "fileChange",
+                    id: "local-patch",
+                    status: "completed",
+                    changes: [
+                      {
+                        path: "local-only.md",
+                        kind: { type: "add" },
+                        diff: "native content",
+                      },
+                    ],
+                  },
+                },
+              }),
+            );
+            await vi.waitFor(() => expect(begin).toHaveBeenCalledOnce());
+            expect(existsSync(join(store.directory, "executions"))).toBe(false);
           } finally {
             client?.close();
             await bridge.shutdown();

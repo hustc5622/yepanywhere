@@ -8,6 +8,7 @@ import {
 import type { SessionQuestion } from "@yep-anywhere/shared";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import * as fileIndexHook from "../../hooks/useSessionFileIndex";
 import { I18nProvider } from "../../i18n";
 import { UI_KEYS } from "../../lib/storageKeys";
 import type { Message, ProviderName } from "../../types";
@@ -56,6 +57,105 @@ function renderInspector(
 }
 
 describe("SessionInspector", () => {
+  it("labels operation totals and unknown statistics without a snapshot coverage warning", () => {
+    vi.spyOn(fileIndexHook, "useSessionFileIndex").mockReturnValue({
+      index: {
+        projectId: "project-1",
+        sessionId: "session-1",
+        generatedAt: "now",
+        truncated: false,
+        source: "operation",
+        schemaVersion: 2,
+        operationCoverage: "supported-tools",
+        files: [
+          {
+            path: "report.md",
+            source: "operation",
+            kind: "modified",
+            outsideProject: false,
+            confidence: "high",
+            messageId: "u",
+            count: 3,
+            tools: ["edit"],
+            additions: 5,
+            deletions: 2,
+            statisticsScope: "session-operations",
+            knownOperations: 2,
+            unknownOperations: 1,
+          },
+        ],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    renderInspector("codex", []);
+    fireEvent.click(screen.getByRole("tab", { name: "Files" }));
+    expect(screen.getByText("+5")).toBeDefined();
+    expect(screen.getByText("partial")).toBeDefined();
+    expect(screen.getByTitle("report.md").textContent).toContain(
+      "Session operation totals",
+    );
+    expect(screen.getByTitle("report.md").textContent).toContain(
+      "1 operation(s) without complete statistics",
+    );
+    expect(
+      screen.queryByText(/Some workspace changes may be missing/),
+    ).toBeNull();
+  });
+
+  it("shows saved line counts including zero and explains workspace coverage separately", () => {
+    vi.spyOn(fileIndexHook, "useSessionFileIndex").mockReturnValue({
+      index: {
+        projectId: "project-1",
+        sessionId: "session-1",
+        generatedAt: "now",
+        truncated: false,
+        coverageIncomplete: true,
+        coverageReasons: ["byte-budget", "too-large"],
+        files: [
+          {
+            path: "report.md",
+            source: "snapshot",
+            kind: "modified",
+            outsideProject: false,
+            confidence: "high",
+            messageId: "u",
+            count: 1,
+            tools: [],
+            additions: 135,
+            deletions: 0,
+            savedVersions: [
+              {
+                recordId: "r",
+                kind: "added",
+                timestamp: "now",
+                complete: true,
+              },
+            ],
+          },
+        ],
+      },
+      loading: false,
+      error: null,
+      refetch: vi.fn(),
+    });
+    renderInspector("codex", []);
+    fireEvent.click(screen.getByRole("tab", { name: "Files" }));
+    expect(screen.getByText("+135")).toBeDefined();
+    expect(screen.getByText("-0")).toBeDefined();
+    expect(
+      screen.getByTitle(
+        "Lines added and removed in the latest saved execution",
+      ),
+    ).toBeDefined();
+    expect(
+      screen.getByText(/Saved files can still be viewed/).textContent,
+    ).toContain("The total capture size limit was reached.");
+    expect(
+      screen.getByText(/Saved files can still be viewed/).textContent,
+    ).toContain("Some files exceeded the per-file size limit.");
+  });
   it("keeps transcript fallback for multi-file edits from other providers and separates external files with the same name", () => {
     const first = "/tmp/one/api_request.py";
     const second = "/tmp/two/api_request.py";
@@ -114,6 +214,7 @@ describe("SessionInspector", () => {
 
   afterEach(() => {
     cleanup();
+    vi.restoreAllMocks();
     window.localStorage.removeItem(UI_KEYS.locale);
   });
 

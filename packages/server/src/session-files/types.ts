@@ -14,6 +14,8 @@ export const RelativePathSchema = z
   );
 
 export const CapturePolicySchema = z.object({
+  /** Absent in older snapshots, which used alphabetical order. */
+  fileOrder: z.enum(["path", "source-first"]).optional(),
   maxFileBytes: z
     .number()
     .int()
@@ -30,6 +32,7 @@ export const CapturePolicySchema = z.object({
 });
 export type CapturePolicy = z.infer<typeof CapturePolicySchema>;
 export const DEFAULT_CAPTURE_POLICY: CapturePolicy = {
+  fileOrder: "source-first",
   maxFileBytes: 2 * 1024 * 1024,
   maxTotalBytes: 64 * 1024 * 1024,
   maxEntries: 20_000,
@@ -88,7 +91,10 @@ export const ChangeRecordSchema = z.object({
   complete: z.boolean(),
   execution: z
     .object({
+      /** Groups live checkpoints and the terminal observation of one execution. */
+      captureId: z.string().uuid().optional(),
       status: z.enum([
+        "active",
         "completed",
         "failed",
         "interrupted",

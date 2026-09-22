@@ -16,8 +16,12 @@ import {
   isUrlProjectId,
   normalizeSessionFilePath,
 } from "@yep-anywhere/shared";
+import { parsePatch } from "diff";
 import type { Context, Hono } from "hono";
-import { computeEditAugment } from "../augments/edit-augments.js";
+import {
+  computeEditAugment,
+  computeStructuredPatchDiffHtml,
+} from "../augments/edit-augments.js";
 import { renderMarkdownToHtml } from "../augments/markdown-augments.js";
 import type { CodexAppServerHistoryReader } from "../codex-history/CodexAppServerHistoryReader.js";
 import { getDataDir } from "../config.js";
@@ -27,10 +31,24 @@ import type {
   SessionDisplaySource,
 } from "../display/SessionDisplayService.js";
 import type { ProjectScanner } from "../projects/scanner.js";
+import { getSessionFileOperationStore } from "../session-files/codex-operations.js";
 import {
+  importCodexFileHistory,
+  importStructuredFileHistory,
+} from "../session-files/history-operations.js";
+import {
+  countOperationPatch,
+  projectFileOperations,
+  selectFileOperations,
+} from "../session-files/operation-projection.js";
+import type { SessionFileOperationStore } from "../session-files/operation-store.js";
+import { importPiFileOperations } from "../session-files/pi-operations.js";
+import {
+  addSavedFileLineCounts,
   decodeSavedText,
   readSavedFileRecords,
   savedFileActivities,
+  savedFileChangeComplete,
 } from "../session-files/reader.js";
 import { SessionFileStore } from "../session-files/store.js";
 import { RelativePathSchema } from "../session-files/types.js";
@@ -97,6 +115,7 @@ export interface SessionDisplayRuntimeState {
 
 export interface SessionDisplayRoutesDeps {
   sessionFileStore?: SessionFileStore;
+  sessionFileOperationStore?: SessionFileOperationStore;
   displayService?: SessionDisplayService;
   scanner: Pick<ProjectScanner, "getOrCreateProject">;
   providerResolution: ProviderResolutionDeps;
@@ -141,6 +160,8 @@ export function registerSessionDisplayRoutes(
   const fileIndexCaches: FileIndexCaches = {
     saved: new FileIndexCache(16),
     activity: new FileIndexCache(32),
+    operations: new FileIndexCache(16),
+    fileSessions: new FileIndexCache(16),
   };
 
   if (deps.displayService) {
@@ -290,23 +311,49 @@ export function registerSessionDisplayRoutes(
         resolved.source.provider === "codex" ||
         resolved.source.provider === "pi"
       ) {
-        const { selected, session } = await savedRecordsForSession(
+        const operations = await operationSelection(
           deps,
           fileIndexCaches,
           resolved,
           branchId,
         );
-        const all = savedFileActivities(selected.records);
+        if (
+          operations.snapshot.operations.length > 0 &&
+          c.req.query("source") !== "snapshot"
+        ) {
+          return c.json(operations.index);
+        }
+        const { selected, session, files, fileCount } =
+          await savedRecordsForSession(
+            deps,
+            fileIndexCaches,
+            resolved,
+            branchId,
+          );
+        if (files.length === 0 && c.req.query("source") !== "snapshot")
+          return c.json(operations.index);
         return c.json({
           projectId: resolved.project.id,
           sessionId: resolved.sessionId,
-          files: all.slice(0, 500),
+          files,
           source: "snapshot",
           coverageIncomplete: selected.incomplete || session.hasOlderMessages,
+          coverageReasons: selected.coverageReasons,
           truncated:
-            selected.truncated || session.hasOlderMessages || all.length > 500,
+            selected.truncated || session.hasOlderMessages || fileCount > 500,
           generatedAt: new Date().toISOString(),
         });
+      }
+      // Other providers remain on their existing path until their full adapter
+      // acceptance is complete. An explicit source enables compatibility verification.
+      if (c.req.query("source") === "operation") {
+        const operationIndex = await operationSelection(
+          deps,
+          fileIndexCaches,
+          resolved,
+          branchId,
+        );
+        return c.json(operationIndex.index);
       }
       const index = await readSessionFileIndex(
         resolved,
@@ -330,6 +377,39 @@ export function registerSessionDisplayRoutes(
           false,
         );
         const path = c.req.query("path") ?? "";
+        const recordId = c.req.query("recordId");
+        if (recordId?.startsWith("op:")) {
+          const { store, change } = await selectOperationChange(
+            deps,
+            fileIndexCaches,
+            resolved,
+            c.req.query("branchId"),
+            path,
+            recordId,
+          );
+          const ref = change.after ?? change.before;
+          if (!ref)
+            throw new SessionDisplayRouteError(
+              404,
+              "SESSION_FILE_CONTENT_NOT_RECORDED",
+              "Full file content was not recorded; view the operation diff instead",
+            );
+          const bytes = await store.readContent(ref);
+          const content = decodeSavedText(bytes, true);
+          return c.json({
+            path,
+            recordId,
+            content,
+            renderedMarkdownHtml:
+              content !== undefined && /\.(md|markdown)$/i.test(path)
+                ? await renderMarkdownToHtml(content)
+                : undefined,
+            binary: content === undefined,
+            bytes: bytes.length,
+            deleted: change.kind === "deleted",
+            complete: true,
+          });
+        }
         const { store, selected, change } = await selectSavedChange(
           deps,
           fileIndexCaches,
@@ -359,7 +439,7 @@ export function registerSessionDisplayRoutes(
           binary: content === undefined,
           bytes: bytes.length,
           deleted: !change.after,
-          complete: selected.record.complete,
+          complete: savedFileChangeComplete(selected.record),
         });
       } catch (error) {
         return displayErrorResponse(c, error);
@@ -405,6 +485,79 @@ export function registerSessionDisplayRoutes(
         const branchId =
           typeof body.branchId === "string" ? body.branchId : undefined;
         if (
+          typeof body.recordId === "string" &&
+          body.recordId.startsWith("op:")
+        ) {
+          const { store, change } = await selectOperationChange(
+            deps,
+            fileIndexCaches,
+            resolved,
+            branchId,
+            path,
+            body.recordId,
+          );
+          if (change.kind === "mode-change")
+            return c.json({
+              path,
+              exact: true,
+              structuredPatch: [],
+              diffHtml: "",
+            });
+          if (change.before?.binary || change.after?.binary)
+            throw new SessionDisplayRouteError(
+              415,
+              "SESSION_FILE_BINARY",
+              "Binary file diff is unavailable",
+            );
+          if (
+            change.patch &&
+            countOperationPatch(change).availability === "complete"
+          ) {
+            const structuredPatch = parsePatch(change.patch.text).flatMap(
+              (patch) => patch.hunks,
+            );
+            return c.json({
+              path,
+              exact: true,
+              structuredPatch,
+              diffHtml: await computeStructuredPatchDiffHtml(
+                path,
+                structuredPatch,
+              ),
+            });
+          }
+          if (change.before === undefined || change.after === undefined)
+            throw new SessionDisplayRouteError(
+              404,
+              "SESSION_FILE_DIFF_UNAVAILABLE",
+              "File operation diff was not recorded",
+            );
+          const [before, after] = await Promise.all(
+            [change.before, change.after].map(async (ref) =>
+              ref === null
+                ? ""
+                : decodeSavedText(await store.readContent(ref), true),
+            ),
+          );
+          if (before === undefined || after === undefined)
+            throw new SessionDisplayRouteError(
+              415,
+              "SESSION_FILE_BINARY",
+              "Binary file diff is unavailable",
+            );
+          const augment = await computeEditAugment(
+            "session-operation-diff",
+            { file_path: path, old_string: before, new_string: after },
+            body.fullContext === true ? 999_999 : 3,
+          );
+          return c.json({
+            path,
+            exact: true,
+            diffHtml: augment.diffHtml,
+            structuredPatch: augment.structuredPatch,
+          });
+        }
+        if (
           resolved.source.provider === "codex" ||
           resolved.source.provider === "pi"
         ) {
@@ -435,7 +588,7 @@ export function registerSessionDisplayRoutes(
           );
           return c.json({
             path,
-            exact: selected.record.complete,
+            exact: savedFileChangeComplete(selected.record),
             diffHtml: augment.diffHtml,
             structuredPatch: augment.structuredPatch,
           });
@@ -1296,11 +1449,19 @@ function selectDisplayTurns(
 interface SavedFileSelection {
   selected: Awaited<ReturnType<typeof readSavedFileRecords>>;
   hasOlderMessages: boolean;
+  files: SessionFileActivityIndex["files"];
+  fileCount: number;
 }
 
 interface FileIndexCaches {
   saved: FileIndexCache<SavedFileSelection>;
   activity: FileIndexCache<SessionFileActivityIndex>;
+  operations: FileIndexCache<
+    Awaited<ReturnType<typeof buildOperationSelection>>
+  >;
+  fileSessions: FileIndexCache<
+    Awaited<ReturnType<typeof loadSessionForFileIndex>>
+  >;
 }
 
 async function savedRecordsForSession(
@@ -1332,7 +1493,7 @@ async function savedRecordsForSession(
     branchId,
   ]);
   const cached = await caches.saved.get(key, stamp, async () => {
-    const session = await loadSessionForFileIndex(resolved, branchId);
+    const session = await cachedFileSession(deps, caches, resolved, branchId);
     const selected = await readSavedFileRecords(
       store,
       provider,
@@ -1341,12 +1502,22 @@ async function savedRecordsForSession(
       session.messages,
       ids,
     );
-    return { selected, hasOlderMessages: session.hasOlderMessages };
+    const all = savedFileActivities(selected.records);
+    const files = all.slice(0, 500);
+    await addSavedFileLineCounts(store, selected.records, files);
+    return {
+      selected,
+      hasOlderMessages: session.hasOlderMessages,
+      files,
+      fileCount: all.length,
+    };
   });
   return {
     store,
     selected: cached.selected,
     session: { hasOlderMessages: cached.hasOlderMessages },
+    files: cached.files,
+    fileCount: cached.fileCount,
   };
 }
 
@@ -1450,6 +1621,7 @@ async function scanSessionFileIndex(
 async function loadSessionForFileIndex(
   resolved: ResolvedDisplaySession,
   branchId: string | undefined,
+  operationStore?: SessionFileOperationStore,
 ): Promise<{ messages: Message[]; hasOlderMessages: boolean }> {
   const loaded = await resolved.source.reader.getSession(
     resolved.sessionId,
@@ -1468,6 +1640,26 @@ async function loadSessionForFileIndex(
     deferMedia: true,
     deferThinking: true,
   });
+  if (operationStore) {
+    if (loaded.data.provider === "codex") {
+      await importCodexFileHistory(
+        operationStore,
+        { sessionId: resolved.sessionId, workspace: resolved.project.path },
+        loaded.data.session.entries,
+        session.messages,
+      );
+    } else if (resolved.source.provider !== "pi") {
+      await importStructuredFileHistory(
+        operationStore,
+        {
+          provider: resolved.source.provider,
+          sessionId: resolved.sessionId,
+          workspace: resolved.project.path,
+        },
+        session.messages,
+      );
+    }
+  }
   return {
     messages: session.messages,
     hasOlderMessages: loaded.pagination?.hasOlderMessages === true,
@@ -2056,4 +2248,181 @@ function displayErrorResponse(c: Context, error: unknown) {
     );
   }
   throw error;
+}
+
+async function buildOperationSelection(
+  resolved: ResolvedDisplaySession,
+  branchId: string | undefined,
+  store: SessionFileOperationStore,
+  snapshot: Awaited<ReturnType<SessionFileOperationStore["snapshot"]>>,
+  session: Awaited<ReturnType<typeof loadSessionForFileIndex>>,
+) {
+  const visibleTurns = new Map<string, string>();
+  let questionId: string | undefined;
+  for (const message of session.messages) {
+    const id =
+      message.uuid ?? (typeof message.id === "string" ? message.id : undefined);
+    if (isUserPromptMessage(message)) {
+      questionId = id;
+      if (resolved.source.provider !== "codex" && id) visibleTurns.set(id, id);
+    }
+    const turn = message.codexTurnId ?? message.turnId;
+    if (
+      resolved.source.provider === "codex" &&
+      typeof turn === "string" &&
+      (questionId || id)
+    )
+      visibleTurns.set(turn.replace(/^turn:/, ""), questionId ?? id ?? turn);
+  }
+  const selected = selectFileOperations(
+    snapshot.operations,
+    resolved.project.path,
+    visibleTurns,
+  );
+  const projected = await projectFileOperations(
+    store,
+    selected,
+    resolved.project.path,
+    visibleTurns,
+  );
+  const index: SessionFileActivityIndex = {
+    projectId: resolved.project.id,
+    sessionId: resolved.sessionId,
+    files: projected.files,
+    source: "operation",
+    schemaVersion: 2,
+    operationCoverage: "supported-tools",
+    revision: snapshot.revision,
+    unavailableOperations: projected.unavailableOperations,
+    truncated:
+      projected.truncated || snapshot.truncated || session.hasOlderMessages,
+    generatedAt: new Date().toISOString(),
+  };
+  return { visibleTurns, index };
+}
+
+async function operationSelection(
+  deps: SessionDisplayRoutesDeps,
+  caches: FileIndexCaches,
+  resolved: ResolvedDisplaySession,
+  branchId?: string,
+) {
+  const store =
+    deps.sessionFileOperationStore ?? getSessionFileOperationStore();
+  const importFailures =
+    resolved.source.provider === "pi"
+      ? await importPiFileOperations(store, resolved.sessionId)
+      : 0;
+  const session = await cachedFileSession(deps, caches, resolved, branchId);
+  const snapshot = await store.snapshot({
+    provider: resolved.source.provider,
+    sourceId: "local",
+    sessionId: resolved.sessionId,
+  });
+  const key = JSON.stringify([
+    store.directory,
+    resolved.project.path,
+    resolved.source.provider,
+    resolved.sessionId,
+    branchId,
+  ]);
+  const stamp = `${snapshot.revision}:${await sessionFileIndexStamp(resolved)}`;
+  const selection = await caches.operations.get(key, stamp, () =>
+    buildOperationSelection(resolved, branchId, store, snapshot, session),
+  );
+  return {
+    store,
+    snapshot,
+    selected: selectFileOperations(
+      snapshot.operations,
+      resolved.project.path,
+      selection.visibleTurns,
+    ),
+    ...selection,
+    index: importFailures
+      ? {
+          ...selection.index,
+          unavailableOperations:
+            (selection.index.unavailableOperations ?? 0) + importFailures,
+        }
+      : selection.index,
+  };
+}
+
+async function selectOperationChange(
+  deps: SessionDisplayRoutesDeps,
+  caches: FileIndexCaches,
+  resolved: ResolvedDisplaySession,
+  branchId: string | undefined,
+  path: string,
+  recordId: string,
+) {
+  if (
+    !RelativePathSchema.safeParse(path).success ||
+    !/^op:[a-f0-9]{64}$/.test(recordId)
+  )
+    throw new SessionDisplayRouteError(
+      400,
+      "SESSION_FILE_INVALID_PATH",
+      "Invalid file operation selection",
+    );
+  const selection = await operationSelection(deps, caches, resolved, branchId);
+  const entry = selection.selected.find(
+    (entry) => entry.id === recordId.slice(3) && !entry.conflict,
+  );
+  const change = entry?.record.changes.find(
+    (change) =>
+      change.outcome === "applied" &&
+      normalizeSessionFilePath(change.path, resolved.project.path)?.path ===
+        path,
+  );
+  if (!entry || !change)
+    throw new SessionDisplayRouteError(
+      404,
+      "SESSION_FILE_VERSION_MISSING",
+      "No file operation in the selected session branch",
+    );
+  return { store: selection.store, entry, change };
+}
+
+async function cachedFileSession(
+  deps: SessionDisplayRoutesDeps,
+  caches: FileIndexCaches,
+  resolved: ResolvedDisplaySession,
+  branchId?: string,
+) {
+  const store =
+    deps.sessionFileOperationStore ?? getSessionFileOperationStore();
+  const key = JSON.stringify([
+    store.directory,
+    resolved.project.path,
+    resolved.source.provider,
+    resolved.sessionId,
+    branchId,
+  ]);
+  return caches.fileSessions.get(
+    key,
+    await sessionFileIndexStamp(resolved),
+    async () => {
+      const session = await loadSessionForFileIndex(resolved, branchId, store);
+      // Retain ancestry identities only, not a second cache of full transcript/tool payloads.
+      return {
+        ...session,
+        messages: session.messages.map((message): Message => {
+          const prompt = isUserPromptMessage(message);
+          return {
+            uuid: message.uuid,
+            id: message.id,
+            type: prompt ? "user" : "assistant",
+            codexTurnId: message.codexTurnId,
+            turnId: message.turnId,
+            message: {
+              role: prompt ? "user" : "assistant",
+              content: prompt ? "file-index-prompt" : [],
+            },
+          };
+        }),
+      };
+    },
+  );
 }

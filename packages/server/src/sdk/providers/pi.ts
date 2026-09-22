@@ -28,7 +28,8 @@ import {
   resolveLlmGatewayProxyBaseUrl,
 } from "../../llm-gateways/index.js";
 import { getLogger } from "../../logging/logger.js";
-import { SessionFileLifecycle } from "../../session-files/lifecycle.js";
+import { getSessionFileOperationStore } from "../../session-files/codex-operations.js";
+import { importPiFileOperations } from "../../session-files/pi-operations.js";
 import {
   PI_SESSIONS_DIR,
   PI_SESSION_DIR_IS_EXACT,
@@ -1030,7 +1031,6 @@ export class PiProvider implements AgentProvider {
     runtime: PiRuntimeRef,
     signal: AbortSignal,
   ): AsyncIterableIterator<SDKMessage> {
-    const fileLifecycle = new SessionFileLifecycle();
     const piPath = await this.findPiPath();
     if (!piPath) {
       yield {
@@ -1143,6 +1143,10 @@ export class PiProvider implements AgentProvider {
       }
 
       const childEnv = filterEnvForChildProcess(process.env);
+      childEnv.YEP_PI_FILE_OPERATIONS_DIRECTORY = join(
+        getSessionFileOperationStore().directory,
+        "pi-ingress",
+      );
       // Pi's bash tool inherits this environment, so every gateway credential
       // and the channel declaration itself are removed. The extension receives
       // the keys through YEP_PI_LLM_API_KEYS and deletes them once captured.
@@ -1279,12 +1283,6 @@ export class PiProvider implements AgentProvider {
           message: { role: "user", content: projection.publicPrompt },
         };
 
-        await fileLifecycle.begin(
-          { provider: "pi", sessionId, branchId: sessionId, turnId: userId },
-          options.cwd,
-          "pi-provider",
-          userId,
-        );
         if (signal.aborted) break;
         await client.send({
           type: "prompt",
@@ -1305,31 +1303,14 @@ export class PiProvider implements AgentProvider {
             publicPrompt: projection.publicPrompt,
           },
         };
-        let fileTurnId = userId;
         let settled = false;
-        let fileTurnStatus: "completed" | "failed" | "interrupted" =
-          "completed";
         while (!signal.aborted && !settled) {
           const event = await client.nextEvent();
           if (!event) {
             throw new Error("Pi RPC exited before the turn settled");
           }
-          if (
-            event.type === "message_end" &&
-            isRecord(event.message) &&
-            event.message.role === "assistant"
-          ) {
-            const stop = event.message.stopReason;
-            fileTurnStatus =
-              stop === "aborted"
-                ? "interrupted"
-                : stop === "error"
-                  ? "failed"
-                  : "completed";
-          }
           if (event.type === "agent_settled") {
             settled = true;
-            await fileLifecycle.finish(sessionId, fileTurnId, fileTurnStatus);
             // A settled turn cannot still be backing off. Clear defensively in
             // case the provider skipped `auto_retry_end` (an aborted turn does).
             options.onRetryStatus?.(undefined);
@@ -1349,14 +1330,6 @@ export class PiProvider implements AgentProvider {
             runtime,
           );
           for (const sdkMessage of emitted) {
-            if (
-              sdkMessage.type === "user" &&
-              sdkMessage.clientUserMessageId === userId &&
-              typeof sdkMessage.uuid === "string"
-            ) {
-              fileTurnId = sdkMessage.uuid;
-              await fileLifecycle.bind(sessionId, fileTurnId);
-            }
             yield sdkMessage;
           }
         }
@@ -1373,7 +1346,6 @@ export class PiProvider implements AgentProvider {
     } finally {
       queue.close();
       runtime.client?.close();
-      await fileLifecycle.close("pi-provider");
     }
   }
 
@@ -1408,6 +1380,27 @@ export class PiProvider implements AgentProvider {
     if (event.type === "tool_execution_end") {
       stream.toolOutputSnapshots.delete(stringValue(event.toolCallId) ?? "");
       stream.toolCallOwners.delete(stringValue(event.toolCallId) ?? "");
+      return [];
+    }
+    if (
+      event.type === "extension_ui_request" &&
+      typeof event.message === "string" &&
+      event.message.startsWith("__YEP_PI_FILE_OPERATION__:")
+    ) {
+      if (event.message === "__YEP_PI_FILE_OPERATION__:capture-failed") {
+        getLogger().warn(
+          { sessionId },
+          "Pi file operation capture failed before artifact publication",
+        );
+      }
+      try {
+        await importPiFileOperations(getSessionFileOperationStore(), sessionId);
+      } catch (error) {
+        getLogger().warn(
+          { error, sessionId },
+          "Pi file operation import failed",
+        );
+      }
       return [];
     }
     if (event.type === "extension_ui_request") {

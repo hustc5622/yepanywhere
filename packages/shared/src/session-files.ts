@@ -14,13 +14,21 @@ export type SessionFileActivityKind =
   | "other";
 
 /** Where the path was observed. `shell` results are heuristic. */
-export type SessionFileActivitySource = "tool" | "shell" | "snapshot";
+export type SessionFileActivitySource =
+  | "tool"
+  | "shell"
+  | "snapshot"
+  | "operation";
 
 export interface SessionSavedFileVersion {
   recordId: string;
   timestamp: string;
   kind: "added" | "modified" | "deleted";
   complete: boolean;
+  source?: "snapshot" | "operation";
+  additions?: number;
+  deletions?: number;
+  contentAvailable?: boolean;
 }
 
 export interface SessionSavedFileContent {
@@ -52,14 +60,17 @@ export interface SessionFileActivity {
   messageId: string;
   /** Timestamp of the most recent touch, when known. */
   timestamp?: string;
-  /** Lines this session added to the file, summed over its edit calls. */
+  /** Snapshot: latest saved execution delta. Transcript: sum over edit calls. */
   additions?: number;
-  /** Lines this session removed from the file. */
+  /** Same scope as additions. Undefined when a text diff is unavailable. */
   deletions?: number;
   /** Number of edit operations this session applied to the file. */
   edits?: number;
   /** Newest first. Each version is one observed execution delta, never a merged worktree diff. */
   savedVersions?: SessionSavedFileVersion[];
+  statisticsScope?: "session-operations";
+  knownOperations?: number;
+  unknownOperations?: number;
 }
 
 export interface SessionFileDiff {
@@ -74,6 +85,14 @@ export interface SessionFileDiff {
   exact: boolean;
 }
 
+export type SessionFileCoverageReason =
+  | "byte-budget"
+  | "too-large"
+  | "entry-limit"
+  | "file-unavailable"
+  | "execution-partial"
+  | "workspace-mismatch";
+
 export interface SessionFileActivityIndex {
   projectId: string;
   sessionId: string;
@@ -81,8 +100,13 @@ export interface SessionFileActivityIndex {
   /** True when the underlying message scan hit its cap. */
   truncated: boolean;
   generatedAt: string;
-  source?: "snapshot" | "transcript";
+  source?: "snapshot" | "transcript" | "operation";
+  schemaVersion?: 2;
+  unavailableOperations?: number;
+  operationCoverage?: "supported-tools";
+  revision?: string;
   coverageIncomplete?: boolean;
+  coverageReasons?: SessionFileCoverageReason[];
 }
 
 export const SESSION_FILE_ACTIVITY_MAX_PATHS = 2_000;

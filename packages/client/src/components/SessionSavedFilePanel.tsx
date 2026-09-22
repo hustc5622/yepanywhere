@@ -33,7 +33,13 @@ export function SessionSavedFilePanel({
   )
     ? chosenId
     : (file.savedVersions?.[0]?.recordId ?? "");
-  const [mode, setMode] = useState<"content" | "diff">("content");
+  const [requestedMode, setMode] = useState<"content" | "diff">(
+    file.source === "operation" ? "diff" : "content",
+  );
+  const version = file.savedVersions?.find(
+    (version) => version.recordId === selectedId,
+  );
+  const mode = version?.contentAvailable === false ? "diff" : requestedMode;
   const [data, setData] = useState<SessionSavedFileContent | null>(null);
   const [diff, setDiff] = useState<SessionFileDiff | null>(null);
   const [error, setError] = useState(false);
@@ -104,6 +110,12 @@ export function SessionSavedFilePanel({
           type="button"
           className="session-file-diff-action"
           aria-pressed={mode === "content"}
+          disabled={version?.contentAvailable === false}
+          title={
+            version?.contentAvailable === false
+              ? t("sessionOperationNoContent")
+              : undefined
+          }
           onClick={() => setMode("content")}
         >
           {t("sessionSavedVersion")}
@@ -114,7 +126,11 @@ export function SessionSavedFilePanel({
           aria-pressed={mode === "diff"}
           onClick={() => setMode("diff")}
         >
-          {t("sessionSavedDiff")}
+          {t(
+            file.source === "operation"
+              ? "sessionOperationDiff"
+              : "sessionSavedDiff",
+          )}
         </button>
         <button
           type="button"
@@ -125,8 +141,20 @@ export function SessionSavedFilePanel({
         </button>
       </div>
       <p className="session-saved-note">
-        {t("sessionSavedObserved")}
-        {partial ? ` · ${t("sessionSavedPartial")}` : ""}
+        {t(
+          file.source === "operation"
+            ? "sessionOperationDiff"
+            : "sessionSavedObserved",
+        )}
+        {version?.additions !== undefined && version?.deletions !== undefined
+          ? ` · +${version.additions} / -${version.deletions}`
+          : ""}
+        {partial
+          ? ` · ${t(file.source === "operation" ? "sessionOperationDiffUnknown" : "sessionSavedCoverageExecution")}`
+          : ""}
+        {version?.contentAvailable === false
+          ? ` · ${t("sessionOperationNoContent")}`
+          : ""}
       </p>
       {loading ? (
         <div role="status">{t("gitStatusLoading")}</div>

@@ -9,6 +9,10 @@ import { captureWorkspace } from "../../src/session-files/capture.js";
 import { recordSnapshotChanges } from "../../src/session-files/changes.js";
 import { SessionFileStore } from "../../src/session-files/store.js";
 
+import { SessionFileOperationStore } from "../../src/session-files/operation-store.js";
+import { operation } from "../session-files/fixtures/operations.js";
+
+let operationStore: SessionFileOperationStore;
 let root: string;
 let workspace: string;
 let store: SessionFileStore;
@@ -17,6 +21,7 @@ beforeEach(async () => {
   workspace = join(root, "project");
   await mkdir(workspace);
   store = new SessionFileStore(join(root, "store"));
+  operationStore = new SessionFileOperationStore(join(root, "operations"));
 });
 afterEach(async () => {
   await rm(root, { recursive: true, force: true });
@@ -60,6 +65,7 @@ function setup(provider: "codex" | "pi" = "codex") {
   const app = new Hono();
   registerSessionDisplayRoutes(app, {
     sessionFileStore: store,
+    sessionFileOperationStore: operationStore,
     scanner: {
       getOrCreateProject: vi.fn(
         async () =>
@@ -98,6 +104,146 @@ async function captureChange(
 }
 
 describe("saved session file routes", () => {
+  it("serves confirmed operation counts and saved content without consulting the current file", async () => {
+    const after = await operationStore.putContent(Buffer.from("# Immutable\n"));
+    await operationStore.append(
+      operation({
+        workspace,
+        identity: { ...operation().identity, turnId: "visible" },
+        changes: [
+          {
+            path: "report.md",
+            kind: "added",
+            outcome: "applied",
+            before: null,
+            after,
+          },
+        ],
+      }),
+    );
+    const { app, base } = setup();
+    await writeFile(
+      join(workspace, "report.md"),
+      "external edit\nexternal edit\n",
+    );
+    const index = await (await app.request(base)).json();
+    expect(index).toMatchObject({
+      source: "operation",
+      schemaVersion: 2,
+      files: [
+        expect.objectContaining({
+          additions: 1,
+          deletions: 0,
+          statisticsScope: "session-operations",
+        }),
+      ],
+    });
+    const recordId = index.files[0].savedVersions[0].recordId;
+    expect(
+      await (
+        await app.request(`${base}/content?path=report.md&recordId=${recordId}`)
+      ).json(),
+    ).toMatchObject({ content: "# Immutable\n" });
+    expect(
+      (
+        await app.request(
+          `${base}/content?path=report.md&recordId=${recordId}&branchId=old`,
+        )
+      ).status,
+    ).toBe(404);
+    const diff = await app.request(`${base}/diff`, {
+      method: "POST",
+      body: JSON.stringify({ path: "report.md", recordId }),
+    });
+    expect(await diff.json()).toMatchObject({ exact: true });
+  });
+
+  it("offers patch-only operation diffs without inventing full file content", async () => {
+    await operationStore.append(
+      operation({
+        workspace,
+        identity: { ...operation().identity, turnId: "visible" },
+      }),
+    );
+    const { app, base } = setup();
+    const index = await (await app.request(base)).json();
+    const recordId = index.files[0].savedVersions[0].recordId;
+    expect(
+      (await app.request(`${base}/content?path=report.md&recordId=${recordId}`))
+        .status,
+    ).toBe(404);
+    const diff = await app.request(`${base}/diff`, {
+      method: "POST",
+      body: JSON.stringify({ path: "report.md", recordId }),
+    });
+    expect(diff.status).toBe(200);
+    expect((await diff.json()).diffHtml).toContain("first");
+  });
+
+  it.each(["full", "partial"] as const)(
+    "separates workspace omissions from a saved file's %s execution coverage",
+    async (coverage) => {
+      await writeFile(join(workspace, "large.bin"), Buffer.alloc(101));
+      await writeFile(join(workspace, "budget.bin"), Buffer.alloc(90));
+      const policy = { maxFileBytes: 100, maxTotalBytes: 80 };
+      const before = await captureWorkspace(store, workspace, policy);
+      await writeFile(join(workspace, "report.md"), "# Saved\nsecond line\n");
+      const after = await captureWorkspace(store, workspace, policy);
+      const { id } = await recordSnapshotChanges(
+        store,
+        {
+          provider: "codex",
+          sessionId: "s",
+          branchId: "s",
+          turnId: "visible",
+        },
+        before.id,
+        after.id,
+        { status: "completed", coverage },
+      );
+      const { app, base } = setup();
+      const index = await (await app.request(base)).json();
+      expect(index.coverageIncomplete).toBe(true);
+      expect(index.coverageReasons).toEqual(
+        expect.arrayContaining(["byte-budget", "too-large"]),
+      );
+      expect(index.coverageReasons.includes("execution-partial")).toBe(
+        coverage === "partial",
+      );
+      expect(index.files).toEqual([
+        expect.objectContaining({
+          path: "report.md",
+          additions: 2,
+          deletions: 0,
+          savedVersions: [
+            expect.objectContaining({ complete: coverage === "full" }),
+          ],
+        }),
+      ]);
+      expect(
+        await (
+          await app.request(`${base}/content?path=report.md&recordId=${id}`)
+        ).json(),
+      ).toMatchObject({ complete: coverage === "full" });
+      const diff = await app.request(`${base}/diff`, {
+        method: "POST",
+        body: JSON.stringify({ path: "report.md", recordId: id }),
+      });
+      expect(await diff.json()).toMatchObject({ exact: coverage === "full" });
+    },
+  );
+
+  it("does not count external changes between separate executions", async () => {
+    await captureChange();
+    await writeFile(join(workspace, "report.md"), "external\nkeep\n");
+    await captureChange("visible", "codex", "external\nkeep\nnew\n");
+    const { app, base } = setup();
+    expect((await (await app.request(base)).json()).files[0]).toMatchObject({
+      additions: 1,
+      deletions: 0,
+    });
+  });
+
   it.each(["codex", "pi"] as const)(
     "shares concurrent %s snapshot selection scans",
     async (provider) => {
@@ -116,7 +262,7 @@ describe("saved session file routes", () => {
       expect(reader.getSession).toHaveBeenCalledTimes(1);
       await captureChange("visible", provider, "new version");
       await app.request(base);
-      expect(reader.getSession).toHaveBeenCalledTimes(2);
+      expect(reader.getSession).toHaveBeenCalledTimes(1);
     },
   );
 
@@ -134,6 +280,8 @@ describe("saved session file routes", () => {
         expect.objectContaining({
           path: "report.md",
           source: "snapshot",
+          additions: 1,
+          deletions: 0,
           savedVersions: [
             expect.objectContaining({ recordId: id, kind: "added" }),
           ],
@@ -164,9 +312,9 @@ describe("saved session file routes", () => {
       (await (await app.request(base)).json()).files[0].savedVersions,
     ).toHaveLength(1);
     await captureChange("visible", "codex", "second version");
-    expect(
-      (await (await app.request(base)).json()).files[0].savedVersions,
-    ).toHaveLength(2);
+    const latest = (await (await app.request(base)).json()).files[0];
+    expect(latest.savedVersions).toHaveLength(2);
+    expect(latest).toMatchObject({ additions: 1, deletions: 1 });
     const old = await app.request(
       `${base}/content?path=report.md&recordId=${first.id}`,
     );
@@ -215,6 +363,13 @@ describe("saved session file routes", () => {
       after.id,
     );
     const { app, base } = setup();
+    const files = (await (await app.request(base)).json()).files;
+    expect(
+      files.find((file: { path: string }) => file.path === "report.md"),
+    ).toMatchObject({ additions: 0, deletions: 1 });
+    expect(
+      files.find((file: { path: string }) => file.path === "image.bin"),
+    ).not.toHaveProperty("additions");
     expect(
       await (
         await app.request(`${base}/content?path=report.md&recordId=${id}`)
@@ -288,7 +443,7 @@ describe("saved session file routes", () => {
   it("does not fill new indexes from transcript guesses when there are no captures", async () => {
     const { app, base } = setup();
     expect(await (await app.request(base)).json()).toMatchObject({
-      source: "snapshot",
+      source: "operation",
       files: [],
     });
   });

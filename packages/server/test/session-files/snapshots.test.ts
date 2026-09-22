@@ -43,6 +43,52 @@ afterEach(async () => {
 });
 
 describe("session file snapshots", () => {
+  it("reserves bounded capture for docs, tests and sources before audit logs and binaries", async () => {
+    for (const path of ["data/audits", "docs", "tests", "web"])
+      await mkdir(join(workspace, path), { recursive: true });
+    await write("data/audits/first.log", "x".repeat(64));
+    await write("aaa.mp4", Buffer.alloc(64));
+    await write("docs/guide.md", "old docs");
+    await write("tests/test_help.py", "old test");
+    await write("web/app.ts", "old code");
+    const policy = { maxTotalBytes: 32 };
+    const before = await captureWorkspace(store, workspace, policy);
+    expect(before.snapshot.files.map((f) => f.path)).toEqual([
+      "docs/guide.md",
+      "tests/test_help.py",
+      "web/app.ts",
+    ]);
+    await write("docs/guide.md", "new docs");
+    await write("tests/test_help.py", "new test");
+    await write("web/app.ts", "new code");
+    const after = await captureWorkspace(store, workspace, policy);
+    const { record } = await recordSnapshotChanges(
+      store,
+      scope,
+      before.id,
+      after.id,
+    );
+    expect(record.changes.map((c) => c.path)).toEqual([
+      "docs/guide.md",
+      "tests/test_help.py",
+      "web/app.ts",
+    ]);
+    expect(after.snapshot.omissions).toContainEqual({
+      path: "data/audits/first.log",
+      reason: "byte-budget",
+    });
+    expect(after.snapshot.omissions).toContainEqual({
+      path: "aaa.mp4",
+      reason: "byte-budget",
+    });
+    const legacy = await captureWorkspace(store, workspace, {
+      ...policy,
+      fileOrder: "path",
+    });
+    await expect(
+      recordSnapshotChanges(store, scope, before.id, legacy.id),
+    ).rejects.toThrow("policies");
+  });
   it("records actual script writes and deletions, retaining versions after restart", async () => {
     await write("changed.md", "before\n");
     await write("removed.md", "keep this version\n");

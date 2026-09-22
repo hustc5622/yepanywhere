@@ -25,10 +25,10 @@ const CLIENT_DIST = path.join(ROOT_DIR, "packages/client/dist");
 const SERVER_PACKAGE = path.join(ROOT_DIR, "packages/server");
 const SERVER_DIST = path.join(SERVER_PACKAGE, "dist");
 const SHARED_DIST = path.join(ROOT_DIR, "packages/shared/dist");
-const PI_EXTENSION_SOURCE = path.join(
-  SERVER_PACKAGE,
+const PI_EXTENSION_RESOURCES = [
   "resources/pi-yep-extension.mjs",
-);
+  "resources/pi-file-operations.mjs",
+];
 
 // Build into an unpublished sibling first. The currently running 8022 process
 // serves files directly from dist/npm-package/client-dist, so deleting or
@@ -406,15 +406,15 @@ step("Bundle client into staging", () => {
 // bundled as data (not installed into ~/.pi), keeping user configuration
 // untouched while making packaged and source runs behave identically.
 step("Bundle Pi RPC extension", () => {
-  const extensionDest = path.join(
-    STAGING_DIR,
-    "resources/pi-yep-extension.mjs",
-  );
-  if (!fs.existsSync(PI_EXTENSION_SOURCE)) {
-    throw new Error(`Pi extension not found at ${PI_EXTENSION_SOURCE}`);
+  for (const resource of PI_EXTENSION_RESOURCES) {
+    const source = path.join(SERVER_PACKAGE, resource);
+    const destination = path.join(STAGING_DIR, resource);
+    if (!fs.existsSync(source)) {
+      throw new Error(`Pi extension resource not found at ${source}`);
+    }
+    fs.mkdirSync(path.dirname(destination), { recursive: true });
+    fs.copyFileSync(source, destination);
   }
-  fs.mkdirSync(path.dirname(extensionDest), { recursive: true });
-  fs.copyFileSync(PI_EXTENSION_SOURCE, extensionDest);
   log("  Pi RPC extension bundled into staging");
 });
 
@@ -547,6 +547,7 @@ MIT
 // files or failed to add a fresh favicon URL.
 step("Validate staged bundle", () => {
   const requiredFiles = [
+    ...PI_EXTENSION_RESOURCES,
     "build-info.json",
     "package.json",
     "dist/cli.js",

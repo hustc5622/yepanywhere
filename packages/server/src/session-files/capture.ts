@@ -19,6 +19,41 @@ const gitOptions = {
   maxBuffer: 8 * 1024 * 1024,
 };
 
+function capturePriority(path: string): number {
+  // Keep bounded snapshots useful in repos containing large tracked audit and
+  // build output trees. These are deprioritized, not silently excluded.
+  if (
+    /\.(?:gz|zip|tar|7z|mp4|mov|mp3|wav|png|jpg|jpeg|webp|pdf|woff2?|ttf)$/i.test(
+      path,
+    )
+  )
+    return 5;
+  if (
+    /^(?:data|logs?|artifacts|coverage|dist|build|\.cache)(?:\/|$)/i.test(path)
+  )
+    return 4;
+  if (/\.(?:log|jsonl|csv|tsv)$/i.test(path)) return 3;
+  if (
+    /\.(?:md|mdx|markdown|txt|rst|py|pyi|ts|tsx|js|jsx|mjs|cjs|rs|go|java|kt|swift|c|h|cpp|hpp|cs|rb|php|sh|bash|zsh|sql|html|css|scss|vue|svelte)$/i.test(
+      path,
+    )
+  )
+    return 0;
+  if (
+    /\.(?:json|toml|ya?ml|ini|cfg|xml)$/i.test(path) ||
+    !path.split("/").at(-1)?.includes(".")
+  )
+    return 1;
+  return 2;
+}
+
+export function compareCapturePaths(left: string, right: string): number {
+  return (
+    capturePriority(left) - capturePriority(right) ||
+    (left < right ? -1 : left > right ? 1 : 0)
+  );
+}
+
 function within(root: string, path: string): boolean {
   const value = relative(root, path);
   return (
@@ -58,6 +93,7 @@ export async function captureWorkspace(
   store: SessionFileStore,
   workspace: string,
   overrides: Partial<CapturePolicy> = {},
+  options: { reuseSnapshotId?: string } = {},
 ): Promise<{ id: string; snapshot: FileSnapshot }> {
   const policy = CapturePolicySchema.parse({
     ...DEFAULT_CAPTURE_POLICY,
@@ -166,7 +202,9 @@ export async function captureWorkspace(
   }
 
   let totalBytes = 0;
-  for (const path of [...paths].sort()) {
+  for (const path of [...paths].sort(
+    policy.fileOrder === "source-first" ? compareCapturePaths : undefined,
+  )) {
     const target = join(root, path);
     let handle: Awaited<ReturnType<typeof open>> | undefined;
     let captured: Buffer | undefined;
@@ -290,8 +328,24 @@ export async function captureWorkspace(
       totalBytes += captured.length;
     }
   }
+  snapshot.files.sort((a, b) =>
+    a.path < b.path ? -1 : a.path > b.path ? 1 : 0,
+  );
   snapshot.omissions.sort((a, b) => a.path.localeCompare(b.path));
   snapshot.finishedAt = new Date().toISOString();
+  if (options.reuseSnapshotId) {
+    const previous = await store.readSnapshot(options.reuseSnapshotId);
+    if (
+      previous.workspace === snapshot.workspace &&
+      previous.enumeration === snapshot.enumeration &&
+      previous.listingComplete === snapshot.listingComplete &&
+      JSON.stringify(previous.policy) === JSON.stringify(snapshot.policy) &&
+      JSON.stringify(previous.files) === JSON.stringify(snapshot.files) &&
+      JSON.stringify(previous.omissions) === JSON.stringify(snapshot.omissions)
+    ) {
+      return { id: options.reuseSnapshotId, snapshot: previous };
+    }
+  }
   const id = await store.putSnapshot(snapshot);
   return { id, snapshot };
 }

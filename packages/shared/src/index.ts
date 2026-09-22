@@ -218,6 +218,7 @@ export type {
   SessionFileActivityIndex,
   SessionFileActivityKind,
   SessionFileActivitySource,
+  SessionFileCoverageReason,
   SessionFileDiff,
   SessionSavedFileVersion,
   SessionSavedFileContent,
@@ -847,3 +848,17 @@ export {
 } from "./shell-command.js";
 
 export { getSessionArchiveBlock } from "./session-archive.js";
+
+export {
+  SessionFileOperationSchema,
+  SessionFileOperationChangeSchema,
+  SessionFileOperationIdentitySchema,
+  SessionFileOperationScopeSchema,
+  SessionFileContentRefSchema,
+  type SessionFileOperation,
+  type SessionFileOperationChange,
+  type SessionFileOperationIdentity,
+  type SessionFileOperationScope,
+  type SessionFileContentRef,
+  type SessionFileOperationStats,
+} from "./session-file-operation.js";

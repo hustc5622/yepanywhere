@@ -196,7 +196,7 @@ describe("CodexProvider", () => {
   });
 
   describe("startSession", () => {
-    it("captures document writes before turn/start and persists the native turn identity", async () => {
+    it("does not attribute unreported writes by scanning around turn/start", async () => {
       const root = mkdtempSync(join(tmpdir(), "codex-file-lifecycle-"));
       const data = mkdtempSync(join(tmpdir(), "codex-file-store-"));
       const previousData = process.env.YEP_ANYWHERE_DATA_DIR;
@@ -225,15 +225,8 @@ describe("CodexProvider", () => {
         );
         const scope = { provider: "codex" as const, sessionId: "thread-new" };
         const ids = await store.listRecords(scope);
-        expect(ids).toHaveLength(1);
-        const record = await store.readRecord(scope, ids[0] ?? "missing");
-        expect(record).toMatchObject({
-          scope: { turnId: "turn-rewrite" },
-          execution: { status: "completed", coverage: "full" },
-        });
-        expect(record.changes).toContainEqual(
-          expect.objectContaining({ path: "report.md", kind: "added" }),
-        );
+        expect(ids).toEqual([]);
+        expect(existsSync(join(root, "report.md"))).toBe(true);
       } finally {
         session?.abort();
         restoreEnv("YEP_ANYWHERE_DATA_DIR", previousData);
