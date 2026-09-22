@@ -45,6 +45,7 @@ import {
   normalizeSession,
 } from "../sessions/normalization.js";
 import { augmentPersistedSessionMessages } from "../sessions/persisted-augments.js";
+import { normalizeProviderGroup } from "../sessions/provider-groups.js";
 import {
   type ProviderResolutionDeps,
   type SessionSource,
@@ -916,8 +917,18 @@ async function resolveDisplaySession(
     runtime.projectId === project.id &&
     runtime.provider
   ) {
-    const source = resolveSessionSources(project, deps.providerResolution).find(
-      (s) => s.provider === runtime.provider,
+    // A project may still be classified by an older provider until the new
+    // session is persisted. Include the running provider explicitly, just as
+    // the summary lookup does, and match variants sharing the same storage.
+    const source = resolveSessionSources(
+      project,
+      deps.providerResolution,
+      undefined,
+      runtime.provider,
+    ).find(
+      (s) =>
+        normalizeProviderGroup(s.provider) ===
+        normalizeProviderGroup(runtime.provider),
     );
     if (source)
       resolved = {

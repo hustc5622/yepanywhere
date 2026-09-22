@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
+  ProviderName,
   SessionBranchState,
   SessionDisplayPage,
 } from "@yep-anywhere/shared";
@@ -180,6 +181,72 @@ function createRoutes(
 }
 
 describe("session display routes", () => {
+  it.each<ProviderName>(["codex", "codex-oss", "gemini-acp"])(
+    "loads an unpersisted %s session in a Pi project and picks up its history later",
+    async (provider) => {
+      const { getSession } = createRoutes(1);
+      const loaded = await getSession();
+      let persisted = false;
+      const emptyReader = {
+        getSessionSummary: vi.fn(async () => null),
+        getSession: vi.fn(async () => null),
+      };
+      const reader = {
+        getSessionSummary: vi.fn(async () =>
+          persisted ? { ...loaded.summary, provider } : null,
+        ),
+        getSession: vi.fn(async () => (persisted ? loaded : null)),
+      };
+      const runtime = {
+        projectId: PROJECT_ID,
+        provider,
+        toolsMayBeActive: false,
+      };
+      const source = createSessionDisplaySource({
+        scanner: {
+          getOrCreateProject: vi.fn(async () => ({
+            ...project(),
+            provider: "pi" as const,
+          })),
+        },
+        providerResolution: {
+          readerFactory: () => reader as never,
+          codexReaderFactory: () => reader as never,
+          geminiReaderFactory: () => reader as never,
+          piReaderFactory: () => emptyReader as never,
+          kimiReaderFactory: () => emptyReader as never,
+          zcodeReaderFactory: () => emptyReader as never,
+        },
+        getRuntimeState: vi.fn(async () => runtime),
+      });
+      const selection = { projectId: PROJECT_ID, sessionId: SESSION_ID };
+      // Missing history is only tolerated for an active session in this project.
+      await expect(source.read(selection)).rejects.toMatchObject({
+        status: 404,
+      });
+      runtime.toolsMayBeActive = true;
+      runtime.projectId = encodeProjectId("/tmp/another-project");
+      await expect(source.read(selection)).rejects.toMatchObject({
+        status: 404,
+      });
+      runtime.projectId = PROJECT_ID;
+      expect(await source.read(selection)).toMatchObject({
+        messages: [],
+        activity: "running",
+      });
+      expect(reader.getSession).toHaveBeenCalledWith(
+        SESSION_ID,
+        PROJECT_ID,
+        undefined,
+        expect.any(Object),
+      );
+      persisted = true;
+      expect((await source.read(selection)).messages).toEqual(
+        loaded.projectedMessages,
+      );
+    },
+  );
+
   it("shares concurrent file-index scans and isolates app instances", async () => {
     const { app, getSession } = createRoutes(2);
     const path = `/projects/${PROJECT_ID}/sessions/${SESSION_ID}/files`;

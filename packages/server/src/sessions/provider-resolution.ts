@@ -468,6 +468,7 @@ export function resolveSessionSources(
   project: Project,
   deps: ProviderResolutionDeps,
   catalog?: ProviderProjectCatalog,
+  preferredProvider?: ProviderName,
 ): SessionSource[] {
-  return getSessionSources(project, deps, undefined, catalog);
+  return getSessionSources(project, deps, preferredProvider, catalog);
 }
