@@ -4,9 +4,7 @@ export type SessionKind = typeof SLASH_COMMAND_SESSION_KIND;
 export const COMMAND_MESSAGE_SESSION_TITLE = "<command-message>";
 
 const COMMAND_MESSAGE_TAG_PATTERN = /^<command-message(?:\s|>)/i;
-const COMMAND_TITLE_PATTERN = /^[$/][A-Za-z][A-Za-z0-9_-]*(?:\s|$)/;
-const GIT_COMMIT_PUSH_WORKFLOW_PATTERN =
-  /^\$git(?:-|\s+)commit(?:-|\s+)push(?:\s|$)/i;
+const COMMAND_TITLE_PATTERN = /^\/[A-Za-z][A-Za-z0-9_-]*(?:\s|$)/;
 const GOAL_WORKFLOW_PATTERN = /^\/goal(?:\s|$)/i;
 
 interface SessionTitleSource {
@@ -26,13 +24,9 @@ export function isSlashCommandSessionTitle(
   const trimmedTitle = title?.trim();
   if (!trimmedTitle) return false;
 
-  // Long-running workflow sessions often continue into review and follow-up
-  // work, so keep them in the regular session library instead of filing them
-  // with one-off slash/skill commands.
-  if (
-    GIT_COMMIT_PUSH_WORKFLOW_PATTERN.test(trimmedTitle) ||
-    GOAL_WORKFLOW_PATTERN.test(trimmedTitle)
-  ) {
+  // Keep /goal workflows in the regular session library. Dollar-prefixed skill
+  // invocations are regular sessions too, so only slash commands match below.
+  if (GOAL_WORKFLOW_PATTERN.test(trimmedTitle)) {
     return false;
   }
 

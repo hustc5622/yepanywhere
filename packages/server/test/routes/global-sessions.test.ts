@@ -479,7 +479,6 @@ describe("Global Sessions Routes", () => {
 
       expect(result.sessions.map((session) => session.id)).toEqual([
         "sess-command",
-        "sess-dollar-skill",
       ]);
     });
 
@@ -530,6 +529,7 @@ describe("Global Sessions Routes", () => {
       const result = await makeRequest("?excludeKind=slash-command");
 
       expect(result.sessions.map((session) => session.id)).toEqual([
+        "sess-dollar-skill",
         "sess-git-commit-push",
         "sess-normal",
       ]);

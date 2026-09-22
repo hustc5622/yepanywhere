@@ -6,13 +6,15 @@ describe("isSlashCommandSessionTitle", () => {
     "<command-message>review</command-message>",
     "/commit",
     "/review src/auth.ts",
-    "$imagegen",
-    "$some-skill with arguments",
-  ])("classifies %s as a slash or skill command session", (title) => {
+  ])("classifies %s as a slash command session", (title) => {
     expect(isSlashCommandSessionTitle(title)).toBe(true);
   });
 
   it.each([
+    "$imagegen",
+    "$some-skill with arguments",
+    "$impeccable critique 请审查当前 Mock 方案编辑页。",
+    "  $impeccable critique review the page  ",
     "$git-commit-push",
     "$git-commit-push review the release branch",
     "$git commit push",
