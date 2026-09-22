@@ -11,6 +11,7 @@ import { join, resolve } from "node:path";
 import { getDefaultCodexHomeDir } from "../projects/codex-scanner.js";
 import { CodexAppServerClient } from "./CodexAppServerClient.js";
 import { normalizeUsageSnapshot } from "./CodexUsageService.js";
+import { readCodexAuthIdentity } from "./auth-identity.js";
 import { ensureSharedCodexStorage } from "./codex-account-home.js";
 import type { CodexUsageSnapshot } from "./types.js";
 
@@ -92,6 +93,7 @@ export class CodexAccountsService {
   private readonly defaultCodexHome: string;
   private readonly pendingLogins = new Map<string, PendingLogin>();
   private readonly finishedLogins = new Map<string, CodexLoginState>();
+  private activationQueue: Promise<void> = Promise.resolve();
   private readonly usageCache = new Map<
     string,
     { entry: CodexAccountEntry; expiresAt: number }
@@ -124,13 +126,15 @@ export class CodexAccountsService {
       if (profile.id === DEFAULT_ACCOUNT_ID) continue;
       ensureSharedCodexStorage(profile.codexHome, this.defaultCodexHome);
     }
-    const activeEmail = this.readAuthEmail(this.defaultCodexHome);
+    const activeIdentity = await readCodexAuthIdentity(this.defaultCodexHome);
     return Promise.all(
       profiles.map(async (profile) => {
         const entry = await this.describe(profile, options.fresh === true);
         const isActive =
           profile.id === DEFAULT_ACCOUNT_ID ||
-          (Boolean(activeEmail) && entry.account?.email === activeEmail);
+          (activeIdentity !== null &&
+            (await readCodexAuthIdentity(profile.codexHome)) ===
+              activeIdentity);
         return { ...entry, isActive };
       }),
     );
@@ -331,6 +335,15 @@ export class CodexAccountsService {
    * is backed up (and mirrored into its own profile when we can match it).
    */
   async activate(accountId: string): Promise<void> {
+    // Concurrent requests must snapshot and preserve each outgoing login in order.
+    const activation = this.activationQueue.then(() =>
+      this.activateAccount(accountId),
+    );
+    this.activationQueue = activation.catch(() => {});
+    return activation;
+  }
+
+  private async activateAccount(accountId: string): Promise<void> {
     if (accountId === DEFAULT_ACCOUNT_ID) return;
     const profile = this.requireProfile(accountId);
     const sourceAuth = join(profile.codexHome, "auth.json");
@@ -340,22 +353,30 @@ export class CodexAccountsService {
 
     const activeAuth = join(this.defaultCodexHome, "auth.json");
     if (existsSync(activeAuth)) {
-      const activeEmail = this.readAuthEmail(this.defaultCodexHome);
+      const activeIdentity = await readCodexAuthIdentity(this.defaultCodexHome);
       const backupDir = join(this.homesDir, "_backups");
       mkdirSync(backupDir, { recursive: true });
-      copyFileSync(activeAuth, join(backupDir, `auth-${Date.now()}.json`));
+      copyFileSync(
+        activeAuth,
+        join(backupDir, `auth-${Date.now()}-${randomUUID()}.json`),
+      );
       // Mirror the outgoing credentials into the profile they belong to, so
       // switching back later does not require a new login.
-      const owner = this.listProfiles().find(
-        (item) =>
-          item.id !== DEFAULT_ACCOUNT_ID &&
-          activeEmail !== null &&
-          this.readAuthEmail(item.codexHome) === activeEmail,
+      const profiles = this.listProfiles().filter(
+        (item) => item.id !== DEFAULT_ACCOUNT_ID,
       );
-      if (owner) {
-        mkdirSync(owner.codexHome, { recursive: true });
-        copyFileSync(activeAuth, join(owner.codexHome, "auth.json"));
-      }
+      const identities = await Promise.all(
+        profiles.map((item) => readCodexAuthIdentity(item.codexHome)),
+      );
+      const owner =
+        profiles.find(
+          (_, index) =>
+            activeIdentity !== null && identities[index] === activeIdentity,
+        ) ?? this.addAccount();
+      // The initial machine login has no profile yet. Create one before
+      // replacing it; a backup alone is not selectable in the account picker.
+      mkdirSync(owner.codexHome, { recursive: true });
+      copyFileSync(activeAuth, join(owner.codexHome, "auth.json"));
     }
 
     mkdirSync(this.defaultCodexHome, { recursive: true });
@@ -446,24 +467,6 @@ export class CodexAccountsService {
     const profile = this.listProfiles().find((item) => item.id === accountId);
     if (!profile) throw new Error(`Unknown Codex account: ${accountId}`);
     return profile;
-  }
-
-  private readAuthEmail(codexHome: string): string | null {
-    try {
-      const auth = JSON.parse(
-        readFileSync(join(codexHome, "auth.json"), "utf-8"),
-      ) as { tokens?: { id_token?: string } };
-      const idToken = auth.tokens?.id_token;
-      if (!idToken) return null;
-      const payloadRaw = idToken.split(".")[1];
-      if (!payloadRaw) return null;
-      const payload = JSON.parse(
-        Buffer.from(payloadRaw, "base64url").toString("utf-8"),
-      ) as { email?: string };
-      return payload.email ?? null;
-    } catch {
-      return null;
-    }
   }
 
   private readState(): StoredState {

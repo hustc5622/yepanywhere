@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import {
   type CodexAccountEntry,
   type CodexLoginMode,
@@ -9,6 +9,10 @@ import {
   api,
 } from "../api/client";
 import { useI18n } from "../i18n";
+import {
+  CODEX_ACCOUNTS_UPDATED,
+  visibleCodexAccounts,
+} from "../lib/codexAccounts";
 import { CodexResetCredits } from "./CodexResetCredits";
 
 function clampPercent(value: number): number {
@@ -456,22 +460,33 @@ export function CodexUsageCard() {
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const loadVersion = useRef(0);
 
   const load = useCallback(async (fresh = false) => {
+    const version = ++loadVersion.current;
     setLoading(true);
     try {
       const response = await api.getCodexAccounts({ fresh });
+      if (version !== loadVersion.current) return;
       setAccounts(response.accounts);
       setError(response.error);
+      window.dispatchEvent(
+        new CustomEvent(CODEX_ACCOUNTS_UPDATED, { detail: response.accounts }),
+      );
     } catch (requestError) {
-      setError((requestError as Error).message);
+      if (version === loadVersion.current) {
+        setError((requestError as Error).message);
+      }
     } finally {
-      setLoading(false);
+      if (version === loadVersion.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
     void load();
+    return () => {
+      ++loadVersion.current;
+    };
   }, [load]);
 
   const refresh = useCallback(() => load(true), [load]);
@@ -516,7 +531,7 @@ export function CodexUsageCard() {
         <p className="codex-usage-state">{t("newSessionCodexUsageLoading")}</p>
       ) : (
         <div className="codex-account-list">
-          {accounts.map((entry) => (
+          {visibleCodexAccounts(accounts).map((entry) => (
             <AccountBlock
               key={entry.id}
               entry={entry}

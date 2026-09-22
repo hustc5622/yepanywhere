@@ -1,6 +1,10 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { type CodexAccountEntry, api } from "../api/client";
 import { useI18n } from "../i18n";
+import {
+  CODEX_ACCOUNTS_UPDATED,
+  visibleCodexAccounts,
+} from "../lib/codexAccounts";
 
 const DEFAULT_ACCOUNT_ID = "default";
 
@@ -51,24 +55,42 @@ export function CodexAccountSelect({
   const { t } = useI18n();
   const [accounts, setAccounts] = useState<CodexAccountEntry[]>([]);
   const [loading, setLoading] = useState(true);
+  const loadVersion = useRef(0);
 
   const load = useCallback(async () => {
+    const version = ++loadVersion.current;
     setLoading(true);
     try {
       const response = await api.getCodexAccounts();
-      setAccounts(response.accounts);
+      if (version === loadVersion.current) setAccounts(response.accounts);
     } catch {
-      setAccounts([]);
+      if (version === loadVersion.current) setAccounts([]);
     } finally {
-      setLoading(false);
+      if (version === loadVersion.current) setLoading(false);
     }
   }, []);
 
   useEffect(() => {
+    const onUpdate = (event: Event) => {
+      ++loadVersion.current;
+      setAccounts((event as CustomEvent<CodexAccountEntry[]>).detail);
+      setLoading(false);
+    };
+    window.addEventListener(CODEX_ACCOUNTS_UPDATED, onUpdate);
     void load();
+    return () => {
+      ++loadVersion.current;
+      window.removeEventListener(CODEX_ACCOUNTS_UPDATED, onUpdate);
+    };
   }, [load]);
 
   const selectedId = value ?? DEFAULT_ACCOUNT_ID;
+  const visibleAccounts = visibleCodexAccounts(accounts);
+  const selectedAccount = accounts.find((entry) => entry.id === selectedId);
+  const displayedSelectedId =
+    selectedAccount?.isActive && accounts.some((entry) => entry.isDefault)
+      ? DEFAULT_ACCOUNT_ID
+      : selectedId;
 
   // Fall back to the machine account when the saved selection disappeared
   // (account removed) or lost its credentials.
@@ -83,7 +105,7 @@ export function CodexAccountSelect({
   }, [accounts, loading, selectedId, onChange]);
 
   // A single machine account is the common case; no need for a picker.
-  if (!loading && accounts.length <= 1) return null;
+  if (!loading && visibleAccounts.length <= 1) return null;
 
   return (
     <div className="new-session-codex-account-section">
@@ -92,7 +114,7 @@ export function CodexAccountSelect({
         {t("newSessionCodexAccountDescription")}
       </p>
       <div className="codex-mcp-options">
-        {accounts.map((entry) => {
+        {visibleAccounts.map((entry) => {
           const signedIn = entry.isDefault || Boolean(entry.account);
           const summary = usageSummary(entry, t);
           const name =
@@ -106,13 +128,13 @@ export function CodexAccountSelect({
               key={entry.id}
               type="button"
               className={`mode-option codex-mcp-option ${
-                selectedId === entry.id ? "selected" : ""
+                displayedSelectedId === entry.id ? "selected" : ""
               }`}
               onClick={() =>
                 onChange(entry.id === DEFAULT_ACCOUNT_ID ? null : entry.id)
               }
               disabled={disabled || !signedIn}
-              aria-pressed={selectedId === entry.id}
+              aria-pressed={displayedSelectedId === entry.id}
             >
               <span
                 className="mode-option-dot codex-mcp-standard"

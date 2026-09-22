@@ -1,8 +1,17 @@
-import { cleanup, render, screen, waitFor } from "@testing-library/react";
+import {
+  act,
+  cleanup,
+  fireEvent,
+  render,
+  screen,
+  waitFor,
+} from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { type CodexAccountEntry, api } from "../../api/client";
 import { I18nProvider } from "../../i18n";
+import { CODEX_ACCOUNTS_UPDATED } from "../../lib/codexAccounts";
 import { CodexAccountSelect } from "../CodexAccountSelect";
+import { CodexUsageCard } from "../CodexUsageCard";
 
 function makeEntry(entry: Partial<CodexAccountEntry>): CodexAccountEntry {
   return {
@@ -82,5 +91,105 @@ describe("CodexAccountSelect", () => {
     await waitFor(() => {
       expect(onChange).toHaveBeenCalledWith(null);
     });
+  });
+
+  it("renders an active saved profile once without resetting its session selection", async () => {
+    const onChange = renderSelect(
+      [
+        makeEntry({}),
+        makeEntry({ id: "acct-active", isDefault: false }),
+        makeEntry({
+          id: "acct-other",
+          isDefault: false,
+          isActive: false,
+          account: { type: "chatgpt", email: "b@example.com", planType: "pro" },
+        }),
+      ],
+      vi.fn(),
+      "acct-active",
+    );
+    const name = await screen.findByText("a@example.com");
+    expect(screen.getAllByText("a@example.com")).toHaveLength(1);
+    expect(name.closest("button")?.getAttribute("aria-pressed")).toBe("true");
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("updates the picker after switching in the usage card and keeps both accounts visible", async () => {
+    const a = makeEntry({});
+    const b = makeEntry({
+      id: "acct-b",
+      isDefault: false,
+      isActive: false,
+      account: { type: "chatgpt", email: "b@example.com", planType: "pro" },
+    });
+    vi.spyOn(api, "getCodexAccounts").mockResolvedValue({
+      accounts: [a, b],
+      error: null,
+    });
+    vi.spyOn(api, "activateCodexAccount").mockImplementation(async () => {
+      vi.mocked(api.getCodexAccounts).mockResolvedValue({
+        accounts: [
+          { ...a, account: b.account },
+          { ...b, isActive: true },
+          { ...a, id: "acct-a", isDefault: false, isActive: false },
+        ],
+        error: null,
+      });
+      return { ok: true };
+    });
+    render(
+      <I18nProvider>
+        <CodexAccountSelect value={null} onChange={vi.fn()} />
+        <CodexUsageCard />
+      </I18nProvider>,
+    );
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Use for sessions" }),
+    );
+    await waitFor(() => {
+      expect(api.activateCodexAccount).toHaveBeenCalledWith("acct-b");
+      expect(screen.getAllByText("a@example.com")).toHaveLength(2);
+      expect(screen.getAllByText("b@example.com")).toHaveLength(2);
+      const selected = screen
+        .getAllByText("b@example.com")
+        .find((node) => node.closest("button"));
+      expect(selected?.closest("button")?.getAttribute("aria-pressed")).toBe(
+        "true",
+      );
+    });
+  });
+
+  it("ignores an old picker response after an account update", async () => {
+    let resolveLoad!: (
+      response: Awaited<ReturnType<typeof api.getCodexAccounts>>,
+    ) => void;
+    vi.spyOn(api, "getCodexAccounts").mockReturnValue(
+      new Promise((resolve) => {
+        resolveLoad = resolve;
+      }),
+    );
+    render(
+      <I18nProvider>
+        <CodexAccountSelect value={null} onChange={vi.fn()} />
+      </I18nProvider>,
+    );
+    const updated = [
+      makeEntry({}),
+      makeEntry({
+        id: "acct-b",
+        isDefault: false,
+        isActive: false,
+        account: { type: "chatgpt", email: "b@example.com", planType: "pro" },
+      }),
+    ];
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent(CODEX_ACCOUNTS_UPDATED, { detail: updated }),
+      );
+    });
+    await act(async () => {
+      resolveLoad({ accounts: [makeEntry({})], error: null });
+    });
+    expect(screen.getByText("b@example.com")).toBeTruthy();
   });
 });
