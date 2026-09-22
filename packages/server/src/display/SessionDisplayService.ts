@@ -646,6 +646,7 @@ export class SessionDisplayService {
     const results = new Set<string>();
     const questions = new Set<string>();
     const texts = new Map<string, string>();
+    const completedAnswerTurns = new Set<string>();
     const identity = (message: RecordValue) =>
       String(
         message.codexCorrelationKey ??
@@ -686,8 +687,15 @@ export class SessionDisplayService {
               message.id,
           ),
         );
-      if (message.type === "assistant" && text(content))
+      if (message.type === "assistant" && text(content)) {
         texts.set(identity(message), text(content));
+        if (
+          (page.provider === "codex" || page.provider === "codex-oss") &&
+          message.codexMessagePhase === "final_answer" &&
+          page.turnStatuses?.[run] === "completed"
+        )
+          completedAnswerTurns.add(run);
+      }
     }
     for (const [key, message] of entry.overlay) {
       const turnId = message.codexTurnId ?? message.turnId;
@@ -731,6 +739,20 @@ export class SessionDisplayService {
       const tools = blocks.filter(
         (block) => block?.type === "tool_use" || block?.type === "tool_result",
       );
+      // A sampling retry can abandon an item mid-delta and finish under a new
+      // item ID. It will never have an exact persisted identity/text match.
+      // Retire only transient prose from a turn whose completed final answer
+      // is in this source page; live completion alone can race persistence.
+      if (
+        message.type === "assistant" &&
+        message._isStreaming === true &&
+        !tools.length &&
+        typeof turnId === "string" &&
+        completedAnswerTurns.has(turnId)
+      ) {
+        entry.overlay.delete(key);
+        continue;
+      }
       if (
         tools.length &&
         tools.every((block) =>

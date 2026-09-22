@@ -57,6 +57,161 @@ function fixture(pollMs = 60_000) {
   };
 }
 describe("SessionDisplayService", () => {
+  it.each(["codex", "codex-oss"])(
+    "retires abandoned %s retry text only after the completed answer reaches history",
+    async (provider) => {
+      vi.useFakeTimers();
+      const { service, source, push } = fixture(10);
+      const initial = { ...(await source.read()), provider };
+      source.read.mockResolvedValue(initial);
+      let live: SessionDisplaySnapshot | undefined;
+      await service.subscribe(selection, (type, data) => {
+        if (type === "display-snapshot")
+          live = SessionDisplaySnapshotSchema.parse(data);
+        if (type === "display-patch" && live) {
+          const next = applySessionDisplayPatch(
+            live,
+            SessionDisplayPatchSchema.parse(data),
+          );
+          if (!next) throw new Error("Expected applicable patch");
+          live = next;
+        }
+      });
+      const texts = (snapshot: SessionDisplaySnapshot | undefined) =>
+        snapshot?.nodes.flatMap((node) =>
+          node.type === "segment" && node.segment.type === "assistant_text"
+            ? [
+                {
+                  content: node.segment.content,
+                  streaming: node.segment.streaming,
+                },
+              ]
+            : [],
+        );
+      const delta = (item: string, turn: string, text: string) =>
+        push("message", {
+          type: "stream_event",
+          uuid: `${item}-${turn}`,
+          codexTurnId: turn,
+          event: {
+            type: "content_block_delta",
+            delta: { type: "text_delta", text },
+          },
+        });
+      delta("abandoned", "turn", "Original answer cut off");
+      const answer: Message = {
+        type: "assistant",
+        uuid: "replacement-turn",
+        codexTurnId: "turn",
+        codexCorrelationKey: "codex:turn:agent-message:replacement",
+        codexMessagePhase: "final_answer",
+        message: { role: "assistant", content: "Complete retry answer" },
+      };
+      push("message", answer);
+      push("message", {
+        type: "system",
+        subtype: "turn_complete",
+        codexTurnId: "turn",
+        turnStatus: "completed",
+      });
+      // The completion event can precede the source's final persisted page.
+      await vi.advanceTimersByTimeAsync(11);
+      expect(texts(await service.snapshot(selection))).toContainEqual({
+        content: "Original answer cut off",
+        streaming: true,
+      });
+
+      delta("next", "next-turn", "Next turn in progress");
+      const unpersisted: Message = {
+        ...answer,
+        uuid: "progress-turn",
+        codexCorrelationKey: "codex:turn:agent-message:progress",
+        codexMessagePhase: "commentary",
+        message: { role: "assistant", content: "Completed live progress" },
+      };
+      push("message", unpersisted);
+      source.read.mockResolvedValue({
+        ...initial,
+        messages: [...initial.messages, answer],
+        turnStatuses: { turn: "completed" },
+        // A newer turn can already be running when the old turn is persisted.
+        activity: "running",
+        stamp: "2",
+      });
+      source.stamp.mockResolvedValue("2");
+      await vi.advanceTimersByTimeAsync(11);
+      const snapshot = await service.snapshot(selection);
+      const expected = [
+        { content: "Complete retry answer", streaming: false },
+        { content: "Next turn in progress", streaming: true },
+        { content: "Completed live progress", streaming: false },
+      ];
+      expect(texts(snapshot)).toEqual(expected);
+      expect(texts(live)).toEqual(expected);
+
+      const reconnect = vi.fn();
+      await service.subscribe(selection, reconnect);
+      expect(
+        texts(
+          reconnect.mock.calls.find(
+            ([type]) => type === "display-snapshot",
+          )?.[1],
+        ),
+      ).toEqual(expected);
+      // Subsequent history refreshes must not resurrect the old overlay.
+      source.stamp.mockResolvedValue("3");
+      await vi.advanceTimersByTimeAsync(11);
+      expect(texts(await service.snapshot(selection))).toEqual(expected);
+    },
+  );
+
+  it.each([
+    { status: "running", final: true },
+    { status: undefined, final: true },
+    { status: "completed", final: false },
+    { status: "failed", final: false },
+    { status: "interrupted", final: false },
+  ] as const)(
+    "preserves unmatched text without a persisted completed answer ($status, final=$final)",
+    async ({ status, final }) => {
+      vi.useFakeTimers();
+      const { service, source, push } = fixture(10);
+      const initial = await source.read();
+      await service.subscribe(selection, vi.fn());
+      push("message", {
+        type: "stream_event",
+        uuid: "draft-turn",
+        codexTurnId: "turn",
+        event: {
+          type: "content_block_delta",
+          delta: { type: "text_delta", text: "Only available partial answer" },
+        },
+      });
+      source.read.mockResolvedValue({
+        ...initial,
+        messages: [
+          ...initial.messages,
+          {
+            type: "assistant",
+            uuid: "persisted-turn",
+            codexTurnId: "turn",
+            codexMessagePhase: final ? "final_answer" : "commentary",
+            message: { role: "assistant", content: "Persisted text" },
+          },
+        ],
+        ...(status ? { turnStatuses: { turn: status } } : {}),
+        // Session-wide completion alone is not proof about this native turn.
+        activity: "completed",
+        stamp: "2",
+      });
+      source.stamp.mockResolvedValue("2");
+      await vi.advanceTimersByTimeAsync(11);
+      expect(
+        JSON.stringify((await service.snapshot(selection)).nodes),
+      ).toContain("Only available partial answer");
+    },
+  );
+
   it.each(["completed", "failed", "interrupted"])(
     "does not replay compaction progress after a %s turn",
     async (outcome) => {
