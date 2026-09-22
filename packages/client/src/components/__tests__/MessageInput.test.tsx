@@ -457,7 +457,7 @@ describe("MessageInput", () => {
     });
 
     expect(textarea.value).toBe(
-      "prefix review both @[first.png] @[second.png] suffix",
+      "prefix review both @[first.png]  @[second.png]  suffix",
     );
     expect(onAttach).toHaveBeenCalledTimes(1);
     const attached = onAttach.mock.calls[0]?.[0] as File[];

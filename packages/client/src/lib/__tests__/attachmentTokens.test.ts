@@ -34,16 +34,28 @@ describe("attachmentTokens", () => {
     );
   });
 
-  it("inserts at the caret with single-space padding", () => {
+  it("leaves a wider gap and puts subsequent typing after it", () => {
     const result = insertAttachmentToken("hello world", 5, "shot.png");
-    expect(result.text).toBe("hello @[shot.png] world");
-    expect(result.text.slice(0, result.cursor)).toBe("hello @[shot.png]");
+    expect(result.text).toBe("hello @[shot.png]  world");
+    expect(result.text.slice(0, result.cursor)).toBe("hello @[shot.png]  ");
   });
 
-  it("inserts without doubling spaces", () => {
-    expect(insertAttachmentToken("", 0, "a.png").text).toBe("@[a.png]");
-    expect(insertAttachmentToken("hi ", 3, "a.png").text).toBe("hi @[a.png]");
-  });
+  it.each([
+    ["", 0, "@[a.png]  ", ""],
+    ["hi ", 3, "hi @[a.png]  ", ""],
+    ["word", 0, "@[a.png]  ", "word"],
+    ["  word", 0, "@[a.png]  ", "word"],
+    ["   word", 0, "@[a.png]   ", "word"],
+    ["\nword", 0, "@[a.png]", "\nword"],
+    ["\tword", 0, "@[a.png]", "\tword"],
+  ])(
+    "preserves surrounding whitespace when inserting into %j",
+    (text, cursor, prefix, suffix) => {
+      const result = insertAttachmentToken(text, cursor, "a.png");
+      expect(result.text).toBe(prefix + suffix);
+      expect(result.text.slice(0, result.cursor)).toBe(prefix);
+    },
+  );
 
   it("removes the last matching token and collapses spacing", () => {
     expect(removeAttachmentToken("hello @[a.png] world", "a.png")).toBe(

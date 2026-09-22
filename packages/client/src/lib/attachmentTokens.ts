@@ -93,8 +93,9 @@ export function hasAttachmentToken(text: string, name: string): boolean {
 }
 
 /**
- * Inserts an attachment token at `cursor`, padding with single spaces so the
- * token never glues onto neighbouring words.
+ * Inserts an attachment token at `cursor`, keeping at least two spaces after
+ * it and placing the caret beyond that gap so subsequent typing stays clear
+ * of the chip. Existing line breaks, tabs and wider spacing are preserved.
  */
 export function insertAttachmentToken(
   text: string,
@@ -106,11 +107,20 @@ export function insertAttachmentToken(
   const before = text.slice(0, safeCursor);
   const after = text.slice(safeCursor);
   const leading = before.length > 0 && !/\s$/.test(before) ? " " : "";
-  const trailing = after.length > 0 && !/^\s/.test(after) ? " " : "";
+  const existingSpaces = after.match(/^ */)?.[0].length ?? 0;
+  const followedByWhitespace = /^\s/.test(after.slice(existingSpaces));
+  const trailing = followedByWhitespace
+    ? ""
+    : " ".repeat(Math.max(0, 2 - existingSpaces));
   const nextText = `${before}${leading}${token}${trailing}${after}`;
   return {
     text: nextText,
-    cursor: before.length + leading.length + token.length + trailing.length,
+    cursor:
+      before.length +
+      leading.length +
+      token.length +
+      trailing.length +
+      existingSpaces,
   };
 }
 

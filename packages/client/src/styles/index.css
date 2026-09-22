@@ -5926,7 +5926,7 @@ a.sidebar-nav-item {
 /* Inline attachment tokens in the composer */
 .composer-token-mirror {
   position: absolute;
-  z-index: 2;
+  z-index: 1;
   margin: 0;
   overflow: hidden;
   white-space: pre-wrap;
@@ -5935,7 +5935,7 @@ a.sidebar-nav-item {
   overflow-wrap: break-word;
   word-break: normal;
   color: var(--text-primary);
-  background: transparent;
+  background: var(--bg-input);
   border-style: solid;
   border-color: transparent;
   pointer-events: none;
@@ -5952,13 +5952,11 @@ a.sidebar-nav-item {
   box-shadow: 0 0 0 2px
     color-mix(in srgb, var(--link-color) 34%, var(--bg-input));
   color: var(--link-color);
-  cursor: pointer;
-  pointer-events: auto;
   -webkit-box-decoration-break: clone;
   box-decoration-break: clone;
 }
 
-.composer-token-chip:hover {
+.composer-token-chip[data-hovered] {
   background: color-mix(in srgb, var(--link-color) 52%, var(--bg-input));
   box-shadow: 0 0 0 2px
     color-mix(in srgb, var(--link-color) 52%, var(--bg-input));
@@ -5968,7 +5966,13 @@ a.sidebar-nav-item {
 .message-input textarea.has-token-mirror,
 .new-session-form-textarea.has-token-mirror {
   position: relative;
-  z-index: 1;
+  z-index: 2;
+  background: transparent;
+  caret-color: var(--text-primary);
+}
+
+.has-token-mirror[data-token-hovered] {
+  cursor: pointer;
 }
 
 /* Attachment list */

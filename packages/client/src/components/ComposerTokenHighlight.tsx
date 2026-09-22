@@ -52,7 +52,7 @@ interface Props {
 }
 
 /**
- * Renders a mirror of the textarea content on top of it so inline attachment
+ * Renders a mirror beneath the transparent textarea so inline attachment
  * tokens (`@[name.png]`) can be painted as clickable chips.
  *
  * The textarea keeps handling input, selection and the caret; its own glyphs
@@ -110,20 +110,84 @@ export function ComposerTokenHighlight({
     syncGeometry();
   }, [syncGeometry, liveText]);
 
-  // Hide the textarea glyphs while the mirror paints them, but keep the caret
-  // visible in the original text color.
+  // Only hide the glyphs; CSS keeps the native caret above the mirror and
+  // resolves its color from the current theme.
   useLayoutEffect(() => {
     const textarea = textareaRef.current;
     if (!textarea) return;
 
-    const resolvedColor = window.getComputedStyle(textarea).color;
-    textarea.style.caretColor = resolvedColor;
     textarea.style.color = "transparent";
     return () => {
       textarea.style.color = "";
-      textarea.style.caretColor = "";
     };
   }, [textareaRef]);
+
+  // The textarea owns the top layer (including the native caret/selection).
+  // Hit-test the mirrored inline fragments to preserve attachment previews,
+  // including chips that wrap across several lines.
+  useEffect(() => {
+    const textarea = textareaRef.current;
+    if (!textarea || !onTokenClick) return;
+
+    let hovered: HTMLElement | null = null;
+    const findChip = (event: MouseEvent) => {
+      if (textarea.disabled) return null;
+      const chips = mirrorRef.current?.querySelectorAll<HTMLElement>(
+        ".composer-token-chip",
+      );
+      for (const chip of chips ?? []) {
+        for (const rect of chip.getClientRects()) {
+          if (
+            event.clientX >= rect.left &&
+            event.clientX < rect.right &&
+            event.clientY >= rect.top &&
+            event.clientY < rect.bottom
+          ) {
+            return chip;
+          }
+        }
+      }
+      return null;
+    };
+    const clearHover = () => {
+      hovered?.removeAttribute("data-hovered");
+      hovered = null;
+      textarea.removeAttribute("data-token-hovered");
+    };
+    const handleMove = (event: MouseEvent) => {
+      const chip = findChip(event);
+      if (chip === hovered) return;
+      clearHover();
+      if (chip) {
+        hovered = chip;
+        chip.setAttribute("data-hovered", "");
+        textarea.setAttribute("data-token-hovered", "");
+      }
+    };
+    const handleMouseDown = (event: MouseEvent) => {
+      if (event.button === 0 && findChip(event)) event.preventDefault();
+    };
+    const handleClick = (event: MouseEvent) => {
+      const chip = findChip(event);
+      if (chip?.dataset.name != null) {
+        onTokenClick(chip.dataset.name, Number(chip.dataset.occurrence));
+      }
+    };
+
+    textarea.addEventListener("mousemove", handleMove);
+    textarea.addEventListener("mouseleave", clearHover);
+    textarea.addEventListener("scroll", clearHover);
+    textarea.addEventListener("mousedown", handleMouseDown);
+    textarea.addEventListener("click", handleClick);
+    return () => {
+      clearHover();
+      textarea.removeEventListener("mousemove", handleMove);
+      textarea.removeEventListener("mouseleave", clearHover);
+      textarea.removeEventListener("scroll", clearHover);
+      textarea.removeEventListener("mousedown", handleMouseDown);
+      textarea.removeEventListener("click", handleClick);
+    };
+  }, [textareaRef, onTokenClick]);
 
   useEffect(() => {
     const textarea = textareaRef.current;
@@ -180,20 +244,8 @@ export function ComposerTokenHighlight({
             // biome-ignore lint/suspicious/noArrayIndexKey: segments are positional
             key={`token-${index}`}
             className="composer-token-chip"
-            title={segment.name}
-            onMouseDown={(event) => {
-              // Keep the caret where it is; the click opens a preview instead.
-              if (onTokenClick) event.preventDefault();
-            }}
-            onClick={() => onTokenClick?.(segment.name, occurrence)}
-            onKeyDown={(event) => {
-              // The mirror is aria-hidden and not focusable; this only exists
-              // so the click target still answers Enter/Space if focused.
-              if (event.key === "Enter" || event.key === " ") {
-                event.preventDefault();
-                onTokenClick?.(segment.name, occurrence);
-              }
-            }}
+            data-name={segment.name}
+            data-occurrence={occurrence}
           >
             {segment.raw}
           </span>
