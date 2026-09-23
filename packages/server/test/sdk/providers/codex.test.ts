@@ -4459,6 +4459,7 @@ process.stdin.on("data", (chunk) => {
             .getMessageHistory()
             .filter((message) => message.type === "result"),
         ).toHaveLength(1);
+        expect(onSessionIdChanged).toHaveBeenCalledTimes(1);
         expect(onSessionIdChanged).toHaveBeenCalledWith(
           "thread-provisional",
           "thread-replacement",

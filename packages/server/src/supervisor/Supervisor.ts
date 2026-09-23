@@ -44,6 +44,7 @@ import {
 } from "./WorkerQueue.js";
 import {
   DEFAULT_IDLE_PREEMPT_THRESHOLD_MS,
+  type ProcessEvent,
   type ProcessInfo,
   type ProcessOptions,
   type SessionOwnership,
@@ -825,7 +826,11 @@ export class Supervisor {
       }
     }
 
-    this.registerProcess(process, !resumeSessionId || isForkedResume);
+    this.registerProcess(
+      process,
+      !resumeSessionId || isForkedResume,
+      isForkedResume ? undefined : resumeSessionId,
+    );
 
     return process;
   }
@@ -1378,7 +1383,11 @@ export class Supervisor {
     this.eventBus.emit(event);
   }
 
-  private registerProcess(process: Process, isNewSession: boolean): void {
+  private registerProcess(
+    process: Process,
+    isNewSession: boolean,
+    resumedSessionId?: string,
+  ): void {
     const log = getLogger();
     log.info(
       {
@@ -1443,7 +1452,7 @@ export class Supervisor {
     this.emitWorkerActivity();
 
     // Listen for completion to auto-cleanup, and state changes for process state events
-    process.subscribe((event) => {
+    const handleEvent = (event: ProcessEvent) => {
       if (event.type === "complete") {
         this.unregisterProcess(process);
       } else if (event.type === "session-id-changed") {
@@ -1606,7 +1615,26 @@ export class Supervisor {
           event.reason,
         );
       }
-    });
+    };
+    process.subscribe(handleEvent);
+
+    // Strict initialization can replace a provisional resume ID before this
+    // subscription exists. Reconcile it through the same migration path as a
+    // late init, retaining both IDs without taking over another process's ID.
+    // Forks deliberately omit resumedSessionId: their parent stays independent.
+    if (
+      resumedSessionId &&
+      resumedSessionId !== process.sessionId &&
+      !this.sessionToProcess.has(resumedSessionId)
+    ) {
+      this.sessionToProcess.set(resumedSessionId, process.id);
+      this.everOwnedSessions.add(resumedSessionId);
+      handleEvent({
+        type: "session-id-changed",
+        oldSessionId: resumedSessionId,
+        newSessionId: process.sessionId,
+      });
+    }
   }
 
   private unregisterProcess(process: Process): void {

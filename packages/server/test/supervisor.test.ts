@@ -211,52 +211,84 @@ describe("Supervisor", () => {
   });
 
   describe("resumeSession", () => {
-    it("waits for Codex resume initialization before registering a known session", async () => {
-      let releaseInit!: () => void;
-      let stop!: () => void;
-      const initGate = new Promise<void>((resolve) => {
-        releaseInit = resolve;
-      });
-      const stopGate = new Promise<void>((resolve) => {
-        stop = resolve;
-      });
-      const local = new Supervisor({
-        provider: createCodexTestProvider(async () => ({
-          iterator: (async function* () {
-            await initGate;
-            yield {
-              type: "system",
-              subtype: "init",
-              session_id: "known-session",
-            };
-            await stopGate;
-          })(),
-          queue: new MessageQueue(),
-          abort: stop,
-        })),
-      });
-      let settled = false;
-      const pending = local
-        .resumeSession("known-session", "/tmp/test", { text: "hi" })
-        .then((process) => {
-          settled = true;
-          return process;
+    it.each(["known-session", "replacement-session"])(
+      "waits for initialization and reconciles the returned ID %s",
+      async (resolvedSessionId) => {
+        let releaseInit!: () => void;
+        let stop!: () => void;
+        const initGate = new Promise<void>((resolve) => {
+          releaseInit = resolve;
         });
-      try {
-        await new Promise((resolve) => setTimeout(resolve, 20));
-        expect(settled).toBe(false);
-        expect(local.getProcessForSession("known-session")).toBeUndefined();
-        releaseInit();
-        const process = await pending;
-        expect(process).toHaveProperty("sessionId", "known-session");
-        expect(local.getProcessForSession("known-session")).toBe(process);
-      } finally {
-        releaseInit();
-        stop();
-        await pending;
-        await local.shutdown();
-      }
-    });
+        const stopGate = new Promise<void>((resolve) => {
+          stop = resolve;
+        });
+        const onSessionIdChanged = vi.fn(async () => undefined);
+        const eventBus = new EventBus();
+        const events: BusEvent[] = [];
+        eventBus.subscribe((event) => events.push(event));
+        const local = new Supervisor({
+          onSessionIdChanged,
+          eventBus,
+          provider: createCodexTestProvider(async () => ({
+            iterator: (async function* () {
+              await initGate;
+              yield {
+                type: "system",
+                subtype: "init",
+                session_id: resolvedSessionId,
+              };
+              await stopGate;
+            })(),
+            queue: new MessageQueue(),
+            abort: stop,
+          })),
+        });
+        let settled = false;
+        const pending = local
+          .resumeSession("known-session", "/tmp/test", { text: "hi" })
+          .then((process) => {
+            settled = true;
+            return process;
+          });
+        try {
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          expect(settled).toBe(false);
+          expect(local.getProcessForSession("known-session")).toBeUndefined();
+          releaseInit();
+          const process = await pending;
+          expect(process).toHaveProperty("sessionId", resolvedSessionId);
+          expect(local.getProcessForSession("known-session")).toBe(process);
+          expect(local.getProcessForSession(resolvedSessionId)).toBe(process);
+          const changes = events.filter(
+            (event) => event.type === "session-id-changed",
+          );
+          if (resolvedSessionId === "known-session") {
+            expect(onSessionIdChanged).not.toHaveBeenCalled();
+            expect(changes).toHaveLength(0);
+          } else {
+            expect(onSessionIdChanged).toHaveBeenCalledTimes(1);
+            expect(onSessionIdChanged).toHaveBeenCalledWith(
+              "known-session",
+              resolvedSessionId,
+              encodeProjectId("/tmp/test"),
+            );
+            expect(changes).toEqual([
+              expect.objectContaining({
+                oldSessionId: "known-session",
+                newSessionId: resolvedSessionId,
+              }),
+            ]);
+          }
+        } finally {
+          releaseInit();
+          stop();
+          await pending;
+          await local.shutdown();
+          expect(local.getProcessForSession("known-session")).toBeUndefined();
+          expect(local.getProcessForSession(resolvedSessionId)).toBeUndefined();
+        }
+      },
+    );
 
     it("resumes an existing session", async () => {
       mockSdk.addScenario(createMockScenario("sess-123", "Resumed!"));
