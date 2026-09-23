@@ -155,6 +155,13 @@ describe("CodexBridgeService", () => {
         );
         expect(existsSync(join(store.directory, "executions"))).toBe(false);
         writeFileSync(join(cwd, "report.md"), "after");
+        // The bridge awaits file persistence before forwarding this terminal
+        // frame. Synchronize on that barrier instead of polling the store while
+        // its writer holds the lock (which can outlast vi.waitFor's 1s default).
+        const completed = waitForJson(
+          client,
+          (message) => message.method === "turn/completed",
+        );
         upstreamSocket?.send(
           JSON.stringify({
             id: 2,
@@ -197,10 +204,10 @@ describe("CodexBridgeService", () => {
           sourceId: "local",
           sessionId: "capture-thread",
         };
-        await vi.waitFor(async () =>
-          expect((await store.snapshot(scope)).operations).toHaveLength(1),
-        );
-        const record = (await store.snapshot(scope)).operations[0]?.record;
+        await completed;
+        const snapshot = await store.snapshot(scope);
+        expect(snapshot.operations).toHaveLength(1);
+        const record = snapshot.operations[0]?.record;
         expect(record).toMatchObject({
           identity: { turnId: "capture-turn" },
           outcome: "applied",
@@ -3973,20 +3980,29 @@ async function connect(
   });
 }
 
-async function waitForJson(ws: WebSocket): Promise<JsonRpcMessage> {
-  return (await waitForJsonFrame(ws)).message;
+async function waitForJson(
+  ws: WebSocket,
+  predicate?: (message: JsonRpcMessage) => boolean,
+): Promise<JsonRpcMessage> {
+  return (await waitForJsonFrame(ws, predicate)).message;
 }
 
 async function waitForJsonFrame(
   ws: WebSocket,
+  predicate: (message: JsonRpcMessage) => boolean = () => true,
 ): Promise<{ message: JsonRpcMessage; isBinary: boolean }> {
   return new Promise((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error("message timeout")), 5000);
+    const timer = setTimeout(() => {
+      ws.off("message", handler);
+      reject(new Error("message timeout"));
+    }, 5000);
     const handler = (data: WebSocket.RawData, isBinary: boolean) => {
+      const message = JSON.parse(data.toString()) as JsonRpcMessage;
+      if (!predicate(message)) return;
       clearTimeout(timer);
       ws.off("message", handler);
       resolve({
-        message: JSON.parse(data.toString()) as JsonRpcMessage,
+        message,
         isBinary,
       });
     };

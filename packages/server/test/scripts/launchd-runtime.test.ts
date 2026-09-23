@@ -173,6 +173,10 @@ describe("LaunchAgent runtime isolation", () => {
       join(workspaceRoot, "scripts/lib/deploy-lock.sh"),
       join(libDir, "deploy-lock.sh"),
     );
+    copyFileSync(
+      join(workspaceRoot, "scripts/lib/deploy-runtime.sh"),
+      join(libDir, "deploy-runtime.sh"),
+    );
     writeFileSync(
       join(repoRoot, ".env.deploy.local"),
       [
@@ -234,7 +238,7 @@ describe("LaunchAgent runtime isolation", () => {
       },
     );
 
-    expect(result.status).toBe(0);
+    expect(result.status, result.stderr).toBe(0);
     const plistPath = join(
       homeDir,
       "Library/LaunchAgents/com.yueyuan.yepanywhere.server.plist",
