@@ -122,6 +122,27 @@ describe("MessageActions", () => {
     expect(execCommand).not.toHaveBeenCalled();
   });
 
+  it("announces phase changes beside the duration and removes the phase on completion", () => {
+    const { rerender } = renderWithI18n(
+      <MessageActions durationMs={65000} runningPhase="llm" />,
+    );
+    expect(screen.getByRole("status").textContent).toBe("LLM thinking");
+    expect(screen.getByText("1m05s")).toBeTruthy();
+    rerender(
+      <I18nProvider>
+        <MessageActions durationMs={65000} runningPhase="tools" />
+      </I18nProvider>,
+    );
+    expect(screen.getByRole("status").textContent).toBe("Running tools");
+    rerender(
+      <I18nProvider>
+        <MessageActions durationMs={65000} />
+      </I18nProvider>,
+    );
+    expect(screen.queryByRole("status")).toBeNull();
+    expect(screen.getByText("1m05s")).toBeTruthy();
+  });
+
   it("uses the synchronous fallback directly in an insecure context", async () => {
     Object.defineProperty(window, "isSecureContext", {
       configurable: true,

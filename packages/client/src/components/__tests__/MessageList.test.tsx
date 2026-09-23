@@ -14,13 +14,16 @@ vi.mock("../MessageActions", () => ({
   MessageActions: ({
     timestamp,
     timestampIsLastUpdate,
+    runningPhase,
   }: {
     timestamp?: string;
     timestampIsLastUpdate?: boolean;
+    runningPhase?: string;
   }) => (
     <time
       data-testid="message-actions"
       data-last-update={timestampIsLastUpdate ? "true" : "false"}
+      data-phase={runningPhase}
     >
       {timestamp}
     </time>
@@ -546,6 +549,63 @@ describe("MessageList active turn timestamp", () => {
     timestamp = screen.getByTestId("message-actions");
     expect(timestamp.textContent).toBe(firstUpdate);
     expect(timestamp.dataset.lastUpdate).toBe("false");
+  });
+
+  it("keeps the phase on the live turn and hides it for compaction, history and idle", () => {
+    const oldItems = [userPromptItem("u1"), assistantToolItem("old", "Bash")];
+    const pendingTool = {
+      ...assistantToolItem("current", "Bash"),
+      status: "pending" as const,
+      toolResult: undefined,
+    };
+    const items = [...oldItems, userPromptItem("u2"), pendingTool];
+    const { rerender } = render(
+      <MessageList messages={[]} preprocessedItems={items} isProcessing />,
+    );
+    expect(
+      screen.getAllByTestId("message-actions").map((el) => el.dataset.phase),
+    ).toEqual([undefined, "tools"]);
+
+    rerender(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[
+          ...oldItems,
+          userPromptItem("u2"),
+          assistantToolItem("current", "Bash"),
+        ]}
+        isProcessing
+      />,
+    );
+    expect(screen.getAllByTestId("message-actions")[1]?.dataset.phase).toBe(
+      "llm",
+    );
+
+    for (const props of [
+      { isProcessing: false },
+      { isProcessing: true, isCompacting: true },
+      { isProcessing: true, hasNewerMessages: true },
+    ]) {
+      rerender(
+        <MessageList messages={[]} preprocessedItems={items} {...props} />,
+      );
+      expect(
+        screen
+          .getAllByTestId("message-actions")
+          .every((el) => !el.dataset.phase),
+      ).toBe(true);
+    }
+
+    rerender(
+      <MessageList
+        messages={[]}
+        preprocessedItems={[...oldItems, userPromptItem("u2")]}
+        isProcessing
+      />,
+    );
+    expect(
+      screen.getAllByTestId("message-actions").map((el) => el.dataset.phase),
+    ).toEqual([undefined, "llm"]);
   });
 });
 

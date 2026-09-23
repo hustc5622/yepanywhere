@@ -617,6 +617,8 @@
   "messageActionLastUpdated": "Last updated: {time}",
   "messageActionDuration": "Took {duration}",
   "messageActionDurationRunning": "Running for {duration}",
+  "messageActionPhaseLlm": "LLM thinking",
+  "messageActionPhaseTools": "Running tools",
   "toolApprovalExpand": "Expand approval panel",
   "toolApprovalCollapse": "Collapse approval panel",
   "toolApprovalPlanTitle": "Accept this plan?",

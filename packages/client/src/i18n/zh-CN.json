@@ -617,6 +617,8 @@
   "messageActionLastUpdated": "最近更新：{time}",
   "messageActionDuration": "耗时 {duration}",
   "messageActionDurationRunning": "已运行 {duration}",
+  "messageActionPhaseLlm": "LLM 思考中",
+  "messageActionPhaseTools": "工具执行中",
   "toolApprovalExpand": "展开审批面板",
   "toolApprovalCollapse": "收起审批面板",
   "toolApprovalPlanTitle": "接受这个计划吗？",

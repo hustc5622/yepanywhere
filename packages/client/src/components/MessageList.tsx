@@ -18,6 +18,7 @@ import {
   isSessionInspectorOnlyItem,
   preprocessMessages,
 } from "../lib/preprocessMessages";
+import { getTurnPhase } from "../lib/turnPhase";
 import type { Message } from "../types";
 import type { RenderItem } from "../types/renderItems";
 import { getMessageId } from "../utils";
@@ -972,6 +973,11 @@ export const MessageList = memo(function MessageList({
               durationMs={turnDurationMs}
               durationIsRunning={usesLastUpdateTimestamp && isProcessing}
               turnStartedAt={row.turnStartedAt}
+              runningPhase={
+                usesLastUpdateTimestamp && isProcessing && !isCompacting
+                  ? getTurnPhase(row.items)
+                  : undefined
+              }
               copyText={row.turnCopyText}
             />
           </div>
@@ -1077,7 +1083,15 @@ export const MessageList = memo(function MessageList({
         );
       case "processing":
         return (
-          <ProcessingIndicator isProcessing={isProcessing && !isCompacting} />
+          <>
+            {isProcessing &&
+              !isCompacting &&
+              !hasNewerMessages &&
+              !lastUpdatedAssistantTurnKey && (
+                <MessageActions runningPhase="llm" />
+              )}
+            <ProcessingIndicator isProcessing={isProcessing && !isCompacting} />
+          </>
         );
     }
   };

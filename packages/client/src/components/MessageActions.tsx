@@ -10,6 +10,7 @@ import {
 } from "../lib/clipboard";
 import { formatElapsed } from "../lib/formatElapsed";
 import { formatTokenCount } from "../lib/tokens";
+import type { TurnPhase } from "../lib/turnPhase";
 
 interface MessageActionsProps {
   /** ISO timestamp string from the source message; shown on hover. */
@@ -25,6 +26,8 @@ interface MessageActionsProps {
   durationIsRunning?: boolean;
   /** ISO timestamp the turn started, required for the live ticker. */
   turnStartedAt?: string;
+  /** Foreground phase, supplied only for the active turn. */
+  runningPhase?: TurnPhase;
   /** Context-window usage snapshot associated with this message. */
   contextBefore?: ContextUsage;
   /** Plain-text payload to copy. When omitted, the copy button is hidden. */
@@ -59,6 +62,7 @@ export function MessageActions({
   durationMs,
   durationIsRunning = false,
   turnStartedAt,
+  runningPhase,
   contextBefore,
   copyText,
   copyImages = [],
@@ -143,6 +147,7 @@ export function MessageActions({
   if (
     !timestamp &&
     !durationLabel &&
+    !runningPhase &&
     !contextTokenLabel &&
     !hasCopyPayload &&
     !onEdit
@@ -152,7 +157,7 @@ export function MessageActions({
   return (
     <span
       ref={actionsRef}
-      className={`message-actions${placement === "bubble" ? " message-actions-bubble" : ""}${copyFeedback ? " is-active" : ""}`}
+      className={`message-actions${placement === "bubble" ? " message-actions-bubble" : ""}${copyFeedback ? " is-active" : ""}${runningPhase ? " has-running-phase" : ""}`}
       onClick={(e) => e.stopPropagation()}
       onKeyDown={(e) => e.stopPropagation()}
     >
@@ -188,6 +193,13 @@ export function MessageActions({
           }
         >
           {durationLabel}
+        </span>
+      )}
+      {runningPhase && (
+        <span className="message-actions-phase" role="status">
+          {runningPhase === "tools"
+            ? t("messageActionPhaseTools")
+            : t("messageActionPhaseLlm")}
         </span>
       )}
       {contextTokenLabel && (
