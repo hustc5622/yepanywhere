@@ -117,6 +117,7 @@ echo 'YEP_RUNTIME_EXTERNAL=true' >> .env.deploy.local
 ### 切换之后
 
 - `scripts/deploy.sh --server-only`：只换 shell，runtime 与活跃会话原样保留。
+- 交互向导里只选择 8022 即可；4510 和 runtime 的重启选项相互独立，不需要为续聊一起勾选。已有 external 配置在 LaunchAgent 环境同步和备用 `nohup` 启动时都会保留，部署结束会核对 `/api/status/workers` 的实际运行形态；不一致则报错，不把 HTTP 可访问当作部署成功。
 - `scripts/redeploy-server.sh --restart-runtime`：显式重启 runtime，会打断活跃 turn。
 - `curl -s http://127.0.0.1:8022/yep/api/status/workers` 里 `runtimeMode` 会变成 `external`。
 - runtime 日志：`~/.yep-anywhere/logs/runtime-launchd.{out,err}.log`。

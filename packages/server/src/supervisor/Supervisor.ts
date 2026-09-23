@@ -799,8 +799,10 @@ export class Supervisor {
     const requiresStrictSessionId =
       isForkedResume || activeProvider.name === "codex";
 
-    // Wait for the real session ID from the provider before registering
-    if (!resumeSessionId || isForkedResume) {
+    // A known Codex ID does not mean thread/resume succeeded. Wait for init
+    // on ordinary resumes too, so writer-lock failures reach the HTTP caller
+    // before it clears the draft and waits forever for a user-message echo.
+    if (!resumeSessionId || requiresStrictSessionId) {
       let resolvedSessionId: string;
       try {
         const sessionIdTimeoutMs = isForkedResume

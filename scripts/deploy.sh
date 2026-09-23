@@ -405,6 +405,7 @@ configure_interactive_runtime_split() {
       else
         # An explicit "no" outranks YEP_RUNTIME_EXTERNAL from the deploy env file.
         DEPLOY_EXTERNAL_RUNTIME=false
+        export YEP_RUNTIME_EXTERNAL=false
       fi
       ;;
     *)

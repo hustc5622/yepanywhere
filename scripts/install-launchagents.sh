@@ -30,6 +30,8 @@ source "$SCRIPT_DIR/lib/deploy-env.sh"
 # shellcheck source=scripts/lib/deploy-lock.sh
 source "$SCRIPT_DIR/lib/deploy-lock.sh"
 load_deploy_env_file
+# shellcheck source=scripts/lib/deploy-runtime.sh
+source "$SCRIPT_DIR/lib/deploy-runtime.sh"
 
 SERVER_LABEL="${YEP_LAUNCHD_SERVER_LABEL:-com.yueyuan.yepanywhere.server}"
 BRIDGE_LABEL="${YEP_LAUNCHD_BRIDGE_LABEL:-com.yueyuan.yepanywhere.codex-bridge}"
@@ -43,10 +45,12 @@ BRIDGE_URL="${YEP_CODEX_BRIDGE_CONTROL_URL:-${CODEX_BRIDGE_CONTROL_URL:-http://1
 # External runtime splits live agent processes out of the web/API shell so the
 # shell can be redeployed without aborting active turns. Opt-in: switching a
 # running deployment between embedded and external costs one restart.
-RUNTIME_PORT="${YEP_RUNTIME_PORT:-$((SERVER_PORT + 3))}"
-RUNTIME_URL="${YEP_RUNTIME_CONTROL_URL:-http://127.0.0.1:${RUNTIME_PORT}}"
+resolve_deploy_runtime "$HOME/Library/LaunchAgents/$SERVER_LABEL.plist" "$SERVER_PORT"
+RUNTIME_PORT="$DEPLOY_RUNTIME_PORT"
+RUNTIME_URL="$DEPLOY_RUNTIME_URL"
 case "${YEP_RUNTIME_EXTERNAL:-}" in
   1|true|yes|external) RUNTIME_EXTERNAL=true ;;
+  "") RUNTIME_EXTERNAL=false; [[ "$DEPLOY_RUNTIME_MODE" != external ]] || RUNTIME_EXTERNAL=true ;;
   *) RUNTIME_EXTERNAL=false ;;
 esac
 CODEX_CLI_PATH="${YEP_CODEX_PATH:-${CODEX_PATH:-}}"
@@ -199,7 +203,9 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if $RUNTIME_EXTERNAL; then
+# --server-only / --bridge-only refresh only the selected service. Preserving
+# external wiring does not authorize installing or starting its worker.
+if $INSTALL_RUNTIME_EXPLICIT || { $RUNTIME_EXTERNAL && $INSTALL_SERVER && $INSTALL_CODEX_BRIDGE; }; then
   INSTALL_RUNTIME=true
 else
   INSTALL_RUNTIME=false
@@ -561,6 +567,9 @@ write_runtime_plist() {
     "YEP_CODEX_BRIDGE_CONTROL_URL" "$BRIDGE_URL"
     "YEP_CODEX_BRIDGE_PORT" "$BRIDGE_PORT"
   )
+  if [[ -n "$DEPLOY_RUNTIME_TOKEN_FILE" ]]; then
+    env_args+=("YEP_RUNTIME_TOKEN_FILE" "$DEPLOY_RUNTIME_TOKEN_FILE")
+  fi
   env_args+=(${PROVIDER_ENV_ARGS[@]+"${PROVIDER_ENV_ARGS[@]}"})
 
   write_header "$plist" "$RUNTIME_LABEL" "$LOG_DIR/runtime-launchd.out.log" "$LOG_DIR/runtime-launchd.err.log"
@@ -592,6 +601,9 @@ write_server_plist() {
       "YEP_RUNTIME_PORT" "$RUNTIME_PORT"
       "YEP_RUNTIME_CONTROL_URL" "$RUNTIME_URL"
     )
+    if [[ -n "$DEPLOY_RUNTIME_TOKEN_FILE" ]]; then
+      env_args+=("YEP_RUNTIME_TOKEN_FILE" "$DEPLOY_RUNTIME_TOKEN_FILE")
+    fi
   fi
 
   if [[ -n "$FCM_SERVICE_ACCOUNT_FILE" ]]; then

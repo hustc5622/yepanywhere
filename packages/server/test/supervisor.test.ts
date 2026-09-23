@@ -62,7 +62,7 @@ describe("Supervisor", () => {
   });
 
   describe("startSession", () => {
-    it("removes a failed Codex resume so retry starts a fresh provider", async () => {
+    it("rejects a writer-locked Codex resume before reporting success and allows retry", async () => {
       const startSession = vi.fn(async () => {
         async function* iterator() {
           yield {
@@ -83,15 +83,10 @@ describe("Supervisor", () => {
         idleTimeoutMs: 60_000,
       });
       for (let attempt = 1; attempt <= 2; attempt++) {
-        const resumed = await local.resumeSession(
-          "writer-locked",
-          "/tmp/test",
-          { text: "retry" },
-        );
-        expect(resumed).toHaveProperty("id");
-        await vi.waitFor(() => {
-          expect(local.getProcessForSession("writer-locked")).toBeUndefined();
-        });
+        await expect(
+          local.resumeSession("writer-locked", "/tmp/test", { text: "retry" }),
+        ).rejects.toThrow("already has an active writer");
+        expect(local.getProcessForSession("writer-locked")).toBeUndefined();
         expect(startSession).toHaveBeenCalledTimes(attempt);
       }
     });
@@ -216,6 +211,53 @@ describe("Supervisor", () => {
   });
 
   describe("resumeSession", () => {
+    it("waits for Codex resume initialization before registering a known session", async () => {
+      let releaseInit!: () => void;
+      let stop!: () => void;
+      const initGate = new Promise<void>((resolve) => {
+        releaseInit = resolve;
+      });
+      const stopGate = new Promise<void>((resolve) => {
+        stop = resolve;
+      });
+      const local = new Supervisor({
+        provider: createCodexTestProvider(async () => ({
+          iterator: (async function* () {
+            await initGate;
+            yield {
+              type: "system",
+              subtype: "init",
+              session_id: "known-session",
+            };
+            await stopGate;
+          })(),
+          queue: new MessageQueue(),
+          abort: stop,
+        })),
+      });
+      let settled = false;
+      const pending = local
+        .resumeSession("known-session", "/tmp/test", { text: "hi" })
+        .then((process) => {
+          settled = true;
+          return process;
+        });
+      try {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+        expect(settled).toBe(false);
+        expect(local.getProcessForSession("known-session")).toBeUndefined();
+        releaseInit();
+        const process = await pending;
+        expect(process).toHaveProperty("sessionId", "known-session");
+        expect(local.getProcessForSession("known-session")).toBe(process);
+      } finally {
+        releaseInit();
+        stop();
+        await pending;
+        await local.shutdown();
+      }
+    });
+
     it("resumes an existing session", async () => {
       mockSdk.addScenario(createMockScenario("sess-123", "Resumed!"));
 
@@ -731,7 +773,9 @@ describe("Supervisor", () => {
         releaseInit: () => void;
         stop: () => void;
       }> = [];
-      const provider = createCodexTestProvider(async () => {
+      // Codex now waits for init even on resume. Use a provider that still
+      // supports late durable IDs to exercise the generic ownership guard.
+      const provider = createPiTestProvider(async () => {
         let releaseInit = () => undefined;
         let stop = () => undefined;
         const initGate = new Promise<void>((resolve) => {
