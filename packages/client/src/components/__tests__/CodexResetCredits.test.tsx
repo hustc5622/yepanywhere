@@ -122,7 +122,7 @@ describe("CodexResetCredits", () => {
     expect(screen.queryByText("Does not expire")).toBeNull();
     cleanup();
     show([{ ...credit, expiresAt: null }]);
-    expect(screen.getByText("Does not expire")).toBeTruthy();
+    expect(screen.getByText(/Does not expire/)).toBeTruthy();
   });
 
   it("orders by expiry, filters redeemed credits, and disables expired credits", () => {
@@ -134,10 +134,62 @@ describe("CodexResetCredits", () => {
       ],
       2,
     );
-    const buttons = screen.getAllByRole("button", { name: "Reset usage" });
-    expect((buttons[0] as HTMLButtonElement).disabled).toBe(true);
-    expect((buttons[1] as HTMLButtonElement).disabled).toBe(false);
+    const options = screen.getAllByRole("option") as HTMLOptionElement[];
+    expect(options.map((option) => option.value)).toEqual([
+      "expired",
+      "forever",
+    ]);
+    expect(options[0]?.disabled).toBe(true);
+    expect((screen.getByRole("combobox") as HTMLSelectElement).value).toBe(
+      "forever",
+    );
+    expect(
+      (screen.getByRole("button", { name: "Reset usage" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false);
     expect(screen.queryByText(/Used/)).toBeNull();
+  });
+
+  it("confirms and resets the selected credit without consuming it on selection", async () => {
+    const reset = vi
+      .spyOn(api, "resetCodexAccountUsage")
+      .mockResolvedValue({ outcome: "reset" });
+    show(
+      [
+        credit,
+        { ...credit, id: "later", expiresAt: null, title: "Later reset" },
+      ],
+      2,
+    );
+    const select = screen.getByRole("combobox", {
+      name: "Reset credit to use",
+    });
+    expect((select as HTMLSelectElement).value).toBe("credit-1");
+    expect(screen.getAllByRole("button", { name: "Reset usage" })).toHaveLength(
+      1,
+    );
+    fireEvent.change(select, { target: { value: "later" } });
+    expect(reset).not.toHaveBeenCalled();
+    fireEvent.click(screen.getByRole("button", { name: "Reset usage" }));
+    expect(
+      within(screen.getByRole("dialog")).getByText("Does not expire"),
+    ).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "Use 1 reset credit" }));
+    await screen.findByText("Usage limits reset.");
+    expect(reset).toHaveBeenCalledWith("acct-2", {
+      confirmed: true,
+      creditId: "later",
+      idempotencyKey: expect.any(String),
+    });
+  });
+
+  it("disables reset when every credit is expired", () => {
+    show([{ ...credit, expiresAt: 1 }]);
+    expect(
+      (screen.getByRole("button", { name: "Reset usage" }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(true);
+    expect(screen.queryByRole("combobox")).toBeNull();
   });
 
   it("has no reset action when there are no credits", () => {

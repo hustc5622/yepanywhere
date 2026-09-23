@@ -246,6 +246,7 @@
   "codexResetExpired": "已过期，请刷新用量",
   "codexResetPartialDetails": "仅获取到部分重置额度的详情，可刷新查看其余额度。",
   "codexResetAction": "重置额度",
+  "codexResetSelectCredit": "选择要使用的重置额度",
   "codexResetConfirmTitle": "确认使用重置额度？",
   "codexResetConfirmBody": "将为 {account} 消耗 1 次重置机会，重置符合条件的用量限额。使用后无法撤销。",
   "codexResetConfirmAction": "确认使用 1 次",

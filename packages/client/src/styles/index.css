@@ -9834,6 +9834,7 @@ button.context-usage-indicator--button:focus-visible {
 }
 
 .codex-usage-card {
+  container: codex-usage / inline-size;
   border: 1px solid var(--border-input);
   border-radius: var(--radius-md);
   background: var(--bg-secondary);
@@ -9893,19 +9894,41 @@ button.context-usage-indicator--button:focus-visible {
 }
 
 .codex-account-list {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
   gap: var(--space-2);
   margin-top: var(--space-2);
 }
 
+@container codex-usage (min-width: 48rem) {
+  .codex-account-list {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .codex-account-block:only-child {
+    grid-column: 1 / -1;
+  }
+}
+
 .codex-account-block {
+  min-width: 0;
+  overflow-wrap: anywhere;
   border: 1px solid var(--border-input);
   border-radius: var(--radius-sm);
   padding: var(--space-1) var(--space-2);
   display: flex;
   flex-direction: column;
   gap: var(--space-1);
+}
+
+.codex-account-block .codex-usage-windows {
+  grid-template-columns: minmax(0, 1fr);
+}
+
+.codex-account-block .codex-usage-window-heading strong {
+  flex-shrink: 0;
+  white-space: nowrap;
 }
 
 .codex-account-block .codex-usage-windows,
@@ -9922,6 +9945,10 @@ button.context-usage-indicator--button:focus-visible {
   flex-wrap: wrap;
 }
 
+.codex-account-identity {
+  min-width: 0;
+}
+
 .codex-account-identity strong {
   font-size: var(--font-size-sm);
   word-break: break-all;
@@ -9934,6 +9961,7 @@ button.context-usage-indicator--button:focus-visible {
 }
 
 .codex-account-login {
+  margin-top: auto;
   display: flex;
   align-items: center;
   gap: var(--space-2);
@@ -10011,14 +10039,42 @@ button.context-usage-indicator--button:focus-visible {
 .codex-reset-credit-row {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
+  min-height: 2rem;
   gap: var(--space-2);
   color: var(--text-muted);
   font-size: var(--font-size-xs);
 }
 
-.codex-reset-credit-row strong {
-  font-weight: normal;
+.codex-reset-credit-detail,
+.codex-reset-credit-select {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.codex-reset-credit-select {
+  height: 2rem;
+  padding: var(--space-1) var(--space-2);
+  border: 1px solid var(--border-input);
+  border-radius: var(--radius-sm);
+  background: var(--bg-secondary);
+  color: var(--text-secondary);
+  font: inherit;
+}
+
+.codex-reset-credit-select:focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: 2px;
+}
+
+.codex-reset-credit-row .codex-usage-refresh {
+  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.codex-reset-credit-detail {
   color: var(--text-secondary);
 }
 

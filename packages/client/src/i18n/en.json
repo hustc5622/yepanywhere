@@ -246,6 +246,7 @@
   "codexResetExpired": "Expired — refresh usage",
   "codexResetPartialDetails": "Only some reset details are available. Refresh to check the rest.",
   "codexResetAction": "Reset usage",
+  "codexResetSelectCredit": "Reset credit to use",
   "codexResetConfirmTitle": "Use a usage reset?",
   "codexResetConfirmBody": "Use 1 reset credit for {account} to reset eligible usage limits. This consumes the credit and cannot be undone.",
   "codexResetConfirmAction": "Use 1 reset credit",

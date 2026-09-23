@@ -20,6 +20,7 @@ export function CodexResetCredits({
   onRefresh: () => Promise<void>;
 }) {
   const { t, locale } = useI18n();
+  const [creditId, setCreditId] = useState<string | null>(null);
   const [selection, setSelection] = useState<{
     credit: CodexUsageResetCredit | null;
   } | null>(null);
@@ -61,6 +62,19 @@ export function CodexResetCredits({
   const expired = (credit: CodexUsageResetCredit | null) =>
     typeof credit?.expiresAt === "number" &&
     credit.expiresAt * 1000 <= Date.now();
+  const selectedCredit =
+    credits.find((credit) => credit.id === creditId) ??
+    credits.find((credit) => !expired(credit)) ??
+    credits[0] ??
+    null;
+  const creditLabel = (credit: CodexUsageResetCredit | null) =>
+    [
+      credit?.title,
+      expiryLabel(credit),
+      expired(credit) ? t("codexResetExpired") : null,
+    ]
+      .filter(Boolean)
+      .join(" · ");
 
   const confirm = async () => {
     if (!selection || busy || inFlight.current || expired(selection.credit))
@@ -116,27 +130,47 @@ export function CodexResetCredits({
               count: summary.availableCount,
             })}
           </p>
-          {(credits.length > 0 ? credits : [null]).map((credit) => (
-            <div className="codex-reset-credit-row" key={credit?.id ?? "auto"}>
-              <span>
-                {credit?.title && <strong>{credit.title} · </strong>}
-                {expiryLabel(credit)}
-                {expired(credit) && ` · ${t("codexResetExpired")}`}
-              </span>
-              <button
-                type="button"
-                className="codex-usage-refresh"
-                disabled={busy || sending || expired(credit)}
-                onClick={() => {
-                  setSelection({ credit });
-                  setMessage(null);
-                  setError(null);
-                }}
+          <div className="codex-reset-credit-row">
+            {credits.length > 1 ? (
+              <select
+                className="codex-reset-credit-select"
+                aria-label={t("codexResetSelectCredit")}
+                title={creditLabel(selectedCredit)}
+                value={selectedCredit?.id ?? ""}
+                disabled={busy || sending}
+                onChange={(event) => setCreditId(event.target.value)}
               >
-                {t("codexResetAction")}
-              </button>
-            </div>
-          ))}
+                {credits.map((credit) => (
+                  <option
+                    key={credit.id}
+                    value={credit.id}
+                    disabled={expired(credit)}
+                  >
+                    {creditLabel(credit)}
+                  </option>
+                ))}
+              </select>
+            ) : (
+              <span
+                className="codex-reset-credit-detail"
+                title={creditLabel(selectedCredit)}
+              >
+                {creditLabel(selectedCredit)}
+              </span>
+            )}
+            <button
+              type="button"
+              className="codex-usage-refresh"
+              disabled={busy || sending || expired(selectedCredit)}
+              onClick={() => {
+                setSelection({ credit: selectedCredit });
+                setMessage(null);
+                setError(null);
+              }}
+            >
+              {t("codexResetAction")}
+            </button>
+          </div>
           {credits.length > 0 && credits.length < summary.availableCount && (
             <p className="codex-usage-state">{t("codexResetPartialDetails")}</p>
           )}
