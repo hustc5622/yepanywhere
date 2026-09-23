@@ -6,7 +6,6 @@
  * formatting for pending/incomplete text during streaming.
  */
 
-import { parseLineColumn } from "@yep-anywhere/shared";
 import {
   type BundledLanguage,
   type Highlighter,
@@ -20,14 +19,9 @@ import type {
   StreamingList,
 } from "./block-detector.js";
 import {
-  MEDIA_EXTENSIONS,
   type SafeMarkdownOptions,
-  VIDEO_EXTENSIONS,
-  isLocalFilePath,
-  localMediaApiUrl,
-  localTextFileApiUrl,
+  renderSafeInlineMarkdown,
   renderSafeMarkdown,
-  sanitizeUrl,
 } from "./safe-markdown.js";
 
 /** CSS variables theme - outputs `style="color: var(--shiki-...)"` */
@@ -101,7 +95,7 @@ export async function createAugmentGenerator(
     },
 
     renderPending(pending: string): string {
-      return renderInlineFormatting(pending);
+      return renderSafeInlineMarkdown(pending);
     },
 
     async renderStreamingCodeBlock(
@@ -230,58 +224,6 @@ function renderMarkdownBlock(
   options?: SafeMarkdownOptions,
 ): string {
   return renderSafeMarkdown(block.content, options);
-}
-
-/**
- * Render lightweight inline formatting for pending/streaming text.
- * Handles: **bold**, *italic*, `code`, [text](url)
- */
-function renderInlineFormatting(text: string): string {
-  // Escape HTML first
-  let result = escapeHtml(text);
-
-  // Bold: **text**
-  result = result.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
-
-  // Italic: *text* (but not if it's actually bold marker)
-  // Use negative lookbehind/lookahead to avoid matching inside bold
-  result = result.replace(/(?<!\*)\*([^*]+)\*(?!\*)/g, "<em>$1</em>");
-
-  // Inline code: `text`
-  result = result.replace(/`([^`]+)`/g, "<code>$1</code>");
-
-  // Links: [text](url) — handle local file paths and regular URLs
-  result = result.replace(/\[([^\]]+)\]\(([^)]+)\)/g, (_match, label, href) => {
-    if (isLocalFilePath(href)) {
-      const ext = (href.split(".").pop() ?? "").toLowerCase();
-      if (MEDIA_EXTENSIONS.has(ext)) {
-        const apiUrl = escapeHtml(localMediaApiUrl(href));
-        const mediaType = VIDEO_EXTENSIONS.has(ext) ? "video" : "image";
-        const typeLabel = VIDEO_EXTENSIONS.has(ext) ? "video" : "image";
-        return `<a href="${apiUrl}" class="local-media-link" data-media-type="${mediaType}">${label}<span class="local-media-type">(${typeLabel})</span></a>`;
-      }
-      const parsed = parseLineColumn(href);
-      const apiUrl = escapeHtml(
-        localTextFileApiUrl(parsed.path, parsed.line, parsed.column),
-      );
-      const dataAttrs = [
-        `data-file-path="${escapeHtml(parsed.path)}"`,
-        parsed.line !== undefined ? `data-line="${parsed.line}"` : "",
-        parsed.column !== undefined ? `data-column="${parsed.column}"` : "",
-      ]
-        .filter(Boolean)
-        .join(" ");
-      return `<a href="${apiUrl}" class="local-file-link" ${dataAttrs}>${label}</a>`;
-    }
-    const safeHref = sanitizeUrl(href);
-    if (!safeHref) {
-      return `[${label}](${href})`;
-    }
-
-    return `<a href="${escapeHtml(safeHref)}">${label}</a>`;
-  });
-
-  return result;
 }
 
 /**

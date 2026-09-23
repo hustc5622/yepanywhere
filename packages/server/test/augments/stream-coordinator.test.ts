@@ -140,7 +140,7 @@ describe("StreamCoordinator", () => {
       );
 
       expect(result.pendingHtml).toBe(
-        'Check <a href="https://example.com">docs</a>',
+        'Check <a href="https://example.com">[docs](https://example.com)</a>',
       );
     });
 

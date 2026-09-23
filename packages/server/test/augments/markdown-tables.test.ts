@@ -51,7 +51,9 @@ describe.each([
     expect(html.match(/<tr>/g)).toHaveLength(6);
     expect(html).toContain("<td>前者保存中间步骤，后者向用户交付答案</td>");
     expect(html).toContain("<strong>KV Cache</strong>");
-    expect(html).toContain('<a href="https://example.com/cache">缓存说明</a>');
+    expect(html).toContain(
+      '<a href="https://example.com/cache">[缓存说明](https://example.com/cache)</a>',
+    );
     expect(html).toContain("<strong>token ID 相同</strong>");
   });
 

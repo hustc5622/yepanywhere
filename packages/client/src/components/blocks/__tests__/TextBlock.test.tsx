@@ -79,6 +79,108 @@ describe("TextBlock", () => {
     expect(await screen.findByText("corrected transcript")).toBeTruthy();
   });
 
+  it.each([
+    "docs/reports/acceptance.md",
+    "./docs/reports/acceptance.md",
+    "docs/../docs/reports/acceptance.md",
+    "../project/docs/reports/acceptance.md",
+  ])(
+    "opens the relative file link %s against the session project",
+    async (path) => {
+      vi.mocked(api.getFile).mockResolvedValue({
+        metadata: {
+          path: "docs/reports/acceptance.md",
+          size: 20,
+          mimeType: "text/markdown",
+          isText: true,
+        },
+        content: "验收报告原文",
+        rawUrl:
+          "/api/projects/proj-1/files/raw?path=docs/reports/acceptance.md",
+      });
+      renderWithSessionMetadata(
+        <TextBlock
+          text={`[完整验收记录](${path})`}
+          augmentHtml={`<p><a href="/api/local-file?path=${encodeURIComponent(path)}" class="local-file-link" data-file-path="${path}">[完整验收记录](${path})</a></p>`}
+        />,
+      );
+
+      const link = screen.getByRole("link", {
+        name: `[完整验收记录](${path})`,
+      });
+      expect(link.textContent).toBe(`[完整验收记录](${path})`);
+      fireEvent.click(link);
+
+      await waitFor(() => {
+        expect(api.getFile).toHaveBeenCalledWith(
+          "proj-1",
+          "docs/reports/acceptance.md",
+          true,
+        );
+      });
+      expect(await screen.findByText("验收报告原文")).toBeTruthy();
+    },
+  );
+
+  it("opens modified clicks on relative links in the project file route", () => {
+    const open = vi.spyOn(window, "open").mockImplementation(() => null);
+    try {
+      renderWithSessionMetadata(
+        <TextBlock
+          text="[报告](docs/report.md)"
+          augmentHtml='<a href="/api/local-file?path=docs%2Freport.md" class="local-file-link" data-file-path="docs/report.md">报告</a>'
+        />,
+      );
+      fireEvent.click(screen.getByRole("link", { name: "报告" }), {
+        ctrlKey: true,
+      });
+      expect(open).toHaveBeenCalledWith(
+        "/projects/proj-1/file?path=docs%2Freport.md",
+        "_blank",
+      );
+      expect(api.getFile).not.toHaveBeenCalled();
+    } finally {
+      open.mockRestore();
+    }
+  });
+
+  it("resolves parent-directory links before opening an external local file", async () => {
+    vi.stubGlobal(
+      "fetch",
+      vi.fn().mockResolvedValue(
+        new Response(
+          JSON.stringify({
+            metadata: {
+              path: "/Users/yueyuan/shared/report.md",
+              size: 10,
+              mimeType: "text/markdown",
+              isText: true,
+            },
+            content: "shared report",
+            rawUrl:
+              "/api/local-file?path=%2FUsers%2Fyueyuan%2Fshared%2Freport.md",
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } },
+        ),
+      ),
+    );
+    renderWithSessionMetadata(
+      <TextBlock
+        text="[共享报告](../shared/report.md:12:3)"
+        augmentHtml='<a href="/api/local-file?path=..%2Fshared%2Freport.md&amp;line=12&amp;column=3" class="local-file-link" data-file-path="../shared/report.md" data-line="12" data-column="3">共享报告</a>'
+      />,
+    );
+    fireEvent.click(screen.getByRole("link", { name: "共享报告" }));
+    await waitFor(() => {
+      expect(fetch).toHaveBeenCalledWith(
+        "/api/local-file?path=%2FUsers%2Fyueyuan%2Fshared%2Freport.md&line=12&column=3",
+        { credentials: "include" },
+      );
+    });
+    expect(api.getFile).not.toHaveBeenCalled();
+    expect(await screen.findByText("shared report")).toBeTruthy();
+  });
+
   it("opens project-external local markdown links in the local file modal", async () => {
     vi.stubGlobal(
       "fetch",

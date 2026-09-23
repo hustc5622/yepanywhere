@@ -294,7 +294,7 @@ describe("AugmentGenerator", () => {
       expect(augment.html).toContain("<strong>ok</strong>");
     });
 
-    it("removes markdown links with unsafe protocols", async () => {
+    it("preserves unsafe markdown links as inert source text", async () => {
       const block: CompletedBlock = {
         type: "paragraph",
         content: "Do not click [this](javascript:alert(1))",
@@ -305,8 +305,7 @@ describe("AugmentGenerator", () => {
       const augment = await generator.processBlock(block, 0);
 
       expect(augment.html).not.toContain("href=");
-      expect(augment.html).toContain("this");
-      expect(augment.html).not.toContain("javascript:");
+      expect(augment.html).toContain(block.content);
     });
 
     it("linkifies bare local image paths", async () => {
@@ -350,6 +349,42 @@ describe("AugmentGenerator", () => {
   });
 
   describe("renderPending", () => {
+    it("keeps file links identical during streaming and after completion", async () => {
+      const content =
+        '[完整验收记录](docs/reports/2026-09-22_v1.0.142_launch_online_acceptance.md "验收报告")';
+      const completed = await generator.processBlock(
+        {
+          type: "paragraph",
+          content,
+          startOffset: 0,
+          endOffset: content.length,
+        },
+        0,
+      );
+      expect(completed.html).toBe(`<p>${generator.renderPending(content)}</p>`);
+      expect(completed.html).toContain('data-file-path="docs/reports/');
+    });
+
+    it("does not format underscores or parentheses inside a link destination", () => {
+      const result = generator.renderPending(
+        '[report](https://example.com/a_b_c/report(1)?x=1&y=2 "report title")',
+      );
+      expect(result).toBe(
+        '<a href="https://example.com/a_b_c/report(1)?x=1&amp;y=2" title="report title">[report](https://example.com/a_b_c/report(1)?x=1&amp;y=2 "report title")</a>',
+      );
+    });
+
+    it("leaves link syntax inside inline code as literal text", () => {
+      expect(generator.renderPending("`[report](docs/report.md)`")).toBe(
+        "<code>[report](docs/report.md)</code>",
+      );
+    });
+
+    it("preserves whitespace and incomplete link destinations", () => {
+      const text = "  [验收记录](docs/report_name_with_underscores\n";
+      expect(generator.renderPending(text)).toBe(text);
+    });
+
     it("renders bold formatting", () => {
       const result = generator.renderPending("This is **bold** text");
 
@@ -373,7 +408,9 @@ describe("AugmentGenerator", () => {
         "Check [the docs](https://example.com)",
       );
 
-      expect(result).toBe('Check <a href="https://example.com">the docs</a>');
+      expect(result).toBe(
+        'Check <a href="https://example.com">[the docs](https://example.com)</a>',
+      );
     });
 
     it("renders mailto links", () => {
@@ -382,7 +419,7 @@ describe("AugmentGenerator", () => {
       );
 
       expect(result).toBe(
-        'Contact <a href="mailto:support@example.com">support</a>',
+        'Contact <a href="mailto:support@example.com">[support](mailto:support@example.com)</a>',
       );
     });
 

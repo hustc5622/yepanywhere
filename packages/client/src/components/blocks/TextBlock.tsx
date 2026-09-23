@@ -47,10 +47,35 @@ function getProjectRelativePath(
   filePath: string,
   projectPath: string | null | undefined,
 ): string | null {
+  if (!filePath.startsWith("/")) {
+    return filePath.startsWith("../") || filePath === ".." ? null : filePath;
+  }
   const root = projectPath?.replace(/\/+$/, "");
   if (!root) return null;
   if (!filePath.startsWith(`${root}/`)) return null;
   return filePath.slice(root.length + 1);
+}
+
+function resolveLocalFilePath(
+  filePath: string,
+  projectPath: string | null | undefined,
+): string {
+  const path =
+    !filePath.startsWith("/") && projectPath
+      ? `${projectPath}/${filePath}`
+      : filePath;
+  const absolute = path.startsWith("/");
+  const parts: string[] = [];
+  for (const part of path.split("/")) {
+    if (!part || part === ".") continue;
+    if (part === "..") {
+      if (parts.length > 0 && parts[parts.length - 1] !== "..") parts.pop();
+      else if (!absolute) parts.push(part);
+    } else {
+      parts.push(part);
+    }
+  }
+  return `${absolute ? "/" : ""}${parts.join("/")}`;
 }
 
 function isModifiedClick(e: React.MouseEvent): boolean {
@@ -227,6 +252,10 @@ export const TextBlock = memo(function TextBlock({
 
       const localFileTarget = getLocalFileTarget(target);
       if (!localFileTarget) return;
+      localFileTarget.path = resolveLocalFilePath(
+        localFileTarget.path,
+        sessionMetadata?.projectPath,
+      );
 
       const relativePath = getProjectRelativePath(
         localFileTarget.path,

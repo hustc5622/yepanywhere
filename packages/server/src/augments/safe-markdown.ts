@@ -1,4 +1,8 @@
-import { parseLineColumn, splitTextWithFilePaths } from "@yep-anywhere/shared";
+import {
+  isLikelyFilePath,
+  parseLineColumn,
+  splitTextWithFilePaths,
+} from "@yep-anywhere/shared";
 import {
   Marked,
   Renderer,
@@ -42,6 +46,26 @@ function isLocalFilePath(href: string): boolean {
   // Must have a file extension after the last /
   const basename = trimmed.split("/").pop() ?? "";
   return basename.includes(".");
+}
+
+/** Relative file links are resolved against the session project by the client. */
+function getRelativeFilePath(href: string): string | null {
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(href.trim());
+  } catch {
+    return null;
+  }
+  const { path } = parseLineColumn(decoded);
+  if (
+    !path ||
+    /^[a-z][a-z\d+.-]*:/i.test(path) ||
+    /^[\/~]/.test(path) ||
+    /[?#\\\p{C}]/u.test(path)
+  ) {
+    return null;
+  }
+  return isLikelyFilePath(path) ? decoded : null;
 }
 
 /**
@@ -113,7 +137,7 @@ function renderLocalTextFileLink(
   ]
     .filter(Boolean)
     .join(" ");
-  const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+  const titleAttr = ` title="${escapeHtml(title || rawPath)}"`;
   return `<a href="${apiUrl}" class="local-file-link" ${dataAttrs}${titleAttr}>${renderedText}</a>`;
 }
 
@@ -245,26 +269,30 @@ function createRenderer(
       }
       return renderTextWithLocalMediaLinks(token.text);
     },
-    link(
-      this: RendererThis<string, string>,
-      { href, title, tokens }: Tokens.Link,
-    ) {
+    link(token: Tokens.Link) {
+      const { href, title } = token;
+      // Add navigation to the original source instead of replacing it with
+      // the label: destinations, titles and inline syntax stay visible.
+      const source = getLinkSource(token);
+      const renderedText = escapeHtml(source);
       // Check for local file paths first — rewrite to clickable media placeholder
       if (isLocalFilePath(href)) {
         const ext = getExtension(href);
-        const renderedText = this.parser.parseInline(tokens);
-
         if (MEDIA_EXTENSIONS.has(ext)) {
-          return renderLocalMediaLink(href, renderedText, ext);
+          return renderLocalMediaLink(href, source, ext);
         }
         return renderLocalTextFileLink(href, renderedText, title);
       }
 
-      const safeHref = sanitizeUrl(href);
-      const renderedText = this.parser.parseInline(tokens);
+      const relativePath = getRelativeFilePath(href);
+      if (relativePath) {
+        return renderLocalTextFileLink(relativePath, renderedText, title);
+      }
 
+      const safeHref = sanitizeUrl(href);
       if (!safeHref) {
-        // Keep readable text when URL protocol is unsafe.
+        // An unsupported destination must not erase the original path/URL.
+        // Escape the entire token so unsafe protocols remain inert text.
         return renderedText;
       }
 
@@ -272,16 +300,16 @@ function createRenderer(
       const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
       return `<a href="${escapedHref}"${titleAttr}>${renderedText}</a>`;
     },
-    image({ href, title, text }: Tokens.Image) {
+    image(token: Tokens.Image) {
+      const { href, title, text } = token;
       // Check for local file paths first — rewrite to clickable media placeholder
       if (isLocalFilePath(href)) {
         const ext = getExtension(href);
 
         if (MEDIA_EXTENSIONS.has(ext)) {
-          return renderLocalMediaLink(href, text, ext);
+          return renderLocalMediaLink(href, getLinkSource(token), ext);
         }
-        // Unrecognized extension — just show text
-        return escapeHtml(text || getFileName(href));
+        return escapeHtml(getLinkSource(token));
       }
 
       const safeSrc =
@@ -290,7 +318,15 @@ function createRenderer(
           ? sanitizeResolvedImageUrl(options.resolveImageUrl(href) ?? "")
           : null);
       if (!safeSrc) {
-        return escapeHtml(text);
+        const relativePath = getRelativeFilePath(href);
+        if (relativePath) {
+          return renderLocalTextFileLink(
+            relativePath,
+            escapeHtml(getLinkSource(token)),
+            title,
+          );
+        }
+        return escapeHtml(getLinkSource(token));
       }
 
       const escapedSrc = escapeHtml(safeSrc);
@@ -395,10 +431,10 @@ function renderSafeMarkdownWithoutDetails(
   return sanitizeHtml(html, MARKDOWN_SANITIZE_OPTIONS).trim();
 }
 
-function renderSafeInlineMarkdown(markdown: string): string {
+export function renderSafeInlineMarkdown(markdown: string): string {
   const rendered = markdownRenderer.parseInline(markdown, { async: false });
   const html = typeof rendered === "string" ? rendered : "";
-  return sanitizeHtml(html, MARKDOWN_SANITIZE_OPTIONS).trim();
+  return sanitizeHtml(html, MARKDOWN_SANITIZE_OPTIONS);
 }
 
 function extractDetailsBlocks(
@@ -543,6 +579,15 @@ function isClosingFenceLine(
 
 function escapeRegExp(text: string): string {
   return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
+
+function getLinkSource(token: Tokens.Link | Tokens.Image): string {
+  // Reference-style links keep their destination in a separate definition,
+  // which Markdown otherwise omits from the rendered output.
+  const referenceDestination = token.raw.endsWith("]")
+    ? ` (${token.href}${token.title ? ` "${token.title}"` : ""})`
+    : "";
+  return token.raw + referenceDestination;
 }
 
 function escapeHtml(text: string): string {
