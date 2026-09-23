@@ -217,6 +217,59 @@ describe("PiProvider multi-gateway channels", () => {
     expect(visible.map((model) => model.id)).toEqual(["claude-opus-4-8"]);
   });
 
+  it("serves a stale catalog without blocking while revalidating it", async () => {
+    stubTwoChannels();
+    let extraModels = [
+      { id: "claude-opus-5", supported_endpoint_types: ["anthropic"] },
+    ];
+    const fetchImpl = vi.fn(async (input: unknown) =>
+      String(input).startsWith("https://default.example")
+        ? catalogResponse([])
+        : catalogResponse(extraModels),
+    );
+    vi.stubGlobal("fetch", fetchImpl);
+
+    const provider = new PiProvider({ timeout: 5_000 });
+    // First call has no cache at all, so it must fetch even without waiting.
+    await expect(
+      provider.getAvailableModels({ waitForRefresh: false }),
+    ).resolves.toEqual([expect.objectContaining({ id: "aitl/claude-opus-5" })]);
+
+    // The gateway gains a model and the 60s catalog TTL lapses.
+    extraModels = [
+      ...extraModels,
+      { id: "claude-opus-5-5", supported_endpoint_types: ["anthropic"] },
+    ];
+    const realNow = Date.now();
+    const nowSpy = vi
+      .spyOn(Date, "now")
+      .mockImplementation(() => realNow + 120_000);
+
+    try {
+      const fetchesBefore = fetchImpl.mock.calls.length;
+      // Stale read still returns immediately with the previous catalog...
+      await expect(
+        provider.getAvailableModels({ waitForRefresh: false }),
+      ).resolves.toEqual([
+        expect.objectContaining({ id: "aitl/claude-opus-5" }),
+      ]);
+      expect(fetchImpl.mock.calls.length).toBeGreaterThan(fetchesBefore);
+
+      // ...and the background revalidation makes the new model visible.
+      await vi.waitFor(async () => {
+        const models = await provider.getAvailableModels({
+          waitForRefresh: false,
+        });
+        expect(models.map((model) => model.id)).toEqual([
+          "aitl/claude-opus-5",
+          "aitl/claude-opus-5-5",
+        ]);
+      });
+    } finally {
+      nowSpy.mockRestore();
+    }
+  });
+
   it("returns nothing when no gateway channel is configured", async () => {
     vi.stubEnv("YEP_LLM_GATEWAY_API_KEY", "");
     vi.stubEnv("LLM_API_KEY", "");

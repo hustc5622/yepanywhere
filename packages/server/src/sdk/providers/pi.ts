@@ -721,6 +721,8 @@ export class PiProvider implements AgentProvider {
   private readonly extensionPath: string;
   private readonly timeout: number;
   private modelCache?: { catalog: PiModelCatalog; at: number };
+  /** In-flight background refresh, shared so concurrent callers fetch once. */
+  private modelRefresh?: Promise<PiModelCatalog>;
   /** Last successful catalog per channel, used when one gateway is failing. */
   private readonly channelModelCache = new Map<string, ModelInfo[]>();
 
@@ -777,16 +779,53 @@ export class PiProvider implements AgentProvider {
     });
   }
 
-  /** The full catalog, including models a picker does not offer. */
+  /**
+   * The full catalog, including models a picker does not offer.
+   *
+   * A caller that passes `waitForRefresh: false` never blocks on the gateways,
+   * but a stale cache is still revalidated in the background. Without that the
+   * listing endpoints — which all pass `false` — would pin the very first
+   * catalog a process ever fetched, so a model the gateway added later stayed
+   * invisible until a restart or an explicit `?fresh=1` request.
+   */
   private async loadRoutableCatalog(options?: {
     waitForRefresh?: boolean;
   }): Promise<PiModelCatalog> {
     const cached = this.modelCache;
     const cacheFresh =
       cached !== undefined && Date.now() - cached.at < PI_MODEL_CATALOG_TTL_MS;
-    if (cached && (cacheFresh || options?.waitForRefresh === false)) {
+    if (cached && cacheFresh) return clonePiModelCatalog(cached.catalog);
+    if (cached && options?.waitForRefresh === false) {
+      void this.refreshRoutableCatalog().catch(() => undefined);
       return clonePiModelCatalog(cached.catalog);
     }
+    return clonePiModelCatalog(await this.refreshRoutableCatalog());
+  }
+
+  /** Fetch every channel once, deduplicating concurrent refreshes. */
+  private refreshRoutableCatalog(): Promise<PiModelCatalog> {
+    const pending = this.modelRefresh;
+    if (pending) return pending;
+    const refresh = this.fetchRoutableCatalog()
+      .catch((error: unknown) => {
+        getLogger().warn(
+          { error: error instanceof Error ? error.message : String(error) },
+          "Unable to refresh the Pi model catalog",
+        );
+        const cached = this.modelCache;
+        return cached
+          ? clonePiModelCatalog(cached.catalog)
+          : { models: [], routes: new Map<string, PiCatalogRoute>() };
+      })
+      .finally(() => {
+        if (this.modelRefresh === refresh) this.modelRefresh = undefined;
+      });
+    this.modelRefresh = refresh;
+    return refresh;
+  }
+
+  private async fetchRoutableCatalog(): Promise<PiModelCatalog> {
+    const cached = this.modelCache;
     const channels = resolveLlmGatewayChannels(process.env);
     if (channels.length === 0) return { models: [], routes: new Map() };
 
