@@ -5734,6 +5734,39 @@ pre.code-highlighter-plain code {
 .codex-native-subagent-title {
   font-size: var(--font-size-sm);
   color: var(--text-primary);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.codex-native-subagent-activity {
+  display: flex;
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: 0.25rem 0.75rem;
+  background: transparent;
+  border: 0;
+}
+
+.codex-native-subagent-activity .codex-native-subagent-title {
+  flex: 1 1 16rem;
+}
+
+.codex-native-subagent-link {
+  color: var(--link-color);
+  font-size: var(--font-size-sm);
+  padding-block: 0.25rem;
+  text-decoration: underline;
+  text-underline-offset: 0.2em;
+}
+
+.codex-native-subagent-link:hover {
+  color: var(--text-primary);
+}
+
+.codex-native-subagent-link:focus-visible {
+  outline: 2px solid var(--link-color);
+  outline-offset: 2px;
+  border-radius: 2px;
 }
 
 .codex-native-subagent-nickname {

@@ -214,6 +214,15 @@ export const SessionDisplayNoticeSegmentSchema = z
     title: z.string().max(512).optional(),
     message: z.string().max(SESSION_DISPLAY_MAX_NOTICE_LENGTH).optional(),
     status: z.string().max(64).optional(),
+    /** Identity only: task bodies and results stay in the child conversation. */
+    subagent: z
+      .object({
+        kind: z.string().max(64),
+        agentThreadId: z.string().min(1).max(512).optional(),
+        agentPath: z.string().min(1).max(512).optional(),
+      })
+      .strict()
+      .optional(),
     count: z.number().int().positive().optional(),
     timestamp: TimestampSchema.optional(),
   })

@@ -138,6 +138,8 @@ export interface DisplayToolGroupItem extends RenderItemBase {
 export interface CodexNativeItem extends RenderItemBase {
   type: "codex_native_item";
   id: string;
+  /** Project context for links to child conversations in the display page. */
+  projectId?: string;
   /** The projected ThreadItem payload (type + item-specific fields). */
   threadItem: {
     type: string;

@@ -109,6 +109,46 @@ describe("buildSessionDisplayRenderItems", () => {
     ]);
   });
 
+  it("renders subagent notices with identity and navigation rather than a bare status", () => {
+    const items = buildSessionDisplayRenderItems(
+      {
+        sessionId: "parent-thread",
+        revision: "revision-1",
+        turns: [
+          {
+            id: "turn-1",
+            question: null,
+            segments: [
+              {
+                type: "notice",
+                id: "activity-1",
+                kind: "subagent",
+                status: "completed",
+                subagent: {
+                  kind: "started",
+                  agentPath: "/root/reviewer",
+                  agentThreadId: "child-thread",
+                },
+              },
+            ],
+          },
+        ],
+      },
+      { projectId: "project-1", formatNotice: () => "bare status" },
+    );
+    expect(items[0]).toMatchObject({
+      type: "codex_native_item",
+      projectId: "project-1",
+      lifecycle: "completed",
+      threadItem: {
+        type: "subAgentActivity",
+        kind: "started",
+        agentPath: "/root/reviewer",
+        agentThreadId: "child-thread",
+      },
+    });
+  });
+
   it("maps reasoning segments to collapsed thinking rows with a detail handle", () => {
     const page: SessionDisplayPage = {
       sessionId: "session-2",

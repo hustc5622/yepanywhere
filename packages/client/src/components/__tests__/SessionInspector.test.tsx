@@ -563,6 +563,34 @@ describe("SessionInspector", () => {
     ).toHaveLength(1);
   });
 
+  it.each([
+    { kinds: ["started", "completed"], status: "completed" },
+    { kinds: ["started", "completed", "interacted"], status: "completed" },
+    { kinds: ["started", "interrupted", "interacted"], status: "interrupted" },
+    { kinds: ["interacted"], status: "status unknown" },
+    { kinds: ["started", "completed", "started"], status: "running" },
+  ])("preserves subagent lifecycle for $kinds", ({ kinds, status }) => {
+    renderInspector(
+      "codex",
+      kinds.map((kind, index) => ({
+        uuid: `activity-${index}`,
+        type: "system",
+        subtype: "codex_native_item",
+        codexThreadItemLifecycle: "completed",
+        codexThreadItem: {
+          type: "subAgentActivity",
+          id: `activity-${index}`,
+          kind,
+          agentThreadId: "child-thread",
+          ...(kind !== "interacted" ? { agentPath: "/root/worker" } : {}),
+        },
+      })),
+    );
+    const link = screen.getByRole("link", { name: /worker|child-thread/ });
+    expect(link.textContent).toContain(status);
+    if (kinds.length > 1) expect(link.textContent).toContain("/root/worker");
+  });
+
   it("lists Codex collab states that only contain status and message", () => {
     renderInspector("codex", [
       {

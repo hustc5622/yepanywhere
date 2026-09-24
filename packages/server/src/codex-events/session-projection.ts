@@ -1266,6 +1266,7 @@ function projectSafeThreadItem(
       break;
     case "subAgentActivity":
       copyString(snapshot, base, "kind");
+      copyString(snapshot, base, "agentPath");
       base.agentThreadId = safeOptionalIdentity(
         readString(snapshot, "agentThreadId"),
         "thread",

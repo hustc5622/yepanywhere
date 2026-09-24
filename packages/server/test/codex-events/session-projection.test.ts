@@ -17,10 +17,54 @@ import {
   codexFilePathFingerprint,
   publicCodexFileChangePath,
 } from "../../src/codex/path-projection.js";
+import { buildSessionDisplayProjection } from "../../src/sessions/display-projection.js";
 import type { Message } from "../../src/supervisor/types.js";
 import { testEvent } from "./helpers.js";
 
 describe("canonical Codex persisted session projection", () => {
+  it("keeps subagent identity through canonical history and the lightweight display page", () => {
+    const events = [
+      testEvent(1, "item/completed", {
+        threadId: "thread-1",
+        turnId: "turn-1",
+        item: {
+          id: "activity-1",
+          type: "subAgentActivity",
+          kind: "completed",
+          agentThreadId: "child-thread",
+          agentPath: "/root/reviewer",
+        },
+      }),
+    ];
+    const result = overlayCanonicalCodexSessionMessages(
+      "session-1",
+      [],
+      events,
+    );
+    expect(result.messages[0]?.codexThreadItem).toMatchObject({
+      agentThreadId: "child-thread",
+      agentPath: "/root/reviewer",
+      kind: "completed",
+    });
+    const display = buildSessionDisplayProjection({
+      sessionId: "session-1",
+      revision: "revision-1",
+      messages: result.messages,
+      questionCoverage: "complete",
+    });
+    expect(display.page.turns.flatMap((turn) => turn.segments)).toContainEqual(
+      expect.objectContaining({
+        type: "notice",
+        kind: "subagent",
+        subagent: {
+          kind: "completed",
+          agentThreadId: "child-thread",
+          agentPath: "/root/reviewer",
+        },
+      }),
+    );
+  });
+
   it.each([false, true])(
     "recovers original paths from the matching rollout without positional guesses (legacy label: %s)",
     (hasLabel) => {

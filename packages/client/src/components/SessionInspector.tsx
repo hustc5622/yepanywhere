@@ -126,7 +126,7 @@ interface SubagentItem {
   sessionId: string;
   description: string;
   agent?: string;
-  status: ToolCallItem["status"];
+  status: ToolCallItem["status"] | "unknown";
 }
 
 interface CodexChannelSummary {
@@ -1466,18 +1466,27 @@ function buildSubagentItems(items: RenderItem[]): SubagentItem[] {
       const kind =
         typeof threadItem.kind === "string" ? threadItem.kind : undefined;
       const description = agentPath ?? sessionId;
-      const status: ToolCallItem["status"] =
-        kind?.toLowerCase() === "interrupted" ? "aborted" : "pending";
       const existingIndex = resultIndexBySessionId.get(sessionId);
+      const existing =
+        existingIndex === undefined ? undefined : result[existingIndex];
+      // A message can be queued for an idle agent. Like Codex TUI, do not
+      // interpret "interacted" as evidence of a new running turn.
+      const status: SubagentItem["status"] =
+        kind?.toLowerCase() === "started"
+          ? "pending"
+          : kind?.toLowerCase() === "completed"
+            ? "complete"
+            : kind?.toLowerCase() === "interrupted"
+              ? "aborted"
+              : (existing?.status ?? "unknown");
       if (existingIndex === undefined) {
         resultIndexBySessionId.set(sessionId, result.length);
         result.push({ sessionId, description, status });
       } else {
-        const existing = result[existingIndex];
         if (existing) {
           result[existingIndex] = {
             ...existing,
-            description,
+            description: agentPath ?? existing.description,
             status,
           };
         }
@@ -1550,7 +1559,7 @@ function collabAgentStatusToItemStatus(status: string): ToolCallItem["status"] {
 
 function getSubagentStatusLabel(
   t: TFunction,
-  status: ToolCallItem["status"],
+  status: SubagentItem["status"],
 ): string {
   switch (status) {
     case "pending":
@@ -1559,15 +1568,19 @@ function getSubagentStatusLabel(
       return t("subagentStatusFailed");
     case "aborted":
       return t("subagentStatusInterrupted");
+    case "unknown":
+      return t("subagentStatusUnknown");
     default:
       return t("subagentStatusCompleted");
   }
 }
 
-function getSubagentDotStatus(status: ToolCallItem["status"]): CheckStatus {
+function getSubagentDotStatus(status: SubagentItem["status"]): CheckStatus {
   switch (status) {
     case "pending":
       return "running";
+    case "unknown":
+      return "pending";
     case "error":
     case "aborted":
       return "failed";

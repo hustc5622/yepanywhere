@@ -177,6 +177,17 @@ export function buildSessionDisplayRenderItems(
           });
           break;
         case "notice":
+          if (segment.kind === "subagent" && segment.subagent) {
+            items.push({
+              type: "codex_native_item",
+              id: segment.id,
+              projectId: options.projectId,
+              threadItem: { type: "subAgentActivity", ...segment.subagent },
+              lifecycle: segment.status === "running" ? "started" : "completed",
+              sourceMessages: [source],
+            });
+            break;
+          }
           items.push({
             type: "system",
             id: segment.id,

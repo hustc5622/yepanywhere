@@ -80,6 +80,7 @@ export function CodexNativeItemBlock({ item }: Props) {
           kind={asString(threadItem.kind)}
           agentPath={asString(threadItem.agentPath)}
           agentThreadId={asString(threadItem.agentThreadId)}
+          projectId={item.projectId}
           lifecycle={lifecycle}
         />
       );

@@ -1,15 +1,17 @@
 import type { ReactNode } from "react";
+import { Link } from "react-router-dom";
 import { useOptionalI18n } from "../../../i18n";
 
 type Translate = NonNullable<ReturnType<typeof useOptionalI18n>>["t"];
 
 interface Props {
-  /** Activity kind ("started" | "interacted" | "interrupted"). */
+  /** Activity kind, independent of the containing item lifecycle. */
   kind?: string;
   /** V2: agent path (e.g. "/root/task_name"). */
   agentPath?: string;
   /** V2: sub-agent thread id. */
   agentThreadId?: string;
+  projectId?: string;
 
   /** Collaboration tool ("spawnAgent" | "sendInput" | "wait" | ...). */
   tool?: string;
@@ -123,31 +125,28 @@ function v2Title(
   switch (kind?.toLowerCase()) {
     case "started":
       return (
-        <span>
-          {t?.("codexNativeSubagentStarted") ?? "Started"}{" "}
-          <code className="codex-native-subagent-nickname">{display}</code>
-        </span>
+        t?.("codexSubagentActivityStarted", { agent: display }) ??
+        `Started ${display}`
+      );
+    case "completed":
+      return (
+        t?.("codexSubagentActivityCompleted", { agent: display }) ??
+        `${display} completed a task`
       );
     case "interrupted":
       return (
-        <span>
-          {t?.("codexNativeSubagentInterrupted") ?? "Interrupted"}{" "}
-          <code className="codex-native-subagent-nickname">{display}</code>
-        </span>
+        t?.("codexSubagentActivityInterrupted", { agent: display }) ??
+        `Interrupted ${display}`
       );
     case "interacted":
       return (
-        <span>
-          {t?.("codexNativeSubagentInteracted") ?? "Interacted with"}{" "}
-          <code className="codex-native-subagent-nickname">{display}</code>
-        </span>
+        t?.("codexSubagentActivityInteracted", { agent: display }) ??
+        `Sent a message to ${display}`
       );
     default:
       return (
-        <span>
-          {kind ?? t?.("codexNativeSubagentActivity") ?? "Activity"}{" "}
-          <code className="codex-native-subagent-nickname">{display}</code>
-        </span>
+        t?.("codexSubagentActivityUnknown", { agent: display }) ??
+        `Activity from ${display}`
       );
   }
 }
@@ -203,7 +202,7 @@ function statusLabel(status: string, t: Translate | undefined): string {
  *
  * Handles two variants:
  * - `subAgentActivity`: lightweight lifecycle marker (started/interacted/
- *   Interrupted) with an agent path.
+ *   interrupted/completed) with an agent path.
  * - `collabAgentToolCall`: spawn/sendInput/wait/close/resume with a
  *   per-agent status map (`agentsStates`).
  *
@@ -268,6 +267,19 @@ export function CodexNativeSubAgentBlock(props: Props) {
       <div className="codex-native-subagent-title">
         {v2Title(kind, agentPath, agentThreadId, t)}
       </div>
+      {props.projectId && agentThreadId && (
+        <Link
+          className="codex-native-subagent-link"
+          to={`/projects/${encodeURIComponent(props.projectId)}/sessions/${encodeURIComponent(agentThreadId)}`}
+          aria-label={
+            t?.("codexSubagentOpenConversation", {
+              agent: agentPath ?? agentThreadId,
+            }) ?? `View conversation with ${agentPath ?? agentThreadId}`
+          }
+        >
+          {t?.("codexSubagentViewConversation") ?? "View conversation"}
+        </Link>
+      )}
     </div>
   );
 }

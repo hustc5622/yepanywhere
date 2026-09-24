@@ -1089,11 +1089,24 @@ function projectSystemNotice(
   }
   if (itemType === "collabAgentToolCall" || itemType === "subAgentActivity") {
     const title = firstString(item.tool, item.kind);
+    const agentThreadId = firstString(item.agentThreadId);
+    const agentPath = firstString(item.agentPath);
     return {
       type: "notice",
       id: messageId,
       kind: "subagent",
       ...(title ? { title: boundedText(title, 512) } : {}),
+      ...(itemType === "subAgentActivity"
+        ? {
+            subagent: {
+              kind: boundedText(firstString(item.kind) ?? "unknown", 64),
+              ...(agentThreadId && agentThreadId.length <= 512
+                ? { agentThreadId }
+                : {}),
+              ...(agentPath ? { agentPath: boundedText(agentPath, 512) } : {}),
+            },
+          }
+        : {}),
       status: lifecycle,
       ...(timestamp ? { timestamp } : {}),
     };
