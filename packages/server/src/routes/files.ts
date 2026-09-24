@@ -9,7 +9,7 @@ import {
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
 import { computeEditAugment } from "../augments/edit-augments.js";
-import { renderMarkdownToHtml } from "../augments/markdown-augments.js";
+import { renderMarkdownDocumentToHtml } from "../augments/markdown-augments.js";
 import { highlightFile } from "../highlighting/index.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 
@@ -410,7 +410,7 @@ export function createFilesRoutes(deps: FilesDeps): Hono {
           if (ext === ".md" || ext === ".markdown") {
             try {
               response.renderedMarkdownHtml =
-                await renderMarkdownToHtml(content);
+                await renderMarkdownDocumentToHtml(content);
             } catch {
               // Ignore markdown rendering errors
             }

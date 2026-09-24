@@ -74,9 +74,19 @@ export async function renderMarkdownToHtml(
     return "";
   }
   const normalized = normalizeWrappingTextFence(markdown);
-  return options?.resolveImageUrl
-    ? renderMarkdownToHtmlUncached(normalized, options)
+  if (options?.resolveImageUrl) {
+    return renderMarkdownToHtmlUncached(normalized, options);
+  }
+  return options?.linkStyle === "document"
+    ? cachedRenderDocumentMarkdownToHtml(normalized)
     : cachedRenderMarkdownToHtml(normalized);
+}
+
+/** Render a previewed Markdown file (standard link labels, no transcript rewrites). */
+export function renderMarkdownDocumentToHtml(
+  markdown: string,
+): Promise<string> {
+  return renderMarkdownToHtml(markdown, { linkStyle: "document" });
 }
 
 /**
@@ -212,6 +222,13 @@ const CACHE_MAX_CHARS = 8_000_000;
 const cachedRenderMarkdownToHtml = memoizeAsyncByString(
   (markdown) => renderMarkdownToHtmlUncached(markdown),
   { maxChars: CACHE_MAX_CHARS },
+);
+
+const cachedRenderDocumentMarkdownToHtml = memoizeAsyncByString(
+  (markdown) =>
+    renderMarkdownToHtmlUncached(markdown, { linkStyle: "document" }),
+  // File previews are reopened less often than transcript blocks.
+  { maxChars: CACHE_MAX_CHARS / 4 },
 );
 
 async function renderMarkdownToHtmlUncached(

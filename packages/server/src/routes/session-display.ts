@@ -22,7 +22,10 @@ import {
   computeEditAugment,
   computeStructuredPatchDiffHtml,
 } from "../augments/edit-augments.js";
-import { renderMarkdownToHtml } from "../augments/markdown-augments.js";
+import {
+  renderMarkdownDocumentToHtml,
+  renderMarkdownToHtml,
+} from "../augments/markdown-augments.js";
 import type { CodexAppServerHistoryReader } from "../codex-history/CodexAppServerHistoryReader.js";
 import { getDataDir } from "../config.js";
 import type {
@@ -402,7 +405,7 @@ export function registerSessionDisplayRoutes(
             content,
             renderedMarkdownHtml:
               content !== undefined && /\.(md|markdown)$/i.test(path)
-                ? await renderMarkdownToHtml(content)
+                ? await renderMarkdownDocumentToHtml(content)
                 : undefined,
             binary: content === undefined,
             bytes: bytes.length,
@@ -429,7 +432,7 @@ export function registerSessionDisplayRoutes(
         const content = decodeSavedText(bytes);
         const renderedMarkdownHtml =
           content !== undefined && /\.(md|markdown)$/i.test(path)
-            ? await renderMarkdownToHtml(content)
+            ? await renderMarkdownDocumentToHtml(content)
             : undefined;
         return c.json({
           path,

@@ -985,6 +985,7 @@ export function createReportsRoutes(deps: ReportsDeps = {}): Hono {
       const normalizedReportPath = toPosixPath(relative(root, filePath));
       const [renderedHtml, comments] = await Promise.all([
         renderMarkdownToHtml(content, {
+          linkStyle: "document",
           resolveImageUrl: (href) =>
             reportImageUrl(deps, normalizedReportPath, href),
         }),

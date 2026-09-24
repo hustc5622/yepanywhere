@@ -61,7 +61,9 @@ async function renderMarkdown(content: string): Promise<string> {
     })
     .join("\n");
 
-  return renderSafeMarkdown(contentWithoutLineNumbers);
+  return renderSafeMarkdown(contentWithoutLineNumbers, {
+    linkStyle: "document",
+  });
 }
 
 /**

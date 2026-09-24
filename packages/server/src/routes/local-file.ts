@@ -2,7 +2,7 @@ import { readFile, realpath, stat } from "node:fs/promises";
 import { extname } from "node:path";
 import { parseLineColumn } from "@yep-anywhere/shared";
 import { Hono } from "hono";
-import { renderMarkdownToHtml } from "../augments/markdown-augments.js";
+import { renderMarkdownDocumentToHtml } from "../augments/markdown-augments.js";
 
 interface LocalFileDeps {
   maxInlineSizeBytes?: number;
@@ -74,7 +74,7 @@ export function createLocalFileRoutes(deps: LocalFileDeps = {}) {
     let renderedMarkdownHtml: string | undefined;
     if (isMarkdownPath(resolvedPath)) {
       try {
-        renderedMarkdownHtml = await renderMarkdownToHtml(content);
+        renderedMarkdownHtml = await renderMarkdownDocumentToHtml(content);
       } catch {
         // Plain text still renders if markdown rendering fails.
       }

@@ -115,3 +115,60 @@ describe("markdown content preservation", () => {
     expect(html).toContain(">[报告](/tmp/report.md)</a>");
   });
 });
+
+describe("document link style (file previews)", () => {
+  const document = { linkStyle: "document" as const };
+
+  it("renders standard link labels instead of the original source", () => {
+    const html = renderSafeMarkdown(
+      '[**Run**](https://example.com/runs/1 "Run 1")',
+      document,
+    );
+    expect(html).toBe(
+      '<p><a href="https://example.com/runs/1" title="Run 1"><strong>Run</strong></a></p>',
+    );
+  });
+
+  it.each(["docs/guide.md", "../README.md", "./sibling.md", "src/index.ts"])(
+    "keeps the relative destination %s inert instead of a broken API link",
+    (href) => {
+      const html = renderSafeMarkdown(`[Guide](${href})`, document);
+      expect(html).toBe("<p>Guide</p>");
+      expect(html).not.toContain("/api/local-file");
+    },
+  );
+
+  it("keeps absolute local file and media links clickable with their labels", () => {
+    const html = renderSafeMarkdown(
+      "[报告](/tmp/report.md) [截图](/tmp/shot.png)",
+      document,
+    );
+    expect(html).toContain('data-file-path="/tmp/report.md"');
+    expect(html).toContain('title="/tmp/report.md">报告</a>');
+    expect(html).toContain('class="local-media-link"');
+    expect(html).toContain(">截图<span");
+    expect(html).not.toContain("[报告]");
+  });
+
+  it("renders unresolvable relative images as alt text", () => {
+    expect(renderSafeMarkdown("![截图](assets/shot.png)", document)).toBe(
+      "<p>截图</p>",
+    );
+  });
+
+  it("applies the document style inside <details> summaries", () => {
+    const html = renderSafeMarkdown(
+      "<details><summary>[Guide](docs/guide.md)</summary>\n\nBody\n</details>",
+      document,
+    );
+    expect(html).toContain(
+      '<summary class="markdown-details__summary">Guide</summary>',
+    );
+  });
+
+  it("leaves the default transcript style unchanged", () => {
+    expect(renderSafeMarkdown("[Guide](docs/guide.md)")).toContain(
+      'data-file-path="docs/guide.md"',
+    );
+  });
+});

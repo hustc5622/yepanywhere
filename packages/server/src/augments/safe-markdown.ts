@@ -34,6 +34,16 @@ const MEDIA_EXTENSIONS = new Set([...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS]);
 export interface SafeMarkdownOptions {
   /** Resolve a non-HTTP image reference in a trusted, caller-specific scope. */
   resolveImageUrl?: (href: string) => string | null;
+  /**
+   * How links are rendered.
+   * - `message` (default): chat transcripts keep the original link source
+   *   visible and turn relative file paths into links that the transcript
+   *   click handler resolves against the session project.
+   * - `document`: file previews render standard Markdown link labels. Relative
+   *   destinations stay inert text because they belong to the previewed
+   *   document's directory and no preview click handler resolves them.
+   */
+  linkStyle?: "message" | "document";
 }
 
 /**
@@ -269,8 +279,11 @@ function createRenderer(
       }
       return renderTextWithLocalMediaLinks(token.text);
     },
-    link(token: Tokens.Link) {
+    link(this: RendererThis<string, string>, token: Tokens.Link) {
       const { href, title } = token;
+      if (options.linkStyle === "document") {
+        return renderDocumentLink(this.parser.parseInline(token.tokens), token);
+      }
       // Add navigation to the original source instead of replacing it with
       // the label: destinations, titles and inline syntax stay visible.
       const source = getLinkSource(token);
@@ -302,14 +315,21 @@ function createRenderer(
     },
     image(token: Tokens.Image) {
       const { href, title, text } = token;
+      const documentStyle = options.linkStyle === "document";
       // Check for local file paths first — rewrite to clickable media placeholder
       if (isLocalFilePath(href)) {
         const ext = getExtension(href);
 
         if (MEDIA_EXTENSIONS.has(ext)) {
-          return renderLocalMediaLink(href, getLinkSource(token), ext);
+          return renderLocalMediaLink(
+            href,
+            documentStyle ? text : getLinkSource(token),
+            ext,
+          );
         }
-        return escapeHtml(getLinkSource(token));
+        return escapeHtml(
+          documentStyle ? text || getFileName(href) : getLinkSource(token),
+        );
       }
 
       const safeSrc =
@@ -318,6 +338,7 @@ function createRenderer(
           ? sanitizeResolvedImageUrl(options.resolveImageUrl(href) ?? "")
           : null);
       if (!safeSrc) {
+        if (documentStyle) return escapeHtml(text);
         const relativePath = getRelativeFilePath(href);
         if (relativePath) {
           return renderLocalTextFileLink(
@@ -337,6 +358,22 @@ function createRenderer(
   };
 }
 
+/** Standard Markdown link rendering for previewed documents. */
+function renderDocumentLink(renderedLabel: string, token: Tokens.Link): string {
+  const { href, title } = token;
+  if (isLocalFilePath(href)) {
+    const ext = getExtension(href);
+    if (MEDIA_EXTENSIONS.has(ext)) {
+      return renderLocalMediaLink(href, token.text, ext);
+    }
+    return renderLocalTextFileLink(href, renderedLabel, title);
+  }
+  const safeHref = sanitizeUrl(href);
+  if (!safeHref) return renderedLabel;
+  const titleAttr = title ? ` title="${escapeHtml(title)}"` : "";
+  return `<a href="${escapeHtml(safeHref)}"${titleAttr}>${renderedLabel}</a>`;
+}
+
 function createMarkdownRenderer(options: SafeMarkdownOptions = {}): Marked {
   const instance = new Marked({
     async: false,
@@ -346,7 +383,17 @@ function createMarkdownRenderer(options: SafeMarkdownOptions = {}): Marked {
   return instance;
 }
 
-const markdownRenderer = createMarkdownRenderer();
+const messageMarkdownRenderer = createMarkdownRenderer();
+const documentMarkdownRenderer = createMarkdownRenderer({
+  linkStyle: "document",
+});
+
+function rendererFor(options: SafeMarkdownOptions): Marked {
+  if (options.resolveImageUrl) return createMarkdownRenderer(options);
+  return options.linkStyle === "document"
+    ? documentMarkdownRenderer
+    : messageMarkdownRenderer;
+}
 
 /**
  * Return a safe absolute URL for markdown links, or null for unsupported schemes.
@@ -384,9 +431,7 @@ export function renderSafeMarkdown(
   markdown: string,
   options: SafeMarkdownOptions = {},
 ): string {
-  const renderer = options.resolveImageUrl
-    ? createMarkdownRenderer(options)
-    : markdownRenderer;
+  const renderer = rendererFor(options);
   const { markdown: markdownWithPlaceholders, replacements } =
     extractDetailsBlocks(markdown, 0, options);
   const rendered = renderer.parse(markdownWithPlaceholders, {
@@ -406,9 +451,7 @@ function renderSafeMarkdownNested(
     return renderSafeMarkdownWithoutDetails(markdown, options);
   }
 
-  const renderer = options.resolveImageUrl
-    ? createMarkdownRenderer(options)
-    : markdownRenderer;
+  const renderer = rendererFor(options);
   const { markdown: markdownWithPlaceholders, replacements } =
     extractDetailsBlocks(markdown, depth, options);
   const rendered = renderer.parse(markdownWithPlaceholders, {
@@ -423,16 +466,19 @@ function renderSafeMarkdownWithoutDetails(
   markdown: string,
   options: SafeMarkdownOptions,
 ): string {
-  const renderer = options.resolveImageUrl
-    ? createMarkdownRenderer(options)
-    : markdownRenderer;
+  const renderer = rendererFor(options);
   const rendered = renderer.parse(markdown, { async: false });
   const html = typeof rendered === "string" ? rendered : "";
   return sanitizeHtml(html, MARKDOWN_SANITIZE_OPTIONS).trim();
 }
 
-export function renderSafeInlineMarkdown(markdown: string): string {
-  const rendered = markdownRenderer.parseInline(markdown, { async: false });
+export function renderSafeInlineMarkdown(
+  markdown: string,
+  options: SafeMarkdownOptions = {},
+): string {
+  const rendered = rendererFor(options).parseInline(markdown, {
+    async: false,
+  });
   const html = typeof rendered === "string" ? rendered : "";
   return sanitizeHtml(html, MARKDOWN_SANITIZE_OPTIONS);
 }
@@ -525,7 +571,7 @@ function renderDetailsBlock(
   const bodyMarkdown = summaryMatch
     ? inner.slice(summaryMatch[0].length).trim()
     : inner.trim();
-  const summaryHtml = renderSafeInlineMarkdown(summaryMarkdown);
+  const summaryHtml = renderSafeInlineMarkdown(summaryMarkdown, options);
   const bodyHtml = bodyMarkdown
     ? renderSafeMarkdownNested(bodyMarkdown, depth + 1, options)
     : "";

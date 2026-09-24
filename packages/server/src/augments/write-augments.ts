@@ -7,7 +7,7 @@
 
 import { extname } from "node:path";
 import { highlightFile } from "../highlighting/index.js";
-import { renderMarkdownToHtml } from "./markdown-augments.js";
+import { renderMarkdownDocumentToHtml } from "./markdown-augments.js";
 
 /**
  * Input for computing a write augment.
@@ -65,7 +65,8 @@ export async function computeWriteAugment(
   // Render markdown preview for .md files
   if (isMarkdownFile(file_path)) {
     try {
-      augmentResult.renderedMarkdownHtml = await renderMarkdownToHtml(content);
+      augmentResult.renderedMarkdownHtml =
+        await renderMarkdownDocumentToHtml(content);
     } catch {
       // Ignore markdown rendering errors
     }

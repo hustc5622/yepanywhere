@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
   normalizeWrappingTextFence,
+  renderMarkdownDocumentToHtml,
   renderMarkdownToHtml,
 } from "../../src/augments/markdown-augments.js";
 
@@ -111,4 +112,15 @@ describe("normalizeWrappingTextFence", () => {
       expect(normalizeWrappingTextFence(markdown)).toBe(markdown);
     },
   );
+});
+
+describe("renderMarkdownDocumentToHtml", () => {
+  it("does not share cached transcript output for the same markdown", async () => {
+    const markdown = "See [the guide](docs/guide.md).";
+    const transcript = await renderMarkdownToHtml(markdown);
+    const document = await renderMarkdownDocumentToHtml(markdown);
+    expect(transcript).toContain('data-file-path="docs/guide.md"');
+    expect(document).toBe("<p>See the guide.</p>");
+    expect(await renderMarkdownToHtml(markdown)).toBe(transcript);
+  });
 });

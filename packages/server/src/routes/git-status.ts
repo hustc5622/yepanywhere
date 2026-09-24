@@ -10,7 +10,7 @@ import {
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
 import { computeEditAugment } from "../augments/edit-augments.js";
-import { renderMarkdownToHtml } from "../augments/markdown-augments.js";
+import { renderMarkdownDocumentToHtml } from "../augments/markdown-augments.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 
 const execFileAsync = promisify(execFile);
@@ -120,7 +120,7 @@ export function createGitStatusRoutes(deps: GitStatusDeps): Hono {
       const ext = extname(path).toLowerCase();
       if ((ext === ".md" || ext === ".markdown") && newContent) {
         try {
-          result.markdownHtml = await renderMarkdownToHtml(newContent);
+          result.markdownHtml = await renderMarkdownDocumentToHtml(newContent);
         } catch {
           // Ignore markdown rendering errors
         }
