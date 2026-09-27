@@ -34,15 +34,24 @@ describe("attachmentTokens", () => {
     );
   });
 
-  it("leaves a wider gap and puts subsequent typing after it", () => {
+  it("leaves a wider gap on both sides and puts subsequent typing after it", () => {
     const result = insertAttachmentToken("hello world", 5, "shot.png");
-    expect(result.text).toBe("hello @[shot.png]  world");
-    expect(result.text.slice(0, result.cursor)).toBe("hello @[shot.png]  ");
+    expect(result.text).toBe("hello  @[shot.png]  world");
+    expect(result.text.slice(0, result.cursor)).toBe("hello  @[shot.png]  ");
   });
 
   it.each([
     ["", 0, "@[a.png]  ", ""],
-    ["hi ", 3, "hi @[a.png]  ", ""],
+    ["hi", 2, "hi  @[a.png]  ", ""],
+    ["hi ", 3, "hi  @[a.png]  ", ""],
+    ["hi  ", 4, "hi  @[a.png]  ", ""],
+    ["hi   ", 5, "hi   @[a.png]  ", ""],
+    ["还有一个无法收尾的问题", 4, "还有一个  @[a.png]  ", "无法收尾的问题"],
+    ["hi\n", 3, "hi\n@[a.png]  ", ""],
+    ["hi\n ", 4, "hi\n @[a.png]  ", ""],
+    ["hi\t", 3, "hi\t@[a.png]  ", ""],
+    [" ", 1, " @[a.png]  ", ""],
+    ["@[first.png]  ", 14, "@[first.png]  @[a.png]  ", ""],
     ["word", 0, "@[a.png]  ", "word"],
     ["  word", 0, "@[a.png]  ", "word"],
     ["   word", 0, "@[a.png]   ", "word"],
