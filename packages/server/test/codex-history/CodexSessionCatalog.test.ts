@@ -1,4 +1,4 @@
-import { mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
+import { appendFile, mkdtemp, rm, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
@@ -51,6 +51,89 @@ function thread(
 }
 
 describe("CodexSessionCatalog", () => {
+  it("recovers another account's blank DB title from its first real prompt", async () => {
+    const root = await mkdtemp(join(tmpdir(), "codex-catalog-account-"));
+    roots.push(root);
+    const path = join(root, "session.jsonl");
+    const user = (text: string) =>
+      `${JSON.stringify({
+        type: "response_item",
+        payload: {
+          type: "message",
+          role: "user",
+          content: [{ type: "input_text", text }],
+        },
+      })}\n`;
+    await writeFile(
+      path,
+      user("# AGENTS.md instructions for /repo") +
+        user("<environment_context>Setup</environment_context>") +
+        user("<skills_instructions>Setup</skills_instructions>"),
+    );
+    const row = { ...thread("session", "/repo", path, 200), preview: "" };
+    const catalog = new CodexSessionCatalog({
+      client: {
+        listThreads: vi.fn(async () => ({
+          data: [row],
+          nextCursor: null,
+          backwardsCursor: null,
+        })),
+      },
+      ttlMs: 0,
+    });
+    expect((await catalog.getSessionSummary("session"))?.title).toBeNull();
+    await appendFile(path, user("/database-storage 请优化这个页面"));
+    // The reader must stop at the first prompt, even for very large rollouts.
+    await appendFile(path, "x".repeat(9 * 1024 * 1024));
+    expect(await catalog.getSessionSummary("session")).toMatchObject({
+      title: "/database-storage 请优化这个页面",
+      fullTitle: "/database-storage 请优化这个页面",
+      messageCount: 1,
+    });
+    row.name = "Custom title";
+    expect((await catalog.getSessionSummary("session"))?.title).toBe(
+      "Custom title",
+    );
+  });
+
+  it.each(["empty", "unavailable"])(
+    "hydrates manifest titles when the state DB is %s",
+    async (state) => {
+      const root = await mkdtemp(join(tmpdir(), "codex-catalog-fallback-"));
+      roots.push(root);
+      const id = "0198f000-0000-7000-8000-000000000066";
+      await writeFile(
+        join(root, `rollout-${id}.jsonl`),
+        `${[
+          {
+            type: "session_meta",
+            timestamp: "2026-09-25T00:00:00Z",
+            payload: { id, cwd: "/repo", timestamp: "2026-09-25T00:00:00Z" },
+          },
+          {
+            type: "event_msg",
+            payload: { type: "user_message", message: "Original input" },
+          },
+        ]
+          .map((entry) => JSON.stringify(entry))
+          .join("\n")}\n`,
+      );
+      const catalog = new CodexSessionCatalog({
+        client: {
+          listThreads: vi.fn(async () => {
+            if (state === "unavailable") throw new Error("offline");
+            return { data: [], nextCursor: null, backwardsCursor: null };
+          }),
+        },
+        sessionsDir: root,
+      });
+      expect(await catalog.getSessionSummary(id)).toMatchObject({
+        title: "Original input",
+        fullTitle: "Original input",
+      });
+    },
+  );
+
   it("paginates once, validates paths, groups cwd rows, and reuses the snapshot", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-catalog-"));
     roots.push(root);
@@ -124,7 +207,7 @@ describe("CodexSessionCatalog", () => {
     await expect(catalog.getSnapshot()).resolves.toBeNull();
   });
 
-  it("reconciles missing state DB rows from the rollout manifest in the background", async () => {
+  it("reconciles missing state DB rows and their titles from the rollout manifest in the background", async () => {
     const root = await mkdtemp(join(tmpdir(), "codex-catalog-reconcile-"));
     roots.push(root);
     const indexedPath = join(root, "indexed.jsonl");
@@ -140,6 +223,16 @@ describe("CodexSessionCatalog", () => {
           id: missingId,
           timestamp: "2026-08-22T00:00:00.000Z",
           cwd: "/repo/missing",
+        },
+      })}\n`,
+    );
+    await appendFile(
+      missingPath,
+      `${JSON.stringify({
+        type: "event_msg",
+        payload: {
+          type: "user_message",
+          message: "Prompt from another account",
         },
       })}\n`,
     );
@@ -162,6 +255,9 @@ describe("CodexSessionCatalog", () => {
       expect(reconciled?.sessions.map((session) => session.id)).toContain(
         missingId,
       );
+      expect(
+        reconciled?.sessions.find((session) => session.id === missingId),
+      ).toMatchObject({ title: "Prompt from another account" });
     });
   });
 

@@ -57,6 +57,75 @@ function fixture(pollMs = 60_000) {
   };
 }
 describe("SessionDisplayService", () => {
+  it.each(["completed", "failed", "interrupted"] as const)(
+    "retains an id-less Codex %s notification while history lags",
+    async (outcome) => {
+      vi.useFakeTimers();
+      const { service, source, push } = fixture(10);
+      const initial = await source.read();
+      await service.subscribe(selection, vi.fn());
+      const answer: Message = {
+        type: "assistant",
+        uuid: "answer-turn",
+        codexTurnId: "turn",
+        codexMessagePhase: "final_answer",
+        message: { role: "assistant", content: "Done" },
+      };
+      push("message", answer);
+      expect((await service.snapshot(selection)).activity.state).toBe(
+        "finishing",
+      );
+      push("message", {
+        type: "system",
+        subtype: "turn_complete",
+        codexTurnId: "turn",
+        turnStatus: outcome,
+      });
+      await vi.advanceTimersByTimeAsync(30);
+      expect((await service.snapshot(selection)).activity.state).toBe(outcome);
+
+      // Completion timing may reach history before the runtime idle snapshot.
+      source.read.mockResolvedValue({
+        ...initial,
+        messages: [...initial.messages, answer],
+        turnStatuses: { turn: outcome },
+        activity: "running",
+        stamp: "2",
+      });
+      source.stamp.mockResolvedValue("2");
+      await vi.advanceTimersByTimeAsync(30);
+      expect((await service.snapshot(selection)).activity.state).toBe(outcome);
+      const reconnect = vi.fn();
+      await service.subscribe(selection, reconnect);
+      expect(
+        reconnect.mock.calls.find(([type]) => type === "display-snapshot")?.[1]
+          .activity.state,
+      ).toBe(outcome);
+
+      // A new turn can be live before it is in the history page.
+      push("status", { state: "in-turn" });
+      push("message", {
+        type: "user",
+        uuid: "next-question",
+        codexTurnId: "next-turn",
+        message: { role: "user", content: "Continue" },
+      });
+      push("message", {
+        type: "assistant",
+        uuid: "next-answer",
+        codexTurnId: "next-turn",
+        codexMessagePhase: "commentary",
+        message: { role: "assistant", content: "Working" },
+      });
+      // Force a source refresh while the old completion is still retained.
+      push("status", { state: "idle" });
+      await vi.advanceTimersByTimeAsync(30);
+      expect((await service.snapshot(selection)).activity.state).toBe(
+        "running",
+      );
+    },
+  );
+
   it.each(["codex", "codex-oss"])(
     "retires abandoned %s retry text only after the completed answer reaches history",
     async (provider) => {

@@ -28,8 +28,9 @@ export interface CodexAccountHomeProfile {
  * SQLite databases (`thread_history_*.sqlite`, `state_*.sqlite`, ...) are
  * deliberately *not* linked: two processes opening the same database through
  * different paths would use different `-wal`/`-shm` side files, which risks
- * corruption. Codex keeps per-home thread-history databases instead, and Yep
- * falls back to reading rollout JSONL for those sessions.
+ * corruption. Codex keeps per-home thread-history databases instead; Yep
+ * routes history reads to the session's account home and retains the shared
+ * rollout JSONL fallback when native history is unavailable.
  */
 const SHARED_ENTRIES = [
   { name: "sessions", kind: "dir" },

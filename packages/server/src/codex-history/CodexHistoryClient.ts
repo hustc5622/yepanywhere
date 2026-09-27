@@ -26,12 +26,17 @@ const MAX_BACKOFF_MS = 30_000;
 export interface CodexHistoryClientOptions {
   command?: string;
   cwd?: string;
+  /** Fixed home for an account-scoped transport. Never mutate process.env. */
+  codexHome?: string;
+  /** Resolve the home that owns a thread's private history database. */
+  resolveThreadCodexHome?: (threadId: string) => string | null | undefined;
   requestTimeoutMs?: number;
   now?: () => number;
   clientFactory?: (input: {
     command: string;
     cwd: string;
     args: string[];
+    env: NodeJS.ProcessEnv;
   }) => CodexHistoryAppServerTransport;
 }
 
@@ -46,6 +51,7 @@ function protocolVersion(userAgent: string): string {
 
 /** Long-lived, read-only app-server protocol client. */
 export class CodexHistoryClient {
+  private readonly accountClients = new Map<string, CodexHistoryClient>();
   private client: CodexHistoryAppServerTransport | null = null;
   private startup: Promise<CodexHistoryAppServerTransport> | null = null;
   private readonly inFlight = new Map<string, Promise<unknown>>();
@@ -124,6 +130,8 @@ export class CodexHistoryClient {
   }
 
   shutdown(): void {
+    for (const client of this.accountClients.values()) client.shutdown();
+    this.accountClients.clear();
     this.client?.close();
     this.client = null;
     this.startup = null;
@@ -131,6 +139,23 @@ export class CodexHistoryClient {
   }
 
   private async request<T>(method: string, params: unknown): Promise<T> {
+    const threadId = (params as { threadId?: unknown } | null)?.threadId;
+    const codexHome =
+      typeof threadId === "string"
+        ? this.options.resolveThreadCodexHome?.(threadId)
+        : undefined;
+    if (codexHome && codexHome !== this.options.codexHome) {
+      let client = this.accountClients.get(codexHome);
+      if (!client) {
+        client = new CodexHistoryClient({
+          ...this.options,
+          codexHome,
+          resolveThreadCodexHome: undefined,
+        });
+        this.accountClients.set(codexHome, client);
+      }
+      return client.request<T>(method, params);
+    }
     const key = `${method}\0${JSON.stringify(params)}`;
     const existing = this.inFlight.get(key);
     if (existing) return existing as Promise<T>;
@@ -219,9 +244,13 @@ export class CodexHistoryClient {
     }
 
     const args = getCodexMcpAppServerArgs("clear");
+    const env = {
+      ...process.env,
+      ...(this.options.codexHome ? { CODEX_HOME: this.options.codexHome } : {}),
+    };
     const client = this.options.clientFactory
-      ? this.options.clientFactory({ command, cwd: this.cwd, args })
-      : new CodexAppServerClient(command, this.cwd, process.env, args);
+      ? this.options.clientFactory({ command, cwd: this.cwd, args, env })
+      : new CodexAppServerClient(command, this.cwd, env, args);
     try {
       await client.connect();
       const initialized = await this.withStartupTimeout(
@@ -317,8 +346,10 @@ function safeProtocolFailureCategory(message: string): string {
 
 let defaultClient: CodexHistoryClient | null = null;
 
-export function getCodexHistoryClient(): CodexHistoryClient {
-  defaultClient ??= new CodexHistoryClient();
+export function getCodexHistoryClient(
+  options: CodexHistoryClientOptions = {},
+): CodexHistoryClient {
+  defaultClient ??= new CodexHistoryClient(options);
   return defaultClient;
 }
 

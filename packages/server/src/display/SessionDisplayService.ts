@@ -459,7 +459,17 @@ export class SessionDisplayService {
           compact.message = { ...asRecord(compact.message), content: tools };
         }
       }
-      const id = compact.uuid ?? compact.id;
+      // Codex turn/completed carries a turn id but no message id. Retain it
+      // across source refreshes, which can still see the other account's
+      // unfinished history after the live turn has already ended.
+      const completionTurnId = compact.codexTurnId ?? compact.turnId;
+      const id =
+        compact.uuid ??
+        compact.id ??
+        (compact.subtype === "turn_complete" &&
+        typeof completionTurnId === "string"
+          ? `turn-complete:${completionTurnId}`
+          : undefined);
       if (typeof id === "string") {
         const previous = entry.overlay.get(id);
         const oldContent = messageContent(previous ?? {});
@@ -583,6 +593,7 @@ export class SessionDisplayService {
       entry.bootstrapReplay = [];
       model.setRuntime(page.activity);
       for (const message of entry.overlay.values()) {
+        if (message.subtype === "turn_complete") continue;
         if (page.provider === "pi" || page.provider === "kimi") {
           if (message.type !== "system" && message.type !== "result") {
             const content = messageContent(message);
@@ -602,6 +613,11 @@ export class SessionDisplayService {
           }
         }
         model.message(message);
+      }
+      // Apply terminal facts after replaying prose. An older turn must not
+      // close a newer, not-yet-persisted turn in the same overlay.
+      for (const message of entry.overlay.values()) {
+        if (message.subtype === "turn_complete") model.message(message);
       }
       entry.provider = page.provider;
       const controlState = asRecord(
@@ -782,7 +798,8 @@ export class SessionDisplayService {
         entry.overlay.delete(key);
       else if (
         message.subtype === "turn_complete" &&
-        page.turnStatuses?.[run] === message.turnStatus
+        page.turnStatuses?.[run] === message.turnStatus &&
+        page.activity === message.turnStatus
       )
         entry.overlay.delete(key);
     }

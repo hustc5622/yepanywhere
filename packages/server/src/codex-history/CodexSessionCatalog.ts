@@ -3,6 +3,7 @@ import type { UrlProjectId } from "@yep-anywhere/shared";
 import { canonicalizeProjectPath, encodeProjectId } from "../projects/paths.js";
 import type { Thread } from "../sdk/providers/codex-protocol/generated/v2/Thread.js";
 import { getCodexSessionManifest } from "../sessions/codex-session-manifest.js";
+import { CodexSessionTitleReader } from "../sessions/codex-session-title.js";
 import type { SessionSummary } from "../supervisor/types.js";
 import type { CodexHistoryClient } from "./CodexHistoryClient.js";
 
@@ -19,6 +20,7 @@ export const CODEX_USER_VISIBLE_SOURCE_KINDS = [
 interface CatalogRow {
   summary: SessionSummary;
   projectPath: string;
+  rolloutPath?: string;
 }
 
 export interface CodexSessionCatalogSnapshot {
@@ -39,6 +41,7 @@ export interface CodexSessionCatalogOptions {
 
 /** Provider-wide state-DB-first Codex list snapshot shared by every project. */
 export class CodexSessionCatalog {
+  private readonly titleReader = new CodexSessionTitleReader();
   private snapshot: CodexSessionCatalogSnapshot | null = null;
   private inFlight: Promise<CodexSessionCatalogSnapshot | null> | null = null;
   private reconcileInFlight: Promise<void> | null = null;
@@ -161,12 +164,30 @@ export class CodexSessionCatalog {
           new Date(right.summary.updatedAt).getTime() -
           new Date(left.summary.updatedAt).getTime(),
       );
-    return this.composeSnapshot(
-      rows.map(({ thread, summary }) => ({
-        summary,
-        projectPath: canonicalizeProjectPath(thread.cwd),
-      })),
-      this.manifestOnlyRows,
+    const catalogRows = rows.map(({ thread, summary }) => ({
+      summary,
+      projectPath: canonicalizeProjectPath(thread.cwd),
+      rolloutPath: thread.path ?? undefined,
+    }));
+    await this.fillMissingTitles(catalogRows);
+    return this.composeSnapshot(catalogRows, this.manifestOnlyRows);
+  }
+
+  private async fillMissingTitles(rows: CatalogRow[]): Promise<void> {
+    const missing = rows.filter((row) => !row.summary.title && row.rolloutPath);
+    let index = 0;
+    await Promise.all(
+      Array.from({ length: Math.min(8, missing.length) }, async () => {
+        while (index < missing.length) {
+          const row = missing[index++];
+          if (!row?.rolloutPath) continue;
+          const title = await this.titleReader.read(row.rolloutPath);
+          if (title) {
+            Object.assign(row.summary, title);
+            row.summary.messageCount = Math.max(1, row.summary.messageCount);
+          }
+        }
+      }),
     );
   }
 
@@ -197,6 +218,7 @@ export class CodexSessionCatalog {
       const projectPath = canonicalizeProjectPath(entry.cwd);
       manifestOnlyRows.set(entry.id, {
         projectPath,
+        rolloutPath: entry.filePath,
         summary: {
           id: entry.id,
           projectId: encodeProjectId(projectPath) as UrlProjectId,
@@ -211,6 +233,7 @@ export class CodexSessionCatalog {
         },
       });
     }
+    await this.fillMissingTitles([...manifestOnlyRows.values()]);
     if (this.snapshot !== snapshot) return;
     this.manifestOnlyRows = manifestOnlyRows;
     const stateDbRows = snapshot.sessions
@@ -252,11 +275,17 @@ export class CodexSessionCatalog {
     if (sessions.length === 0) return null;
     const manifestRows = new Map<string, CatalogRow>();
     for (const session of sessions) {
-      const cwd = manifest.byId.get(session.id)?.cwd;
+      const entry = manifest.byId.get(session.id);
+      const cwd = entry?.cwd;
       if (!cwd) continue;
       const projectPath = canonicalizeProjectPath(cwd);
-      manifestRows.set(session.id, { summary: session, projectPath });
+      manifestRows.set(session.id, {
+        summary: session,
+        projectPath,
+        rolloutPath: entry?.filePath,
+      });
     }
+    await this.fillMissingTitles([...manifestRows.values()]);
     this.manifestOnlyRows = manifestRows;
     return this.composeSnapshot([], manifestRows);
   }

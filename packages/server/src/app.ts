@@ -18,6 +18,7 @@ import type { FeishuDurableInbox } from "./channels/feishu/inbox.js";
 import type { FeishuOperationStore } from "./channels/feishu/operation-store.js";
 import type { FeishuChannelService } from "./channels/feishu/service.js";
 import { CodexAccountsService } from "./codex-bridge/CodexAccountsService.js";
+import { readCodexAccountProfiles } from "./codex-bridge/codex-account-home.js";
 import type { CodexBridgeController } from "./codex-bridge/types.js";
 import { CodexAppServerHistoryReader } from "./codex-history/CodexAppServerHistoryReader.js";
 import { getCodexHistoryClient } from "./codex-history/CodexHistoryClient.js";
@@ -684,7 +685,23 @@ export function createApp(options: AppOptions): AppResult {
         }),
     );
   const codexHistoryClient =
-    codexEnabled && !options.sdk ? getCodexHistoryClient() : undefined;
+    codexEnabled && !options.sdk
+      ? getCodexHistoryClient({
+          resolveThreadCodexHome: (sessionId) => {
+            const accountId =
+              options.sessionMetadataService?.getCodexAccountId?.(sessionId);
+            if (!accountId || accountId === "default") return undefined;
+            // History databases are private per home even though rollouts are
+            // shared. Reading another home's empty projection is not history.
+            const profile = readCodexAccountProfiles(options.dataDir).find(
+              (account) => account.id === accountId,
+            );
+            if (!profile)
+              throw new Error("Codex history account is unavailable");
+            return profile.codexHome;
+          },
+        })
+      : undefined;
   const codexAppServerHistoryReader = codexHistoryClient
     ? new CodexAppServerHistoryReader({ client: codexHistoryClient })
     : undefined;

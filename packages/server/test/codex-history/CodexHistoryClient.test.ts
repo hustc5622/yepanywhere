@@ -23,6 +23,95 @@ function transport(
 }
 
 describe("CodexHistoryClient", () => {
+  it("routes concurrent thread reads to their owning homes without changing global credentials", async () => {
+    const originalHome = process.env.CODEX_HOME;
+    const transports = new Map<string, CodexHistoryAppServerTransport>();
+    const accounts = new Map([
+      ["thread-a", "/accounts/a"],
+      ["thread-b", "/accounts/b"],
+    ]);
+    const factory = vi.fn(({ env }: { env: NodeJS.ProcessEnv }) => {
+      const home = env.CODEX_HOME ?? "default";
+      const fake = transport(async (method) => {
+        if (method === "initialize") return { userAgent: "history/0.155.1" };
+        if (method === "thread/read") return { thread: { id: home } };
+        // The account DB contains history; the ambient DB has no items.
+        return {
+          data: home.startsWith("/accounts/") ? [{ id: `final:${home}` }] : [],
+          nextCursor: null,
+        };
+      });
+      transports.set(home, fake);
+      return fake;
+    });
+    const client = new CodexHistoryClient({
+      command: "codex",
+      clientFactory: factory,
+      resolveThreadCodexHome: (threadId) => accounts.get(threadId),
+    });
+    try {
+      const [a, b] = await Promise.all([
+        client.readThread({ threadId: "thread-a", includeTurns: false }),
+        client.readThread({ threadId: "thread-b", includeTurns: false }),
+      ]);
+      expect(a.thread.id).toBe("/accounts/a");
+      expect(b.thread.id).toBe("/accounts/b");
+      expect((await client.listTurns({ threadId: "thread-a" })).data).toEqual([
+        { id: "final:/accounts/a" },
+      ]);
+      expect((await client.listItems({ threadId: "thread-b" })).data).toEqual([
+        { id: "final:/accounts/b" },
+      ]);
+      expect(factory).toHaveBeenCalledTimes(2);
+      expect((await client.listThreads({ useStateDbOnly: true })).data).toEqual(
+        [],
+      );
+      expect(factory).toHaveBeenCalledTimes(3);
+      expect(process.env.CODEX_HOME).toBe(originalHome);
+
+      // Re-resolve bindings for each request; don't cache a thread's old home.
+      accounts.set("thread-a", "/accounts/b");
+      expect(
+        (await client.readThread({ threadId: "thread-a", includeTurns: false }))
+          .thread.id,
+      ).toBe("/accounts/b");
+      expect(factory).toHaveBeenCalledTimes(3);
+    } finally {
+      client.shutdown();
+    }
+    for (const fake of transports.values())
+      expect(fake.close).toHaveBeenCalled();
+  });
+
+  it("isolates one account's timeout and backoff from another account", async () => {
+    const factory = vi.fn(({ env }: { env: NodeJS.ProcessEnv }) =>
+      transport(async (method) => {
+        if (method === "initialize") return { userAgent: "history/0.155.1" };
+        if (env.CODEX_HOME === "/accounts/broken") return new Promise(() => {});
+        return { data: [{ id: "complete-answer" }], nextCursor: null };
+      }),
+    );
+    const client = new CodexHistoryClient({
+      command: "codex",
+      requestTimeoutMs: 5,
+      clientFactory: factory,
+      resolveThreadCodexHome: (id) => `/accounts/${id}`,
+    });
+    try {
+      await expect(
+        client.listItems({ threadId: "broken" }),
+      ).rejects.toMatchObject({ reason: "timeout" });
+      await expect(
+        client.listItems({ threadId: "broken" }),
+      ).rejects.toMatchObject({ reason: "backoff" });
+      expect((await client.listItems({ threadId: "healthy" })).data).toEqual([
+        { id: "complete-answer" },
+      ]);
+    } finally {
+      client.shutdown();
+    }
+  });
+
   it("uses one long-lived apps/plugins-disabled transport and single-flights reads", async () => {
     let resolveRead!: (value: unknown) => void;
     const readPromise = new Promise((resolve) => {

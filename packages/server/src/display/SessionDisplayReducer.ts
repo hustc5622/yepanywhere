@@ -603,6 +603,7 @@ export class SessionDisplayReducer {
         });
         return;
       }
+      const startsNewRun = !replay && runId && runId !== this.currentRun;
       this.currentRun = runId ?? "session";
       this.currentSection = `turn:${runId ?? rawId}`;
       this.currentGroup = undefined;
@@ -615,6 +616,7 @@ export class SessionDisplayReducer {
           ...(string(message.tempId) ? { tempId: string(message.tempId) } : {}),
         },
       });
+      if (startsNewRun) this.setRuntime("running");
       return;
     }
     if (runId) this.currentRun = runId;
