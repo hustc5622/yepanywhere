@@ -672,6 +672,96 @@ describe("SessionIndexService", () => {
       },
     );
 
+    it("refreshes a modified Pi session on the stale list path", async () => {
+      const eventBus = new EventBus();
+      const piService = new SessionIndexService({
+        dataDir,
+        projectsDir,
+        eventBus,
+        fullValidationIntervalMs: 60_000,
+        fullValidationMinIntervalMs: 60_000,
+      });
+      await piService.initialize();
+
+      const piDir = join(testDir, "pi-sessions");
+      await mkdir(piDir, { recursive: true });
+      const piSessionId = "01a0d292-23f4-7697-b039-1d66a9ca6a9a";
+      const piFile = join(
+        piDir,
+        `2026-09-24T08-39-47-956Z_${piSessionId}.jsonl`,
+      );
+      await writeFile(piFile, "interrupted\n");
+
+      const piReader: ISessionReader = {
+        getIndexScopeKey: (dir) => `pi::${dir}::/tmp/project`,
+        listSessionFiles: async () => [
+          { sessionId: piSessionId, filePath: piFile },
+        ],
+        getSessionFilePath: async () => piFile,
+        getSessionSummaryIfChanged: async (
+          sessionId,
+          scopedProjectId,
+          cachedMtime,
+          cachedSize,
+        ) => {
+          const stats = await stat(piFile);
+          if (stats.mtimeMs === cachedMtime && stats.size === cachedSize) {
+            return null;
+          }
+          const summary = await piReader.getSessionSummary(
+            sessionId,
+            scopedProjectId,
+          );
+          return summary
+            ? { summary, mtime: stats.mtimeMs, size: stats.size }
+            : null;
+        },
+        getSessionSummary: async (sessionId, scopedProjectId) => {
+          const status = (await readFile(piFile, "utf-8")).trim();
+          return {
+            id: sessionId,
+            projectId: scopedProjectId,
+            title: "pi",
+            fullTitle: "pi",
+            createdAt: "2026-09-24T08:39:47.956Z",
+            updatedAt: "2026-09-24T08:39:47.956Z",
+            messageCount: 2,
+            ownership: { owner: "none" },
+            provider: "pi",
+            lastTurnStatus: status as SessionSummary["lastTurnStatus"],
+          };
+        },
+        getAgentMappings: async () => [],
+        getAgentSession: async () => null,
+      };
+
+      const first = await piService.getSessionsWithCache(
+        piDir,
+        projectId,
+        piReader,
+      );
+      expect(first[0]?.lastTurnStatus).toBe("interrupted");
+
+      await writeFile(piFile, "completed\n");
+      eventBus.emit({
+        type: "file-change",
+        provider: "pi",
+        path: piFile,
+        relativePath: `--tmp-project--/${piFile.split("/").at(-1)}`,
+        changeType: "modify",
+        timestamp: new Date().toISOString(),
+        fileType: "session",
+      });
+
+      const refreshed = await piService.getSessionsWithCache(
+        piDir,
+        projectId,
+        piReader,
+        { allowStale: true },
+      );
+      expect(refreshed[0]?.lastTurnStatus).toBe("completed");
+    });
+
     it.each(["gemini", "kimi"] as const)(
       "does not leak a modified %s session into another project scope",
       async (provider) => {
