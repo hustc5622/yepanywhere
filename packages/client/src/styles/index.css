@@ -1248,13 +1248,18 @@ h2 {
 
 /* Keep the attachment mirror in the textarea's scrolling coordinate space.
    A dedicated container also follows layout shifts from account/usage cards. */
-.new-session-composer {
+.new-session-composer,
+.message-input-composer {
   position: relative;
   min-width: 0;
 }
 
-.new-session-composer > textarea {
+.new-session-composer > textarea,
+.message-input-composer > textarea {
   display: block;
+  width: 100%;
+  margin: 0;
+  box-sizing: border-box;
 }
 
 .new-session-form-textarea {
@@ -5937,6 +5942,8 @@ a.sidebar-nav-item {
 /* Inline attachment tokens in the composer */
 .composer-token-mirror {
   position: absolute;
+  inset: 0;
+  box-sizing: border-box;
   z-index: 1;
   margin: 0;
   overflow: hidden;

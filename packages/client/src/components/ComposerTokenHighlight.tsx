@@ -37,7 +37,6 @@ const MIRRORED_STYLES = [
   "borderBottomWidth",
   "borderLeftWidth",
   "borderRadius",
-  "boxSizing",
 ] as const;
 
 interface Props {
@@ -79,10 +78,9 @@ export function ComposerTokenHighlight({
     for (const prop of MIRRORED_STYLES) {
       mirror.style[prop] = computed[prop];
     }
-    mirror.style.top = `${textarea.offsetTop}px`;
-    mirror.style.left = `${textarea.offsetLeft}px`;
-    mirror.style.width = `${textarea.offsetWidth}px`;
-    mirror.style.height = `${textarea.offsetHeight}px`;
+    // CSS pins both layers to the same textarea-only container. Do not cache
+    // layout coordinates here: mobile focus/keyboard scrolling can move the
+    // input without changing its size (and without a ResizeObserver callback).
     // A visible scrollbar shrinks the textarea's content box; mirror that with
     // extra right padding so line wrapping stays identical.
     const scrollbarWidth =

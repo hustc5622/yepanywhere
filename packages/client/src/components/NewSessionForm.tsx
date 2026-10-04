@@ -1866,14 +1866,6 @@ export function NewSessionForm({
   const inputArea = (
     <>
       <div className="new-session-composer">
-        {hasInlineTokens && (
-          <ComposerTokenHighlight
-            textareaRef={textareaRef}
-            text={displayText}
-            names={pendingFileNames}
-            onTokenClick={handleTokenClick}
-          />
-        )}
         <textarea
           ref={textareaRef}
           value={displayText}
@@ -1888,6 +1880,14 @@ export function NewSessionForm({
           rows={rows}
           className={`new-session-form-textarea${hasInlineTokens ? " has-token-mirror" : ""}`}
         />
+        {hasInlineTokens && (
+          <ComposerTokenHighlight
+            textareaRef={textareaRef}
+            text={displayText}
+            names={pendingFileNames}
+            onTokenClick={handleTokenClick}
+          />
+        )}
       </div>
       <div className="new-session-form-toolbar">
         <div className="new-session-form-toolbar-left">

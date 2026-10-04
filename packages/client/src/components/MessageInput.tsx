@@ -799,37 +799,39 @@ export function MessageInput({
             ))}
           </div>
         )}
-        {hasInlineTokens && !collapsed && (
-          <ComposerTokenHighlight
-            textareaRef={textareaRef}
-            text={displayText}
-            names={attachmentNames}
-            onTokenClick={handleTokenClick}
+        <div className="message-input-composer">
+          <textarea
+            ref={textareaRef}
+            className={hasInlineTokens && !collapsed ? "has-token-mirror" : ""}
+            value={displayText}
+            onChange={(e) => {
+              // If user edits while recording, only update committed text
+              // This clears interim since they're now typing
+              setInterimTranscript("");
+              setDismissedCompletionKey(null);
+              setCursorPosition(e.target.selectionStart);
+              setText(e.target.value);
+            }}
+            onKeyDown={handleKeyDown}
+            onKeyUp={updateCursorPosition}
+            onClick={updateCursorPosition}
+            onSelect={updateCursorPosition}
+            onPaste={handlePaste}
+            placeholder={
+              externalCollapsed ? t("messageInputContinueAbove") : placeholder
+            }
+            disabled={disabled}
+            rows={collapsed ? 1 : 3}
           />
-        )}
-        <textarea
-          ref={textareaRef}
-          className={hasInlineTokens && !collapsed ? "has-token-mirror" : ""}
-          value={displayText}
-          onChange={(e) => {
-            // If user edits while recording, only update committed text
-            // This clears interim since they're now typing
-            setInterimTranscript("");
-            setDismissedCompletionKey(null);
-            setCursorPosition(e.target.selectionStart);
-            setText(e.target.value);
-          }}
-          onKeyDown={handleKeyDown}
-          onKeyUp={updateCursorPosition}
-          onClick={updateCursorPosition}
-          onSelect={updateCursorPosition}
-          onPaste={handlePaste}
-          placeholder={
-            externalCollapsed ? t("messageInputContinueAbove") : placeholder
-          }
-          disabled={disabled}
-          rows={collapsed ? 1 : 3}
-        />
+          {hasInlineTokens && !collapsed && (
+            <ComposerTokenHighlight
+              textareaRef={textareaRef}
+              text={displayText}
+              names={attachmentNames}
+              onTokenClick={handleTokenClick}
+            />
+          )}
+        </div>
 
         {/* Attachment chips - only for files not referenced inline in the text */}
         {!collapsed &&
