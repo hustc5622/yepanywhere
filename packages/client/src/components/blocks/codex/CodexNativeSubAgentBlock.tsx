@@ -1,284 +1,238 @@
-import type { ReactNode } from "react";
-import { Link } from "react-router-dom";
+import { useOptionalSessionMetadata } from "../../../contexts/SessionMetadataContext";
+import { useSubagentDetail } from "../../../contexts/SubagentDetailContext";
 import { useOptionalI18n } from "../../../i18n";
-
-type Translate = NonNullable<ReturnType<typeof useOptionalI18n>>["t"];
+import {
+  type CodexAgentTranslate,
+  codexAgentFallbackText,
+  codexAgentStatusLabel,
+  normalizeCodexAgentStatus,
+} from "../../../lib/codexAgentStatus";
 
 interface Props {
-  /** Activity kind, independent of the containing item lifecycle. */
   kind?: string;
-  /** V2: agent path (e.g. "/root/task_name"). */
   agentPath?: string;
-  /** V2: sub-agent thread id. */
   agentThreadId?: string;
   projectId?: string;
-
-  /** Collaboration tool ("spawnAgent" | "sendInput" | "wait" | ...). */
   tool?: string;
-  /** V1: model used by the spawned agent. */
   model?: string;
-  /** V1: reasoning effort. */
   reasoningEffort?: string;
-  /** V1: per-agent status map. */
   agentsStates?: unknown;
-
+  receiverThreadIds?: unknown[];
+  prompt?: string;
+  /** The collaboration operation's lifecycle, not the child agent's status. */
+  status?: string;
   lifecycle: "started" | "completed";
 }
 
 function asString(value: unknown): string | undefined {
-  return typeof value === "string" && value.length > 0 ? value : undefined;
+  return typeof value === "string" && value.trim() ? value : undefined;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  return value as Record<string, unknown>;
+  return value && typeof value === "object" && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : null;
 }
 
-interface AgentState {
-  threadId: string;
-  nickname: string;
-  role: string;
-  status: string;
-  lastMessage?: string;
+function taskName(path: string | undefined, fallback: string): string {
+  return path?.split("/").filter(Boolean).at(-1) ?? fallback;
 }
 
-/**
- * Extract collaboration-agent status entries from the `agentsStates` map.
- *
- * The map key is the agent thread id. Current `CollabAgentState` values carry
- * only `status` and optional `message`; older payloads may also include
- * nickname/role aliases, which are preserved when present.
- */
-function extractAgentStates(value: unknown): AgentState[] {
-  const record = asRecord(value);
-  if (!record) return [];
-
-  return Object.entries(record).flatMap(([threadId, raw]) => {
-    const state = asRecord(raw);
-    if (!state) return [];
-    const nickname = asString(state.nickname) ?? asString(state.agent_nickname);
-    const role =
-      asString(state.role) ?? asString(state.agent_type) ?? "default";
-    const status = asString(state.status) ?? "unknown";
-    const lastMessage = asString(state.message) ?? asString(state.last_message);
-    return [
-      {
-        threadId,
-        nickname: nickname ?? threadId,
-        role,
-        status,
-        lastMessage,
-      },
-    ];
-  });
-}
-
-function collabToolLabel(tool: string, t: Translate | undefined): string {
-  switch (tool) {
-    case "spawnAgent":
-      return t?.("codexNativeSubagentSpawned") ?? "Spawned";
-    case "sendInput":
-      return t?.("codexNativeSubagentSentInput") ?? "Sent input to";
-    case "wait":
-      return t?.("codexNativeSubagentWaiting") ?? "Waiting for";
-    case "closeAgent":
-      return t?.("codexNativeSubagentClosed") ?? "Closed";
-    case "resumeAgent":
-      return t?.("codexNativeSubagentResuming") ?? "Resuming";
-    default:
-      return tool;
-  }
-}
-
-function collabTitle(
-  tool: string,
-  agents: AgentState[],
-  t: Translate | undefined,
-): ReactNode {
-  const label = collabToolLabel(tool, t);
-  if (agents.length === 0) return <span>{label}</span>;
-  const first = agents[0];
-  if (!first) return <span>{label}</span>;
-  return (
-    <span>
-      {label}{" "}
-      <code className="codex-native-subagent-nickname">{first.nickname}</code>
-      {first.role && first.role !== "default" && (
-        <span className="codex-native-subagent-role"> [{first.role}]</span>
-      )}
-    </span>
-  );
-}
-
-function v2Title(
+function activityLabel(
   kind: string | undefined,
-  agentPath: string | undefined,
-  agentThreadId: string | undefined,
-  t: Translate | undefined,
-): ReactNode {
-  const path = asString(agentPath);
-  const display =
-    path ??
-    asString(agentThreadId) ??
-    t?.("codexNativeSubagentFallback") ??
-    "agent";
+  t: CodexAgentTranslate,
+): string {
   switch (kind?.toLowerCase()) {
     case "started":
-      return (
-        t?.("codexSubagentActivityStarted", { agent: display }) ??
-        `Started ${display}`
-      );
+      return t("codexAgentTaskStarted");
+    // Older/local Codex builds also emit a completed activity extension.
     case "completed":
-      return (
-        t?.("codexSubagentActivityCompleted", { agent: display }) ??
-        `${display} completed a task`
-      );
+      return t("codexAgentTaskCompleted");
     case "interrupted":
-      return (
-        t?.("codexSubagentActivityInterrupted", { agent: display }) ??
-        `Interrupted ${display}`
-      );
+      return t("codexAgentTaskInterrupted");
     case "interacted":
-      return (
-        t?.("codexSubagentActivityInteracted", { agent: display }) ??
-        `Sent a message to ${display}`
-      );
+      return t("codexAgentInteraction");
     default:
-      return (
-        t?.("codexSubagentActivityUnknown", { agent: display }) ??
-        `Activity from ${display}`
-      );
+      return t("codexAgentActivity");
   }
 }
 
-function statusClassName(status: string): string {
-  switch (status) {
-    case "running":
-    case "in_progress":
-    case "inProgress":
-      return "running";
-    case "completed":
-    case "complete":
-      return "completed";
-    case "errored":
-    case "error":
-    case "failed":
-      return "errored";
-    case "interrupted":
-      return "interrupted";
+function toolLabel(
+  tool: string,
+  status: string | undefined,
+  t: CodexAgentTranslate,
+): string {
+  if (status === "failed") return t("codexAgentOperationFailed");
+  switch (tool) {
+    case "spawnAgent":
+      return status === "inProgress"
+        ? t("codexAgentStatusStarting")
+        : t("codexNativeSubagentSpawned");
+    case "sendInput":
+      return t("codexNativeSubagentSentInput");
+    case "wait":
+      return t("codexNativeSubagentWaiting");
+    case "closeAgent":
+      return t("codexNativeSubagentClosed");
+    case "resumeAgent":
+      return t("codexNativeSubagentResuming");
     default:
-      return "unknown";
+      return t("codexAgentActivity");
   }
 }
 
-function statusLabel(status: string, t: Translate | undefined): string {
-  switch (status) {
-    case "running":
-    case "in_progress":
-    case "inProgress":
-      return t?.("subagentStatusRunning") ?? "running";
-    case "completed":
-    case "complete":
-      return t?.("subagentStatusCompleted") ?? "completed";
-    case "errored":
-    case "error":
-    case "failed":
-      return t?.("subagentStatusFailed") ?? "failed";
-    case "interrupted":
-      return t?.("subagentStatusInterrupted") ?? "interrupted";
-    case "queued":
-      return t?.("subagentStatusQueued") ?? "queued";
-    case "starting":
-      return t?.("subagentStatusStarting") ?? "starting";
-    case "suspended":
-      return t?.("subagentStatusSuspended") ?? "suspended";
-    default:
-      return status;
-  }
+function messagePreview(message: string): string {
+  const text = message.replace(/\s+/g, " ").trim();
+  const characters = Array.from(text);
+  return characters.length > 240
+    ? `${characters.slice(0, 240).join("")}…`
+    : text;
 }
 
-/**
- * Renders Codex sub-agent ThreadItems.
- *
- * Handles two variants:
- * - `subAgentActivity`: lightweight lifecycle marker (started/interacted/
- *   interrupted/completed) with an agent path.
- * - `collabAgentToolCall`: spawn/sendInput/wait/close/resume with a
- *   per-agent status map (`agentsStates`).
- *
- * Visual style mirrors the Codex TUI `multi_agents.rs`: nickname in cyan,
- * role in brackets, model/reasoning in muted tone, per-agent status rows.
- */
+/** Compact task cards open a child transcript inside its parent conversation. */
 export function CodexNativeSubAgentBlock(props: Props) {
-  const i18n = useOptionalI18n();
-  const t = i18n?.t;
-  const { kind, agentPath, agentThreadId, tool, model, reasoningEffort } =
-    props;
+  const t = useOptionalI18n()?.t ?? codexAgentFallbackText;
+  const session = useOptionalSessionMetadata();
+  const detail = useSubagentDetail();
+  const parentSessionId = session?.sessionId;
+  const canOpen = !!(detail && parentSessionId);
 
-  // collabAgentToolCall path
-  if (tool) {
-    const agents = extractAgentStates(props.agentsStates);
+  const openButton = (
+    agentId: string | undefined,
+    name: string,
+    status?: string,
+  ) =>
+    canOpen && agentId && agentId !== parentSessionId && name !== "/root" ? (
+      <button
+        type="button"
+        className="codex-native-subagent-open"
+        aria-label={t("codexAgentDetailsLabel", { agent: name })}
+        onClick={() =>
+          detail?.openAgent({
+            agentId,
+            parentSessionId,
+            name,
+            ...(status ? { status } : {}),
+          })
+        }
+      >
+        {t("codexAgentDetails")}
+        <span aria-hidden="true"> →</span>
+      </button>
+    ) : null;
+
+  if (props.tool) {
+    const states = asRecord(props.agentsStates) ?? {};
+    // receiverThreadIds is authoritative even while agentsStates is empty.
+    const ids = [
+      ...new Set([
+        ...(props.receiverThreadIds ?? []).filter(
+          (id): id is string => !!asString(id),
+        ),
+        ...Object.keys(states),
+      ]),
+    ];
     return (
       <div className="codex-native-subagent codex-native-subagent-collab">
-        <div className="codex-native-subagent-title">
-          {collabTitle(tool, agents, t)}
-          {model && (
+        <div className="codex-native-subagent-heading">
+          <span className="codex-native-subagent-event">
+            {toolLabel(props.tool, props.status, t)}
+          </span>
+          {props.model && (
             <span className="codex-native-subagent-model">
-              {" "}
-              {model}
-              {reasoningEffort ? ` · ${reasoningEffort}` : ""}
+              {props.model}
+              {props.reasoningEffort ? ` · ${props.reasoningEffort}` : ""}
             </span>
           )}
         </div>
-        {agents.length > 0 && (
-          <div className="codex-native-subagent-states">
-            {agents.map((agent) => (
+        <div className="codex-native-subagent-states">
+          {ids.map((threadId) => {
+            const state = asRecord(states[threadId]);
+            const path =
+              asString(state?.agentPath) ?? asString(state?.agent_path);
+            const nickname =
+              asString(state?.nickname) ?? asString(state?.agent_nickname);
+            const role = asString(state?.role) ?? asString(state?.agent_type);
+            const name = taskName(path, nickname ?? threadId.slice(0, 8));
+            const normalized = normalizeCodexAgentStatus(
+              detail?.statuses[threadId] ?? states[threadId],
+            );
+            const lastMessage =
+              normalizeCodexAgentStatus(states[threadId]).message ??
+              asString(state?.last_message);
+            return (
               <div
-                key={agent.threadId}
-                className={`codex-native-subagent-state status-${statusClassName(agent.status)}`}
+                key={threadId}
+                className={`codex-native-subagent-state status-${normalized.status}`}
               >
-                <span className="codex-native-subagent-state-name">
-                  {agent.nickname}
-                </span>
-                {agent.role && agent.role !== "default" && (
-                  <span className="codex-native-subagent-state-role">
-                    [{agent.role}]
-                  </span>
-                )}
-                <span className="codex-native-subagent-state-status">
-                  {statusLabel(agent.status, t)}
-                </span>
-                {agent.lastMessage && (
-                  <span className="codex-native-subagent-state-message">
-                    {agent.lastMessage}
-                  </span>
+                <div className="codex-native-subagent-info">
+                  <div className="codex-native-subagent-title">
+                    <span className="codex-native-subagent-name">{name}</span>
+                    {role && role !== "default" && (
+                      <span className="codex-native-subagent-role">{role}</span>
+                    )}
+                    <span className="codex-native-subagent-state-status">
+                      {codexAgentStatusLabel(normalized.status, t)}
+                    </span>
+                  </div>
+                  <code className="codex-native-subagent-path">
+                    {path ?? threadId}
+                  </code>
+                  {lastMessage && (
+                    <p className="codex-native-subagent-state-message">
+                      {messagePreview(lastMessage)}
+                    </p>
+                  )}
+                </div>
+                {openButton(
+                  threadId,
+                  path ?? nickname ?? threadId,
+                  normalized.status,
                 )}
               </div>
-            ))}
-          </div>
-        )}
+            );
+          })}
+        </div>
       </div>
     );
   }
 
-  // subAgentActivity path
+  const name = taskName(
+    props.agentPath,
+    props.agentThreadId?.slice(0, 8) ?? t("codexNativeSubagentFallback"),
+  );
+  const verifiedStatus = props.agentThreadId
+    ? detail?.statuses[props.agentThreadId]
+    : undefined;
+  const normalized = verifiedStatus
+    ? normalizeCodexAgentStatus(verifiedStatus)
+    : undefined;
   return (
     <div className="codex-native-subagent codex-native-subagent-activity">
-      <div className="codex-native-subagent-title">
-        {v2Title(kind, agentPath, agentThreadId, t)}
+      <div className="codex-native-subagent-info">
+        <div className="codex-native-subagent-title">
+          <span className="codex-native-subagent-name">{name}</span>
+          {normalized && (
+            <span
+              className={`codex-native-subagent-state-status status-${normalized.status}`}
+            >
+              {codexAgentStatusLabel(normalized.status, t)}
+            </span>
+          )}
+        </div>
+        <div className="codex-native-subagent-event">
+          {activityLabel(props.kind, t)}
+        </div>
+        {(props.agentPath || props.agentThreadId) && (
+          <code className="codex-native-subagent-path">
+            {props.agentPath ?? props.agentThreadId}
+          </code>
+        )}
       </div>
-      {props.projectId && agentThreadId && (
-        <Link
-          className="codex-native-subagent-link"
-          to={`/projects/${encodeURIComponent(props.projectId)}/sessions/${encodeURIComponent(agentThreadId)}`}
-          aria-label={
-            t?.("codexSubagentOpenConversation", {
-              agent: agentPath ?? agentThreadId,
-            }) ?? `View conversation with ${agentPath ?? agentThreadId}`
-          }
-        >
-          {t?.("codexSubagentViewConversation") ?? "View conversation"}
-        </Link>
+      {openButton(
+        props.agentThreadId,
+        props.agentPath ?? name,
+        normalized?.status,
       )}
     </div>
   );

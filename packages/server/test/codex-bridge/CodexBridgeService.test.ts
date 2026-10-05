@@ -2152,6 +2152,133 @@ describe("CodexBridgeService", () => {
     }
   });
 
+  it("preserves spawn ancestry across V2 sibling messages and root activity", async () => {
+    const client = await connect(`ws://127.0.0.1:${bridgePort}`);
+    try {
+      await waitFor(() => upstreamSocket !== null);
+      const rootId = "root-thread";
+      const firstId = "first-child";
+      const secondId = "second-child";
+      const rootStarted = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          method: "thread/started",
+          params: {
+            thread: {
+              id: rootId,
+              preview: "Coordinate workers",
+              cwd: "/tmp/project-ancestry",
+              source: "vscode",
+              threadSource: "user",
+              status: { type: "active", activeFlags: [] },
+            },
+          },
+        }),
+      );
+      await rootStarted;
+
+      let sequence = 0;
+      const sendActivity = async (
+        sender: string,
+        target: string,
+        kind: string,
+        agentPath: string,
+      ) => {
+        const forwarded = waitForJson(client);
+        upstreamSocket?.send(
+          JSON.stringify({
+            method: "item/completed",
+            params: {
+              threadId: sender,
+              turnId: "active-turn",
+              item: {
+                type: "subAgentActivity",
+                id: `activity-${++sequence}`,
+                kind,
+                agentThreadId: target,
+                agentPath,
+              },
+            },
+          }),
+        );
+        await forwarded;
+      };
+
+      await sendActivity(rootId, firstId, "started", "/root/first");
+      await sendActivity(rootId, secondId, "started", "/root/second");
+      const { sessions } = bridge as unknown as {
+        sessions: Map<
+          string,
+          {
+            parentThreadId?: string;
+            agentPath?: string;
+            activity: string;
+          }
+        >;
+      };
+      await sendActivity(rootId, secondId, "interrupted", "/root/second");
+      expect(sessions.get(secondId)?.activity).toBe("idle");
+      // Both send_message and followup_task emit Interacted on the sender's
+      // thread. Bidirectional sibling messages must not create a parent cycle.
+      await sendActivity(firstId, secondId, "interacted", "/root/second");
+      expect(sessions.get(secondId)?.activity).toBe("idle");
+      await sendActivity(secondId, firstId, "interacted", "/root/first");
+      expect(sessions.get(firstId)?.activity).toBe("in-turn");
+      await sendActivity(rootId, firstId, "completed", "/root/first");
+      expect(sessions.get(firstId)?.activity).toBe("idle");
+      for (const kind of ["interacted", "interrupted", "completed"]) {
+        await sendActivity(firstId, rootId, kind, "/root");
+        await sendActivity(rootId, rootId, kind, "/root");
+        await sendActivity(firstId, "unknown-target", kind, "/root/unknown");
+      }
+      // Replays confirm the existing relationship. Conflicting edges must
+      // not rewrite a child's parent or turn an ancestor into a descendant.
+      await sendActivity(rootId, firstId, "started", "/root/first");
+      await sendActivity(secondId, firstId, "started", "/root/second/first");
+      await sendActivity(rootId, rootId, "started", "/root");
+      await sendActivity(firstId, rootId, "started", "/root/first/root");
+
+      expect(bridge.listSessions().map((session) => session.id)).toEqual([
+        rootId,
+      ]);
+      expect(bridge.getSessionView(rootId)).not.toBeNull();
+      expect(sessions.get(firstId)).toMatchObject({
+        parentThreadId: rootId,
+        agentPath: "/root/first",
+      });
+      expect(sessions.get(secondId)).toMatchObject({
+        parentThreadId: rootId,
+        agentPath: "/root/second",
+      });
+      expect(sessions.get(rootId)?.parentThreadId).toBeUndefined();
+      expect(sessions.has("unknown-target")).toBe(false);
+
+      // Approval ownership is a public consequence of the ancestry: it must
+      // still reach the top-level conversation after all these notifications.
+      const forwardedApproval = waitForJson(client);
+      upstreamSocket?.send(
+        JSON.stringify({
+          id: "sibling-approval",
+          method: "item/commandExecution/requestApproval",
+          params: {
+            threadId: secondId,
+            turnId: "child-turn",
+            itemId: "child-command",
+            command: "pnpm test",
+            cwd: "/tmp/project-ancestry",
+          },
+        }),
+      );
+      await forwardedApproval;
+      expect(bridge.getPendingInputRequest(rootId)).toMatchObject({
+        sessionId: rootId,
+        type: "tool-approval",
+      });
+    } finally {
+      client.close();
+    }
+  });
+
   it("distinguishes app-server subagents from ordinary user forks", async () => {
     const client = await connect(`ws://127.0.0.1:${bridgePort}`);
     try {

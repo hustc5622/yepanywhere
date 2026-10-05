@@ -2725,13 +2725,28 @@ export class CodexBridgeService implements CodexBridgeController {
 
     const itemType = getString(item.type);
     if (itemType === "subAgentActivity") {
-      const parentThreadId = getString(params?.threadId);
+      const senderThreadId = getString(params?.threadId);
       const agentThreadId = getString(item.agentThreadId);
-      if (!parentThreadId || !agentThreadId) return;
-      this.registerSubagentThread(parentThreadId, agentThreadId, {
-        agentPath: getString(item.agentPath),
-        activityKind: getString(item.kind),
-      });
+      if (!senderThreadId || !agentThreadId) return;
+      const kind = getString(item.kind);
+      // Only spawn establishes a parent edge. Messages can target siblings or
+      // even /root, so their emitting thread is not the recipient's parent.
+      if (kind === "started") {
+        this.registerSubagentThread(senderThreadId, agentThreadId, {
+          agentPath: getString(item.agentPath),
+        });
+      }
+      const record = this.sessions.get(agentThreadId);
+      if (!record?.isSubagent) return;
+      if (kind === "started") {
+        record.activity = "in-turn";
+      } else if (kind === "interrupted" || kind === "completed") {
+        record.activity = "idle";
+      }
+      // Interacted also represents send_message, which only queues input.
+      // A followup's actual turn/started notification establishes activity.
+      record.updatedAt = new Date().toISOString();
+      this.schedulePersist();
       return;
     }
 
@@ -2755,8 +2770,24 @@ export class CodexBridgeService implements CodexBridgeController {
   private registerSubagentThread(
     parentThreadId: string,
     threadId: string,
-    metadata: { agentPath?: string; activityKind?: string } = {},
+    metadata: { agentPath?: string } = {},
   ): void {
+    const existing = this.sessions.get(threadId);
+    if (
+      existing?.parentThreadId &&
+      existing.parentThreadId !== parentThreadId
+    ) {
+      return;
+    }
+    const ancestors = new Set<string>();
+    for (
+      let ancestor: string | undefined = parentThreadId;
+      ancestor;
+      ancestor = this.sessions.get(ancestor)?.parentThreadId
+    ) {
+      if (ancestor === threadId || ancestors.has(ancestor)) return;
+      ancestors.add(ancestor);
+    }
     const parent = this.sessions.get(parentThreadId);
     const record = this.ensureSessionRecord(threadId, {
       cwd: parent?.projectPath,
@@ -2766,14 +2797,6 @@ export class CodexBridgeService implements CodexBridgeController {
       agentPath: metadata.agentPath,
     });
 
-    if (
-      metadata.activityKind === "started" ||
-      metadata.activityKind === "interacted"
-    ) {
-      record.activity = "in-turn";
-    } else if (metadata.activityKind === "interrupted") {
-      record.activity = "idle";
-    }
     record.updatedAt = new Date().toISOString();
   }
 

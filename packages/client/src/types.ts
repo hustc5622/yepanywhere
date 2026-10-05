@@ -220,6 +220,10 @@ export interface Session extends SessionSummary {
  */
 export interface AgentSession {
   messages: Message[];
+  /** Inherited parent context is separate from this agent's own transcript. */
+  hasInheritedContext?: boolean;
+  /** Returned only when the inherited-context section is explicitly opened. */
+  inheritedMessages?: Message[];
   status: AgentStatusType;
   /** Resolved subagent type/profile (e.g. `explore`), when known. */
   agentType?: string;

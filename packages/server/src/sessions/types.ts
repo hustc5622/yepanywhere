@@ -175,13 +175,26 @@ export interface ISessionReader {
   getAgentSession(
     agentId: string,
     sessionId?: string,
+    options?: { includeInheritedContext?: boolean },
   ): Promise<{
     messages: Message[];
+    hasInheritedContext?: boolean;
+    inheritedMessages?: Message[];
     status: string;
     agentType?: string;
     metrics?: SubagentMetrics;
     descriptor?: SubagentDescriptor;
   } | null>;
+
+  /**
+   * Read a descendant anywhere in a session's agent tree. Implementations
+   * must verify persisted ancestry and project scope before returning data.
+   */
+  getAgentSessionInTree?(
+    agentId: string,
+    rootSessionId: string,
+    options?: { includeInheritedContext?: boolean },
+  ): ReturnType<ISessionReader["getAgentSession"]>;
 
   /**
    * Get the file path for a session by ID.

@@ -118,3 +118,120 @@ describe("Codex terminal turn session schema", () => {
     expect(parseCodexSessionEntry(JSON.stringify(raw))).toEqual(raw);
   });
 });
+
+describe("Codex paginated rollout ordinals", () => {
+  const timestamp = "2026-10-04T09:29:09.718Z";
+  const meta = {
+    id: "child-thread",
+    timestamp,
+    cwd: "/test/project",
+  };
+  const knownEntries = [
+    { type: "session_meta", payload: meta },
+    {
+      type: "response_item",
+      payload: {
+        type: "message",
+        role: "user",
+        content: [{ type: "input_text", text: "Child task" }],
+      },
+    },
+    {
+      type: "event_msg",
+      payload: { type: "user_message", message: "Child task" },
+    },
+    { type: "compacted", payload: { message: "Context summary" } },
+    {
+      type: "turn_context",
+      payload: { cwd: "/test/project", approval_policy: "never" },
+    },
+  ];
+
+  it.each(knownEntries)(
+    "retains the native ordinal on $type records",
+    (entry) => {
+      for (const ordinal of [0, 34, Number.MAX_SAFE_INTEGER]) {
+        const raw = { timestamp, ordinal, ...entry };
+        expect(CodexSessionEntrySchema.parse(raw)).toEqual(raw);
+        expect(parseCodexSessionEntry(JSON.stringify(raw))).toEqual(raw);
+      }
+    },
+  );
+
+  it.each(knownEntries)(
+    "keeps legacy $type records without ordinals unchanged",
+    (entry) => {
+      const raw = { timestamp, ...entry };
+      expect(CodexSessionEntrySchema.parse(raw)).toEqual(raw);
+      expect(parseCodexSessionEntry(JSON.stringify(raw))).toEqual(raw);
+      expect(parseCodexSessionEntry(JSON.stringify(raw))).not.toHaveProperty(
+        "ordinal",
+      );
+    },
+  );
+
+  it.each([
+    { type: "world_state", payload: { version: "future" } },
+    {
+      type: "event_msg",
+      payload: { type: "future_event", thread_id: "child-thread" },
+    },
+    { type: "response_item", payload: { type: "future_item" } },
+  ])(
+    "preserves ordinals through the forward-compatible fallback for $type",
+    (entry) => {
+      const raw = { timestamp, ordinal: 34, ...entry };
+      expect(parseCodexSessionEntry(JSON.stringify(raw))).toEqual(raw);
+    },
+  );
+
+  it.each([0, 34, Number.MAX_SAFE_INTEGER])(
+    "retains a child history boundary of %s and other metadata",
+    (boundary) => {
+      const raw = {
+        timestamp,
+        ordinal: 0,
+        type: "session_meta",
+        payload: {
+          ...meta,
+          subagent_history_start_ordinal: boundary,
+          history_mode: "paginated",
+          future_metadata: { retained: true },
+        },
+      };
+      expect(CodexSessionEntrySchema.parse(raw)).toEqual(raw);
+      expect(parseCodexSessionEntry(JSON.stringify(raw))).toEqual(raw);
+    },
+  );
+
+  it.each([-1, 0.5, Number.MAX_SAFE_INTEGER + 1, Number.POSITIVE_INFINITY])(
+    "rejects invalid or unsafe ordinal %s in both schema fields",
+    (ordinal) => {
+      expect(
+        CodexSessionEntrySchema.safeParse({
+          timestamp,
+          ordinal,
+          type: "session_meta",
+          payload: meta,
+        }).success,
+      ).toBe(false);
+      expect(
+        CodexSessionEntrySchema.safeParse({
+          timestamp,
+          type: "session_meta",
+          payload: { ...meta, subagent_history_start_ordinal: ordinal },
+        }).success,
+      ).toBe(false);
+    },
+  );
+
+  it("keeps the parser's existing raw fallback when schema validation fails", () => {
+    const raw = {
+      timestamp,
+      ordinal: -1,
+      type: "session_meta",
+      payload: { ...meta, subagent_history_start_ordinal: -1 },
+    };
+    expect(parseCodexSessionEntry(JSON.stringify(raw))).toEqual(raw);
+  });
+});

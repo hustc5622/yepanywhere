@@ -29,6 +29,7 @@ import { SessionMenu } from "../components/SessionMenu";
 import { SessionSearchBar } from "../components/SessionSearchBar";
 import { SessionTitleGenerationStatus } from "../components/SessionTitleGenerationStatus";
 import { SessionMessagesSkeleton } from "../components/Skeleton";
+import { SubagentDetailProvider } from "../components/SubagentDetailProvider";
 import { ToolApprovalPanel } from "../components/ToolApprovalPanel";
 import { TranscriptRendererProvider } from "../components/TranscriptRendererProvider";
 import { ProjectedToolStepRow } from "../components/blocks/ProjectedToolGroupRow";
@@ -2097,7 +2098,7 @@ function SessionPageContent({
     </svg>
   );
 
-  return (
+  const content = (
     <div
       className={
         isWideScreen
@@ -2384,7 +2385,7 @@ function SessionPageContent({
             <SessionMetadataProvider
               projectId={projectId}
               projectPath={project?.path ?? null}
-              sessionId={sessionId}
+              sessionId={actualSessionId}
             >
               <AgentContentProvider
                 agentContent={agentContent}
@@ -2770,5 +2771,15 @@ function SessionPageContent({
         />
       )}
     </div>
+  );
+  return (
+    <SubagentDetailProvider
+      key={`${projectId}:${actualSessionId}`}
+      projectId={projectId}
+      projectPath={project?.path ?? null}
+      sessionId={actualSessionId}
+    >
+      {content}
+    </SubagentDetailProvider>
   );
 }

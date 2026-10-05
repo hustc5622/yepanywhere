@@ -88,6 +88,7 @@ import {
   collectCodexResponseUserClientIds,
 } from "../codex/user-message-identity.js";
 import { normalizeKimiToolInput } from "../kimi/tool-input.js";
+import type { ThreadItem } from "../sdk/providers/codex-protocol/generated/v2/ThreadItem.js";
 import type {
   ContentBlock,
   Message,
@@ -1332,6 +1333,107 @@ interface CodexContextSnapshotOptions {
   directEditCallIds?: ReadonlySet<string>;
   responseImageGenerationIds?: ReadonlySet<string>;
   imageGenerationEndIds?: ReadonlySet<string>;
+  /** Child transcripts have no native overlay; root sessions keep their existing overlay. */
+  includeNativeCollaborationItems?: boolean;
+}
+
+type NativeCodexCollaborationItem = Extract<
+  ThreadItem,
+  { type: "subAgentActivity" | "collabAgentToolCall" }
+>;
+type NativeCodexAgentState = NonNullable<
+  Extract<ThreadItem, { type: "collabAgentToolCall" }>["agentsStates"][string]
+>;
+
+function normalizeCodexCollaborationState(
+  value: unknown,
+): NativeCodexAgentState | null {
+  // Core AgentStatus is a serde snake_case enum; payload-bearing variants
+  // serialize as { completed: string | null } / { errored: string }.
+  if (value === "pending_init") return { status: "pendingInit", message: null };
+  if (value === "not_found") return { status: "notFound", message: null };
+  if (value === "running" || value === "interrupted" || value === "shutdown") {
+    return { status: value, message: null };
+  }
+  if (!isRecord(value)) return null;
+  if (value.completed === null || typeof value.completed === "string") {
+    return { status: "completed", message: value.completed };
+  }
+  if (typeof value.errored === "string") {
+    return { status: "errored", message: value.errored };
+  }
+  return null;
+}
+
+/** Mirror core TurnItem -> app-server ThreadItem for persisted collaboration. */
+function normalizeCodexCollaborationItem(
+  value: unknown,
+): NativeCodexCollaborationItem | null {
+  if (!isRecord(value) || typeof value.id !== "string" || !value.id)
+    return null;
+  if (value.type === "SubAgentActivity") {
+    if (
+      (value.kind !== "started" &&
+        value.kind !== "interacted" &&
+        value.kind !== "interrupted" &&
+        value.kind !== "completed") ||
+      typeof value.agent_thread_id !== "string" ||
+      !value.agent_thread_id ||
+      typeof value.agent_path !== "string"
+    )
+      return null;
+    return {
+      type: "subAgentActivity",
+      id: value.id,
+      kind: value.kind,
+      agentThreadId: value.agent_thread_id,
+      agentPath: value.agent_path,
+    };
+  }
+  if (value.type !== "CollabAgentToolCall") return null;
+  const tools = {
+    spawn_agent: "spawnAgent",
+    send_input: "sendInput",
+    resume_agent: "resumeAgent",
+    wait: "wait",
+    close_agent: "closeAgent",
+  } as const;
+  if (
+    typeof value.tool !== "string" ||
+    !Object.hasOwn(tools, value.tool) ||
+    (value.status !== "in_progress" &&
+      value.status !== "completed" &&
+      value.status !== "failed" &&
+      value.status !== "interrupted") ||
+    typeof value.sender_thread_id !== "string"
+  )
+    return null;
+  const agentsStates: Record<string, NativeCodexAgentState> = {};
+  if (isRecord(value.agents_states)) {
+    for (const [threadId, state] of Object.entries(value.agents_states)) {
+      const normalized = normalizeCodexCollaborationState(state);
+      if (normalized) agentsStates[threadId] = normalized;
+    }
+  }
+  return {
+    type: "collabAgentToolCall",
+    id: value.id,
+    tool: tools[value.tool as keyof typeof tools],
+    status: value.status === "in_progress" ? "inProgress" : value.status,
+    senderThreadId: value.sender_thread_id,
+    receiverThreadIds: Array.isArray(value.receiver_thread_ids)
+      ? value.receiver_thread_ids.filter(
+          (id): id is string => typeof id === "string",
+        )
+      : [],
+    prompt: typeof value.prompt === "string" ? value.prompt : null,
+    model: typeof value.model === "string" ? value.model : null,
+    reasoningEffort:
+      typeof value.reasoning_effort === "string"
+        ? value.reasoning_effort
+        : null,
+    agentsStates,
+  };
 }
 
 function isCodexTokenCountImmediatelyAfterCompaction(
@@ -1461,6 +1563,7 @@ export function convertCodexEntries(
     ),
   );
   const emittedAsyncIds = new Set<string>();
+  const nativeCollaborationIndices = new Map<string, number>();
   const toolCallContexts = new Map<string, CodexToolCallContext>();
   const externalToolCalls: PendingExternalCodexToolCall[] = [];
   const responseItemImageGenerationIds =
@@ -1591,6 +1694,36 @@ export function convertCodexEntries(
     } else if (entry.type === "event_msg") {
       if (entry.payload.type === "item_completed") {
         const item = entry.payload.item as Record<string, unknown>;
+        const nativeItem = contextOptions.includeNativeCollaborationItems
+          ? normalizeCodexCollaborationItem(item)
+          : null;
+        if (nativeItem) {
+          const turnId = getCodexEventPayloadTurnId(entry.payload);
+          const key = `${turnId ?? ""}:${nativeItem.type}:${nativeItem.id}`;
+          const previousIndex = nativeCollaborationIndices.get(key);
+          if (previousIndex !== undefined) {
+            const previous = messages[previousIndex];
+            if (previous)
+              messages[previousIndex] = {
+                ...previous,
+                codexThreadItem: nativeItem,
+              };
+          } else {
+            nativeCollaborationIndices.set(key, messages.length);
+            messages.push({
+              uuid: `codex-native:${sessionId}:${key}`,
+              type: "system",
+              subtype: "codex_native_item",
+              timestamp: entry.timestamp,
+              codexThreadId: sessionId,
+              ...(turnId ? { codexTurnId: turnId } : {}),
+              codexThreadItemId: nativeItem.id,
+              codexThreadItemLifecycle: "completed",
+              codexThreadItem: nativeItem,
+            });
+          }
+          continue;
+        }
         const id = typeof item?.id === "string" ? item.id : undefined;
         const asyncMessage = id
           ? readCodexAsyncMessage(asyncItems.get(id))

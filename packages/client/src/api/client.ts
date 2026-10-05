@@ -1461,6 +1461,17 @@ export const api = {
       `/projects/${projectId}/sessions/${sessionId}/agents/${agentId}`,
     ),
 
+  /** Read a descendant only after the server verifies its root thread tree. */
+  getAgentSessionInTree: (
+    projectId: string,
+    rootSessionId: string,
+    agentId: string,
+    options?: { includeInheritedContext?: boolean },
+  ) =>
+    fetchJSON<AgentSession>(
+      `/projects/${encodeURIComponent(projectId)}/sessions/${encodeURIComponent(rootSessionId)}/agent-tree/${encodeURIComponent(agentId)}${options?.includeInheritedContext ? "?includeInheritedContext=true" : ""}`,
+    ),
+
   /**
    * Get mappings of toolUseId → agentId for all agent files.
    * Used to find agent sessions for pending Tasks on page reload.

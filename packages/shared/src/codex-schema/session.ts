@@ -16,6 +16,9 @@
 
 import { z } from "zod";
 
+/** Absolute record position used by Codex's paginated rollout format. */
+const CodexRolloutOrdinalSchema = z.number().int().nonnegative();
+
 // =============================================================================
 // Session Metadata
 // =============================================================================
@@ -29,6 +32,7 @@ export const CodexSessionMetaPayloadSchema = z
     id: z.string(),
     forked_from_id: z.string().nullable().optional(),
     parent_thread_id: z.string().nullable().optional(),
+    subagent_history_start_ordinal: CodexRolloutOrdinalSchema.optional(),
     timestamp: z.string(),
     cwd: z.string(),
     originator: z.string().optional(), // e.g. "codex_exec"
@@ -51,6 +55,7 @@ export type CodexSessionMetaPayload = z.infer<
 
 export const CodexSessionMetaEntrySchema = z.object({
   timestamp: z.string(),
+  ordinal: CodexRolloutOrdinalSchema.optional(),
   type: z.literal("session_meta"),
   payload: CodexSessionMetaPayloadSchema,
 });
@@ -340,6 +345,7 @@ export type CodexResponseItemPayload = z.infer<
 
 export const CodexResponseItemEntrySchema = z.object({
   timestamp: z.string(),
+  ordinal: CodexRolloutOrdinalSchema.optional(),
   type: z.literal("response_item"),
   payload: CodexResponseItemPayloadSchema,
 });
@@ -640,6 +646,7 @@ export type CodexEventMsgPayload = z.infer<typeof CodexEventMsgPayloadSchema>;
 
 export const CodexEventMsgEntrySchema = z.object({
   timestamp: z.string(),
+  ordinal: CodexRolloutOrdinalSchema.optional(),
   type: z.literal("event_msg"),
   payload: CodexEventMsgPayloadSchema,
 });
@@ -664,6 +671,7 @@ export type CodexCompactedPayload = z.infer<typeof CodexCompactedPayloadSchema>;
 
 export const CodexCompactedEntrySchema = z.object({
   timestamp: z.string(),
+  ordinal: CodexRolloutOrdinalSchema.optional(),
   type: z.literal("compacted"),
   payload: CodexCompactedPayloadSchema,
 });
@@ -719,6 +727,7 @@ export type CodexTurnContextPayload = z.infer<
 
 export const CodexTurnContextEntrySchema = z.object({
   timestamp: z.string(),
+  ordinal: CodexRolloutOrdinalSchema.optional(),
   type: z.literal("turn_context"),
   payload: CodexTurnContextPayloadSchema,
 });

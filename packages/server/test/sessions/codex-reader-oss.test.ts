@@ -1,5 +1,12 @@
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  readFile,
+  rm,
+  utimes,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -385,6 +392,259 @@ describe("CodexSessionReader - OSS Support", () => {
       otherProjectReader.getAgentSession(childId, parentId),
     ).resolves.toBeNull();
   });
+
+  it("maps V2 children by their real spawn call id without later activity overwrites", async () => {
+    const parentId = randomUUID();
+    const spawnedChildId = randomUUID();
+    const interactedChildId = randomUUID();
+    const now = new Date().toISOString();
+    await createSessionFile(parentId, "openai", "gpt-5");
+
+    for (const childId of [spawnedChildId, interactedChildId]) {
+      await writeFile(
+        join(testDir, `${childId}.jsonl`),
+        `${[
+          {
+            type: "session_meta",
+            timestamp: now,
+            payload: {
+              id: childId,
+              session_id: parentId,
+              parent_thread_id: parentId,
+              thread_source: "subagent",
+              cwd: "/test/project",
+              timestamp: now,
+              source: {
+                subagent: {
+                  thread_spawn: { parent_thread_id: parentId, depth: 1 },
+                },
+              },
+            },
+          },
+          {
+            type: "event_msg",
+            timestamp: now,
+            payload: { type: "user_message", message: "Review the change" },
+          },
+        ]
+          .map((entry) => JSON.stringify(entry))
+          .join("\n")}\n`,
+      );
+    }
+
+    const activities = [
+      { kind: "started", id: "call_spawn_child", childId: spawnedChildId },
+      { kind: "interacted", id: "call_followup", childId: spawnedChildId },
+      { kind: "interrupted", id: "call_interrupt", childId: spawnedChildId },
+      {
+        kind: "completed",
+        id: "subagent-completed-turn",
+        childId: spawnedChildId,
+      },
+      { kind: "interacted", id: "call_other", childId: interactedChildId },
+    ];
+    const parentPath = join(testDir, `${parentId}.jsonl`);
+    await appendFile(
+      parentPath,
+      `${activities
+        .map(({ kind, id, childId }) =>
+          JSON.stringify({
+            type: "event_msg",
+            timestamp: now,
+            payload: {
+              type: "item_completed",
+              thread_id: parentId,
+              turn_id: "parent-turn",
+              item: {
+                type: "SubAgentActivity",
+                id,
+                kind,
+                agent_thread_id: childId,
+                agent_path: "/root/review",
+              },
+            },
+          }),
+        )
+        .join("\n")}\n`,
+    );
+
+    await expect(reader.getAgentMappings(parentId)).resolves.toEqual([
+      { toolUseId: "call_spawn_child", agentId: spawnedChildId },
+    ]);
+    await expect(
+      reader.getAgentSession(spawnedChildId, parentId),
+    ).resolves.toMatchObject({
+      descriptor: {
+        parentAgentId: parentId,
+        parentToolUseId: "call_spawn_child",
+      },
+    });
+    await expect(
+      reader.getAgentSession(spawnedChildId, interactedChildId),
+    ).resolves.toBeNull();
+    await expect(
+      reader.getSessionSummary(spawnedChildId, "test-project" as UrlProjectId),
+    ).resolves.toBeNull();
+    expect(
+      (await reader.listSessionFiles(testDir)).map((file) => file.sessionId),
+    ).toEqual([parentId]);
+
+    const otherProject = new CodexSessionReader({
+      sessionsDir: testDir,
+      projectPath: "/other",
+    });
+    await expect(otherProject.getAgentMappings(parentId)).resolves.toEqual([]);
+    await expect(
+      otherProject.getAgentSession(spawnedChildId, parentId),
+    ).resolves.toBeNull();
+  });
+
+  it("reads only verified descendants in the requested agent tree", async () => {
+    const rootId = randomUUID();
+    const otherRootId = randomUUID();
+    await createSessionFile(rootId, "openai", "gpt-5");
+    await createSessionFile(otherRootId, "openai", "gpt-5");
+    const nodes = [
+      { id: "child", parent: rootId },
+      { id: "sibling", parent: rootId },
+      { id: "nested", parent: "child" },
+      { id: "cousin", parent: "sibling" },
+      { id: "unrelated", parent: otherRootId },
+      { id: "orphan", parent: "missing-parent" },
+      { id: "cycle-a", parent: "cycle-b" },
+      { id: "cycle-b", parent: "cycle-a" },
+      { id: "foreign-project", parent: rootId, cwd: "/test/other-project" },
+      { id: "cross-project-chain", parent: "foreign-project" },
+    ];
+    const now = new Date().toISOString();
+    for (const { id, parent, cwd = "/test/project" } of nodes) {
+      const entries = [
+        {
+          type: "session_meta",
+          timestamp: now,
+          payload: {
+            id,
+            cwd,
+            timestamp: now,
+            source: "vscode",
+            thread_source: "subagent",
+            parent_thread_id: parent,
+          },
+        },
+        {
+          type: "event_msg",
+          timestamp: now,
+          payload: { type: "user_message", message: "Review changes" },
+        },
+      ];
+      await writeFile(
+        join(testDir, `${id}.jsonl`),
+        `${entries.map((entry) => JSON.stringify(entry)).join("\n")}\n`,
+      );
+    }
+
+    for (const { id, parent } of nodes.slice(0, 4)) {
+      const agent = await reader.getAgentSessionInTree(id, rootId);
+      expect(agent?.messages.length).toBeGreaterThan(0);
+      expect(agent?.descriptor).toMatchObject({
+        agentId: id,
+        parentAgentId: parent,
+      });
+    }
+    await expect(
+      reader.getAgentSessionInTree("nested", "child"),
+    ).resolves.not.toBeNull();
+    await expect(
+      reader.getAgentSessionInTree("sibling", "child"),
+    ).resolves.toBeNull();
+    await expect(
+      reader.getAgentSessionInTree("cycle-b", "cycle-a"),
+    ).resolves.toBeNull();
+    // The original endpoint still requires the immediate parent.
+    await expect(reader.getAgentSession("nested", rootId)).resolves.toBeNull();
+    for (const id of [
+      rootId,
+      otherRootId,
+      "missing-child",
+      ...nodes.slice(4).map((node) => node.id),
+    ]) {
+      await expect(
+        reader.getAgentSessionInTree(id, rootId),
+      ).resolves.toBeNull();
+    }
+    await expect(
+      reader.getAgentSessionInTree("child", "missing-root"),
+    ).resolves.toBeNull();
+    const otherProjectReader = new CodexSessionReader({
+      sessionsDir: testDir,
+      projectPath: "/test/other-project",
+    });
+    await expect(
+      otherProjectReader.getAgentSessionInTree("child", rootId),
+    ).resolves.toBeNull();
+  });
+
+  it.each([
+    ["task_complete", "task_started"],
+    ["turn_aborted", "task_started"],
+    ["task_complete", "turn_started"],
+    ["turn_aborted", "turn_started"],
+    ["turn_complete", "turn_started"],
+  ])(
+    "marks a child running when %s is followed by %s",
+    async (terminal, started) => {
+      const parentId = randomUUID();
+      const childId = randomUUID();
+      const now = new Date().toISOString();
+      await createSessionFile(parentId, "openai", "gpt-5");
+      const childPath = join(testDir, `${childId}.jsonl`);
+      const event = (type: string, turnId: string) =>
+        JSON.stringify({
+          type: "event_msg",
+          timestamp: now,
+          payload: {
+            type,
+            turn_id: turnId,
+            last_agent_message: null,
+            model_context_window: 200000,
+            collaboration_mode_kind: "default",
+          },
+        });
+      await writeFile(
+        childPath,
+        `${JSON.stringify({
+          type: "session_meta",
+          timestamp: now,
+          payload: {
+            id: childId,
+            cwd: "/test/project",
+            timestamp: now,
+            parent_thread_id: parentId,
+          },
+        })}\n${event(terminal, "first-turn")}\n${event("unrecognized_activity", "first-turn")}\n`,
+      );
+      expect((await reader.getAgentSession(childId, parentId))?.status).toBe(
+        terminal === "turn_aborted" ? "failed" : "completed",
+      );
+      await appendFile(childPath, `${event(started, "followup-turn")}\n`);
+      await expect(
+        reader.getAgentSession(childId, parentId),
+      ).resolves.toMatchObject({
+        status: "running",
+        descriptor: { status: "running" },
+      });
+      await appendFile(
+        childPath,
+        `${event(terminal === "turn_complete" ? "turn_complete" : "task_complete", "followup-turn")}\n`,
+      );
+      await expect(
+        reader.getAgentSession(childId, parentId),
+      ).resolves.toMatchObject({
+        status: "completed",
+        descriptor: { status: "completed" },
+      });
+    },
+  );
 
   const createRollbackSessionFile = async (sessionId: string) => {
     const now = new Date().toISOString();

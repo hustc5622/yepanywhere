@@ -15,11 +15,6 @@ import { useSessionMetadata } from "../../../contexts/SessionMetadataContext";
 import type { AgentContent } from "../../../hooks/useSessionMessages";
 import { useI18n } from "../../../i18n";
 import { classifyToolError } from "../../../lib/classifyToolError";
-import { isPlanProgressItem } from "../../../lib/preprocessMessages";
-import {
-  type PreprocessMessagesCache,
-  preprocessMessagesCached,
-} from "../../../lib/preprocessMessagesCache";
 import {
   type SubagentStatLabels,
   buildSubagentStatChips,
@@ -28,6 +23,7 @@ import {
 import { validateToolResult } from "../../../lib/validateToolResult";
 import type { Message } from "../../../types";
 import { SchemaWarning } from "../../SchemaWarning";
+import { SubagentTranscript } from "../../SubagentTranscript";
 import type { ContentBlock, RenderContext } from "../types";
 import type { TaskInput, TaskResult, ToolRenderer } from "./types";
 
@@ -249,59 +245,6 @@ function SubagentStats({
         </span>
       ))}
     </span>
-  );
-}
-
-/**
- * Nested transcript renderer — reuses the main message pipeline so subagent
- * thinking/tool rows behave identically to the top-level transcript.
- */
-function SubagentTranscript({
-  messages,
-  isStreaming,
-}: {
-  messages: Message[];
-  isStreaming: boolean;
-}) {
-  const { RenderItem: RenderItemComponent } = useNestedRenderers();
-  const [expandedThinkingItemIds, setExpandedThinkingItemIds] = useState<
-    ReadonlySet<string>
-  >(() => new Set());
-  const preprocessCacheRef = useRef<PreprocessMessagesCache | null>(null);
-  const toggleThinkingExpanded = useCallback((itemId: string) => {
-    setExpandedThinkingItemIds((previousIds) => {
-      const nextIds = new Set(previousIds);
-      if (nextIds.has(itemId)) {
-        nextIds.delete(itemId);
-      } else {
-        nextIds.add(itemId);
-      }
-      return nextIds;
-    });
-  }, []);
-
-  const renderItems = useMemo(() => {
-    const result = preprocessMessagesCached(
-      messages,
-      undefined,
-      preprocessCacheRef.current,
-    );
-    preprocessCacheRef.current = result.cache;
-    return result.renderItems.filter((item) => !isPlanProgressItem(item));
-  }, [messages]);
-
-  return (
-    <div className="task-nested-content">
-      {renderItems.map((item) => (
-        <RenderItemComponent
-          key={item.id}
-          item={item}
-          isStreaming={isStreaming}
-          thinkingExpanded={expandedThinkingItemIds.has(item.id)}
-          toggleThinkingExpanded={toggleThinkingExpanded}
-        />
-      ))}
-    </div>
   );
 }
 

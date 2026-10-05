@@ -93,6 +93,10 @@ export function CodexNativeItemBlock({ item }: Props) {
           model={asString(threadItem.model)}
           reasoningEffort={asString(threadItem.reasoningEffort)}
           agentsStates={threadItem.agentsStates}
+          receiverThreadIds={asArray(threadItem.receiverThreadIds)}
+          prompt={asString(threadItem.prompt)}
+          status={asString(threadItem.status)}
+          projectId={item.projectId}
           lifecycle={lifecycle}
         />
       );

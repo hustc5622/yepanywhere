@@ -5740,33 +5740,201 @@ pre.code-highlighter-plain code {
 
 .codex-native-subagent-activity {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.codex-native-subagent-info {
+  flex: 1;
+  min-width: 0;
+}
+
+.codex-native-subagent-title,
+.codex-native-subagent-heading {
+  display: flex;
+  align-items: center;
   flex-wrap: wrap;
-  gap: 0.25rem 0.75rem;
-  background: transparent;
-  border: 0;
+  gap: 0.375rem 0.625rem;
 }
 
-.codex-native-subagent-activity .codex-native-subagent-title {
-  flex: 1 1 16rem;
+.codex-native-subagent-name {
+  font-weight: 600;
+  overflow-wrap: anywhere;
 }
 
-.codex-native-subagent-link {
+.codex-native-subagent-event,
+.codex-native-subagent-path {
+  display: block;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  overflow-wrap: anywhere;
+  margin-top: 0.25rem;
+}
+
+.codex-native-subagent-open {
+  flex-shrink: 0;
+  min-height: 44px;
+  padding: 0.375rem 0.625rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
   color: var(--link-color);
+  font: inherit;
   font-size: var(--font-size-sm);
-  padding-block: 0.25rem;
-  text-decoration: underline;
-  text-underline-offset: 0.2em;
+  cursor: pointer;
 }
 
-.codex-native-subagent-link:hover {
-  color: var(--text-primary);
+.codex-collaboration-tool > summary {
+  list-style: none;
 }
 
-.codex-native-subagent-link:focus-visible {
+.codex-collaboration-tool > summary::-webkit-details-marker {
+  display: none;
+}
+
+.codex-native-subagent-open:hover {
+  background: var(--bg-hover);
+}
+
+.codex-native-subagent-open:focus-visible {
   outline: 2px solid var(--link-color);
   outline-offset: 2px;
-  border-radius: 2px;
+}
+
+.session-inspector-subagent {
+  width: 100%;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: start;
+  cursor: pointer;
+}
+
+.subagent-detail-toolbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.subagent-detail button {
+  min-height: 44px;
+  padding: 0.375rem 0.625rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+}
+
+.subagent-detail button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.subagent-detail button:disabled {
+  cursor: default;
+  opacity: 0.6;
+}
+
+.subagent-detail-refresh {
+  margin-inline-start: auto;
+}
+
+.subagent-detail-status {
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+}
+
+.subagent-detail-status.status-completed {
+  color: var(--success-color);
+}
+
+.subagent-detail-status.status-running {
+  color: var(--app-yep-green);
+}
+
+.subagent-detail-status.status-failed {
+  color: var(--error-color);
+}
+
+.subagent-detail-identity {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+  margin-block: 0.75rem;
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  overflow-wrap: anywhere;
+}
+
+.subagent-detail-tabs {
+  display: flex;
+  gap: 0.5rem;
+  margin-bottom: 1rem;
+  border-bottom: 1px solid var(--border-color);
+  padding-bottom: 0.5rem;
+}
+
+.subagent-detail-tabs button[aria-selected="true"] {
+  border-color: var(--app-yep-green);
+  color: var(--app-yep-green);
+}
+
+.subagent-detail-error {
+  padding: 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  margin-bottom: 1rem;
+}
+
+.subagent-detail-error-message,
+.subagent-detail-empty {
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
+.subagent-inherited-context {
+  margin-bottom: 1rem;
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  background: var(--bg-code);
+}
+
+.subagent-detail .subagent-inherited-context-toggle {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  width: 100%;
+  border: 0;
+  background: transparent;
+  text-align: start;
+}
+
+.subagent-inherited-context-toggle:focus-visible {
+  outline: 2px solid var(--app-yep-green);
+  outline-offset: 2px;
+}
+
+.subagent-inherited-context-body {
+  padding: 0.75rem;
+  border-top: 1px solid var(--border-color);
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.subagent-inherited-context-note {
+  margin: 0 0 0.75rem;
+  color: var(--text-muted);
+  font-size: var(--font-size-sm);
+}
+
+.subagent-detail .task-nested-content {
+  max-height: none;
+  overflow: visible;
 }
 
 .codex-native-subagent-nickname {

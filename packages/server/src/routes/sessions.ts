@@ -1085,6 +1085,43 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     },
   );
 
+  // Resolve the provider through the root conversation, then read only a
+  // verified descendant. A child itself is absent from top-level summaries.
+  routes.get(
+    "/projects/:projectId/sessions/:sessionId/agent-tree/:agentId",
+    async (c) => {
+      const projectId = c.req.param("projectId");
+      if (!isUrlProjectId(projectId)) {
+        return c.json({ error: "Invalid project ID format" }, 400);
+      }
+      const project = await deps.scanner.getOrCreateProject(projectId);
+      if (!project) return c.json({ error: "Project not found" }, 404);
+
+      const rootSessionId = c.req.param("sessionId");
+      const reader = await resolveReaderForSession(
+        deps,
+        project,
+        rootSessionId,
+      );
+      const agentSession = await reader.getAgentSessionInTree?.(
+        c.req.param("agentId"),
+        rootSessionId,
+        {
+          includeInheritedContext:
+            c.req.query("includeInheritedContext") === "true",
+        },
+      );
+      if (!agentSession) {
+        return c.json({ error: "Agent session not found" }, 404);
+      }
+      await augmentPersistedSessionMessages(agentSession.messages);
+      if (agentSession.inheritedMessages) {
+        await augmentPersistedSessionMessages(agentSession.inheritedMessages);
+      }
+      return c.json(agentSession);
+    },
+  );
+
   // GET /api/projects/:projectId/sessions/:sessionId/metadata - Get session metadata only (no messages)
   // Lightweight endpoint for refreshing title, status, etc. without re-fetching all messages
   routes.get("/projects/:projectId/sessions/:sessionId/metadata", async (c) => {

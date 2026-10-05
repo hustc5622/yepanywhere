@@ -1,9 +1,12 @@
 import {
   type CSSProperties,
   type ReactNode,
+  createContext,
   useCallback,
+  useContext,
   useEffect,
   useId,
+  useLayoutEffect,
   useRef,
   useState,
 } from "react";
@@ -22,6 +25,10 @@ const ABSOLUTE_MIN_DETAIL_PANEL_WIDTH = 240;
 const MIN_SESSION_WIDTH = 360;
 const MAX_DETAIL_PANEL_RATIO = 0.72;
 const RESIZE_KEYBOARD_STEP = 24;
+
+// A file opened from a detail transcript belongs above that panel. React
+// context follows portals, so its parent stays known even when both use body.
+const ParentDetailPanelContext = createContext<(() => () => void) | null>(null);
 
 interface DetailPanelProps {
   title: ReactNode;
@@ -106,6 +113,15 @@ export function DetailPanel({
   ariaLabel,
 }: DetailPanelProps) {
   const { t } = useI18n();
+  const parentPanel = useContext(ParentDetailPanelContext);
+  const nestedPanelsRef = useRef(0);
+  const registerNestedPanel = useCallback(() => {
+    nestedPanelsRef.current += 1;
+    return () => {
+      nestedPanelsRef.current -= 1;
+    };
+  }, []);
+  useLayoutEffect(() => parentPanel?.(), [parentPanel]);
   const panelId = useId();
   const titleId = useId();
   const closeButtonRef = useRef<HTMLButtonElement>(null);
@@ -119,7 +135,7 @@ export function DetailPanel({
 
   const desktopViewport = useMediaQuery(DESKTOP_DETAIL_PANEL_QUERY);
   const layoutRoot =
-    desktopViewport && typeof document !== "undefined"
+    !parentPanel && desktopViewport && typeof document !== "undefined"
       ? document.querySelector<HTMLElement>(".session-page")
       : null;
   const isDocked = layoutRoot !== null;
@@ -200,6 +216,7 @@ export function DetailPanel({
   useEffect(() => {
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key !== "Escape") return;
+      if (event.defaultPrevented || nestedPanelsRef.current > 0) return;
       if (document.querySelector(".file-viewer-fullscreen")) return;
       event.preventDefault();
       event.stopPropagation();
@@ -250,10 +267,20 @@ export function DetailPanel({
   useEffect(() => {
     if (isDocked) return;
 
-    window.history.pushState({ yepDetailPanelOpen: true }, "");
+    window.history.pushState(
+      { yepDetailPanelOpen: true, yepDetailPanelId: panelId },
+      "",
+    );
     let markerOnStack = true;
 
-    const handlePopState = () => {
+    const handlePopState = (event: PopStateEvent) => {
+      // Closing a nested panel (including its cleanup history.back()) returns
+      // to our own marker. Our panel's history entry has not been popped yet.
+      if (
+        nestedPanelsRef.current > 0 ||
+        event.state?.yepDetailPanelId === panelId
+      )
+        return;
       markerOnStack = false;
       onCloseRef.current();
     };
@@ -261,11 +288,11 @@ export function DetailPanel({
     window.addEventListener("popstate", handlePopState);
     return () => {
       window.removeEventListener("popstate", handlePopState);
-      if (markerOnStack) {
+      if (markerOnStack && window.history.state?.yepDetailPanelId === panelId) {
         window.history.back();
       }
     };
-  }, [isDocked]);
+  }, [isDocked, panelId]);
 
   useEffect(() => {
     if (!hideHeader) {
@@ -370,5 +397,9 @@ export function DetailPanel({
     </div>
   );
 
-  return createPortal(panel, portalTarget);
+  return (
+    <ParentDetailPanelContext.Provider value={registerNestedPanel}>
+      {createPortal(panel, portalTarget)}
+    </ParentDetailPanelContext.Provider>
+  );
 }

@@ -982,6 +982,10 @@ export interface SubagentDescriptor {
  */
 export interface AgentSession {
   messages: AppMessage[];
+  /** Whether the child snapshot contains separately readable inherited context. */
+  hasInheritedContext?: boolean;
+  /** Included only when inherited context is explicitly requested. */
+  inheritedMessages?: AppMessage[];
   status: AgentStatus;
   /** Resolved subagent type/profile (e.g. `explore`), when known. */
   agentType?: string;

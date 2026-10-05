@@ -72,6 +72,11 @@ import {
   getCodexSessionManifest,
   invalidateCodexSessionManifest,
 } from "./codex-session-manifest.js";
+import {
+  getCodexSubagentHistoryStart,
+  isCodexOwnHistoryEntry,
+  partitionCodexSubagentHistory,
+} from "./codex-subagent-history.js";
 import { isCodexTurnAbortedNoticeText } from "./codex-turn-aborted.js";
 import { convertCodexEntries } from "./normalization.js";
 import type { PaginationInfo } from "./pagination.js";
@@ -419,13 +424,63 @@ function codexEntryOutputCount(
   }
 }
 
+/** Detect visible inherited content without normalizing its transcript by default. */
+function hasDisplayableCodexInheritedHistory(
+  entries: readonly CodexSessionEntry[],
+): boolean {
+  return entries.some((entry) => {
+    if (!isRecord(entry.payload)) return false;
+    if (entry.type === "response_item" && entry.payload.type === "message") {
+      if (
+        entry.payload.role === "developer" ||
+        !Array.isArray(entry.payload.content)
+      )
+        return false;
+      return entry.payload.content.some(
+        (block) =>
+          isRecord(block) &&
+          ("text" in block
+            ? typeof block.text === "string" && !!block.text.trim()
+            : block.type === "input_image" || block.type === "input_audio"),
+      );
+    }
+    if (entry.type === "response_item" && entry.payload.type === "reasoning") {
+      return (
+        Array.isArray(entry.payload.summary) &&
+        entry.payload.summary.some(
+          (block) =>
+            isRecord(block) &&
+            typeof block.text === "string" &&
+            !!block.text.trim(),
+        )
+      );
+    }
+    if (entry.type === "event_msg" && entry.payload.type === "user_message") {
+      return (
+        typeof entry.payload.message === "string" &&
+        !!entry.payload.message.trim()
+      );
+    }
+    if (entry.type === "event_msg" && entry.payload.type === "item_completed") {
+      const item = entry.payload.item;
+      if (
+        isRecord(item) &&
+        (item.type === "SubAgentActivity" ||
+          item.type === "CollabAgentToolCall")
+      )
+        return true;
+    }
+    return codexEntryOutputCount(entry, false, []) > 0;
+  });
+}
+
 /**
  * Derive a sub-agent lifecycle status from its rollout entries.
  *
  * Codex sub-agents are independent threads that end with either a
  * `task_complete` event (completed), a `turn_aborted` event (interrupted), or
- * neither while still running (`running`). We scan the event_msg entries in
- * reverse to find the last terminal marker.
+ * neither while still running (`running`). A later task_started marks a new
+ * turn and supersedes an earlier terminal marker after a followup.
  */
 function deriveCodexSubagentStatus(entries: readonly CodexSessionEntry[]): {
   status: AgentStatus;
@@ -435,7 +490,10 @@ function deriveCodexSubagentStatus(entries: readonly CodexSessionEntry[]): {
     const entry = entries[i];
     if (!entry || entry.type !== "event_msg") continue;
     const payload = entry.payload as { type?: unknown; error?: unknown };
-    if (payload.type === "task_complete") {
+    if (payload.type === "task_started" || payload.type === "turn_started") {
+      return { status: "running", descriptorStatus: "running" };
+    }
+    if (payload.type === "task_complete" || payload.type === "turn_complete") {
       return payload.error !== undefined && payload.error !== null
         ? { status: "failed", descriptorStatus: "failed" }
         : { status: "completed", descriptorStatus: "completed" };
@@ -463,17 +521,27 @@ function addCodexSpawnMapping(
       payload.item && typeof payload.item === "object"
         ? (payload.item as Record<string, unknown>)
         : undefined;
-    const tool = item?.tool;
-    if (
-      item?.type !== "CollabAgentToolCall" ||
-      (tool !== "spawn_agent" && tool !== "spawnAgent" && tool !== "SpawnAgent")
-    ) {
-      return;
+    if (item?.type === "SubAgentActivity") {
+      // MultiAgentV2 persists the actual spawn call_id as the Started item's
+      // id. Later activities use other call ids or synthetic completion ids.
+      if (item.kind !== "started") return;
+      childThreadId = item.agent_thread_id;
+      callId = item.id;
+    } else {
+      const tool = item?.tool;
+      if (
+        item?.type !== "CollabAgentToolCall" ||
+        (tool !== "spawn_agent" &&
+          tool !== "spawnAgent" &&
+          tool !== "SpawnAgent")
+      ) {
+        return;
+      }
+      childThreadId = Array.isArray(item.receiver_thread_ids)
+        ? item.receiver_thread_ids[0]
+        : undefined;
+      callId = item.id;
     }
-    childThreadId = Array.isArray(item.receiver_thread_ids)
-      ? item.receiver_thread_ids[0]
-      : undefined;
-    callId = item.id;
   } else if (payload.type === "collab_agent_spawn_end") {
     // Compatibility for older rollout fixtures that persisted the legacy
     // terminal event directly.
@@ -489,16 +557,25 @@ function addCodexSpawnMapping(
 
 async function scanCodexSpawnMapping(
   filePath: string,
+  threadId: string,
 ): Promise<Map<string, string>> {
   return withCodexRolloutAdmission(filePath, async () => {
     const mapping = new Map<string, string>();
+    let historyStart: number | null = null;
+    let sawMetadata = false;
     for await (const line of iterateCodexRolloutLines(filePath, {
       maxLineBytes: CODEX_MAX_ROLLOUT_LINE_BYTES,
       maxBytes: CODEX_MAX_ROLLOUT_SCAN_BYTES,
     })) {
       if (!line.line) continue;
       const entry = parseCodexSessionEntry(line.line);
-      if (entry) addCodexSpawnMapping(mapping, entry);
+      if (!entry) continue;
+      if (!sawMetadata) {
+        historyStart = getCodexSubagentHistoryStart(entry, threadId);
+        sawMetadata = true;
+      }
+      if (isCodexOwnHistoryEntry(entry, historyStart))
+        addCodexSpawnMapping(mapping, entry);
     }
     return mapping;
   });
@@ -2040,9 +2117,10 @@ export class CodexSessionReader implements ISessionReader {
    * linked to the parent via `session_meta.parent_thread_id` /
    * `source.subagent.thread_spawn.parent_thread_id`. The manifest indexes
    * these as `byParentThread`. The parent rollout's persisted
-   * paginated `item_completed` SpawnAgent item supplies the real spawning call
-   * id; children without that durable linkage are omitted rather than assigned
-   * a fake id. A sub-agent can itself be the parent of nested children.
+   * paginated `item_completed` SpawnAgent or SubAgentActivity/started item
+   * supplies the real spawning call id; children without that durable linkage
+   * are omitted rather than assigned a fake id. A sub-agent can itself be the
+   * parent of nested children.
    */
   async getAgentMappings(sessionId?: string): Promise<AgentMapping[]> {
     if (!sessionId) return [];
@@ -2060,7 +2138,10 @@ export class CodexSessionReader implements ISessionReader {
     if (children.length === 0) return [];
 
     try {
-      const spawnMappings = await scanCodexSpawnMapping(parent.filePath);
+      const spawnMappings = await scanCodexSpawnMapping(
+        parent.filePath,
+        sessionId,
+      );
       return children.flatMap((child) => {
         const toolUseId = spawnMappings.get(child.id);
         if (!toolUseId) return [];
@@ -2087,8 +2168,11 @@ export class CodexSessionReader implements ISessionReader {
   async getAgentSession(
     agentId: string,
     sessionId?: string,
+    options: { includeInheritedContext?: boolean } = {},
   ): Promise<{
     messages: Message[];
+    hasInheritedContext?: boolean;
+    inheritedMessages?: Message[];
     status: AgentStatus;
     agentType?: string;
     descriptor?: SubagentDescriptor;
@@ -2115,8 +2199,24 @@ export class CodexSessionReader implements ISessionReader {
       if (childScan.logicalBytes > CODEX_ROLLBACK_FULL_READ_MAX_BYTES) {
         return null;
       }
-      const entries = await readCodexEntries(entry.filePath);
-      const messages = convertCodexEntries(entries, agentId);
+      const { own: entries, inherited } = partitionCodexSubagentHistory(
+        await readCodexEntries(entry.filePath),
+        agentId,
+      );
+      const messages = convertCodexEntries(entries, agentId, undefined, {
+        provider: "codex",
+        includeNativeCollaborationItems: true,
+      });
+      const inheritedContentAvailable =
+        hasDisplayableCodexInheritedHistory(inherited);
+      const inheritedMessages = options.includeInheritedContext
+        ? inheritedContentAvailable
+          ? convertCodexEntries(inherited, agentId, undefined, {
+              provider: "codex",
+              includeNativeCollaborationItems: true,
+            })
+          : []
+        : undefined;
       const lifecycle = deriveCodexSubagentStatus(entries);
       const parentToolUseId = (await this.getAgentMappings(sessionId)).find(
         (mapping) => mapping.agentId === agentId,
@@ -2133,6 +2233,10 @@ export class CodexSessionReader implements ISessionReader {
       };
       return {
         messages,
+        hasInheritedContext: inheritedMessages
+          ? inheritedMessages.length > 0
+          : inheritedContentAvailable,
+        ...(inheritedMessages !== undefined ? { inheritedMessages } : {}),
         status: lifecycle.status,
         ...(entry.agentRole ? { agentType: entry.agentRole } : {}),
         descriptor,
@@ -2140,6 +2244,47 @@ export class CodexSessionReader implements ISessionReader {
     } catch {
       return null;
     }
+  }
+
+  /** Read a descendant using its persisted parent, bounded to the root tree. */
+  async getAgentSessionInTree(
+    agentId: string,
+    rootSessionId: string,
+    options?: { includeInheritedContext?: boolean },
+  ): ReturnType<ISessionReader["getAgentSession"]> {
+    if (agentId === rootSessionId) return null;
+    const manifest = await getCodexSessionManifest(this.sessionsDir);
+    const root = manifest.byId.get(rootSessionId);
+    const target = manifest.byId.get(agentId);
+    if (!root || !this.isManifestEntryInScope(root) || !target?.isSubagent) {
+      return null;
+    }
+    const projectPath = canonicalizeProjectPath(root.cwd);
+    const immediateParentId = target.parentThreadId;
+    const visited = new Set<string>();
+    let foundRoot = false;
+    let current: CodexSessionManifestEntry | undefined = target;
+    while (current) {
+      if (
+        visited.has(current.id) ||
+        !this.isManifestEntryInScope(current) ||
+        canonicalizeProjectPath(current.cwd) !== projectPath
+      ) {
+        return null;
+      }
+      if (current.id === rootSessionId) foundRoot = true;
+      visited.add(current.id);
+      // Validate the rest of the ancestry too if a subtree root was supplied;
+      // stopping there could otherwise accept a cycle containing that root.
+      if (!current.isSubagent) {
+        return foundRoot
+          ? this.getAgentSession(agentId, immediateParentId, options)
+          : null;
+      }
+      if (!current.parentThreadId) return null;
+      current = manifest.byId.get(current.parentThreadId);
+    }
+    return null;
   }
 
   private isManifestEntryInScope(entry: CodexSessionManifestEntry): boolean {

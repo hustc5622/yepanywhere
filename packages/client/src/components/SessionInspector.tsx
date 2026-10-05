@@ -8,10 +8,16 @@ import type {
 import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
+import { useSubagentDetail } from "../contexts/SubagentDetailContext";
 import { useDocumentVisibility } from "../hooks/useDocumentVisibility";
 import { useGitStatus } from "../hooks/useGitStatus";
 import { useSessionFileIndex } from "../hooks/useSessionFileIndex";
 import { useI18n } from "../i18n";
+import {
+  type CodexAgentStatus,
+  codexAgentStatusLabel,
+  normalizeCodexAgentStatus,
+} from "../lib/codexAgentStatus";
 import { formatSmartTime } from "../lib/datetime";
 import {
   type ActiveToolApproval,
@@ -126,7 +132,7 @@ interface SubagentItem {
   sessionId: string;
   description: string;
   agent?: string;
-  status: ToolCallItem["status"] | "unknown";
+  status: CodexAgentStatus | "started";
 }
 
 interface CodexChannelSummary {
@@ -175,6 +181,7 @@ export function SessionInspector({
   onSelectMessage,
 }: SessionInspectorProps) {
   const { t, locale } = useI18n();
+  const subagentDetail = useSubagentDetail();
   const [activeTab, setActiveTab] = useState<InspectorTab>("questions");
   const [copiedSessionId, setCopiedSessionId] = useState(false);
   const pageVisible = useDocumentVisibility();
@@ -212,8 +219,13 @@ export function SessionInspector({
     [isVisible, activeTab, renderItems],
   );
   const subagents = useMemo(
-    () => (isVisible ? buildSubagentItems(renderItems) : []),
-    [isVisible, renderItems],
+    () =>
+      isVisible
+        ? buildSubagentItems(renderItems).filter(
+            (agent) => agent.sessionId !== sessionId,
+          )
+        : [],
+    [isVisible, renderItems, sessionId],
   );
   const planProgress = useMemo(
     () => (isVisible ? buildPlanProgress(renderItems, t) : null),
@@ -462,13 +474,22 @@ export function SessionInspector({
             <ul className="session-inspector-list">
               {subagents.map((subagent) => (
                 <li key={subagent.sessionId}>
-                  <Link
-                    className="session-inspector-row"
-                    to={`${basePath}/projects/${projectId}/sessions/${subagent.sessionId}`}
+                  <button
+                    type="button"
+                    className="session-inspector-row session-inspector-subagent"
+                    disabled={!subagentDetail}
+                    onClick={() => {
+                      subagentDetail?.openAgent({
+                        agentId: subagent.sessionId,
+                        parentSessionId: sessionId,
+                        name: subagent.description,
+                      });
+                      if (presentation === "drawer") onClose?.();
+                    }}
                     title={subagent.description || subagent.sessionId}
                   >
                     <span
-                      className={`session-inspector-check-dot status-${getSubagentDotStatus(subagent.status)}`}
+                      className={`session-inspector-check-dot status-${getSubagentDotStatus(subagentDetail?.statuses[subagent.sessionId] ? normalizeCodexAgentStatus(subagentDetail.statuses[subagent.sessionId]).status : subagent.status)}`}
                       aria-hidden="true"
                     />
                     <span className="session-inspector-row-main">
@@ -477,10 +498,17 @@ export function SessionInspector({
                       </span>
                       <span className="session-inspector-row-meta">
                         {subagent.agent ? `${subagent.agent} · ` : ""}
-                        {getSubagentStatusLabel(t, subagent.status)}
+                        {getSubagentStatusLabel(
+                          t,
+                          subagentDetail?.statuses[subagent.sessionId]
+                            ? normalizeCodexAgentStatus(
+                                subagentDetail.statuses[subagent.sessionId],
+                              ).status
+                            : subagent.status,
+                        )}
                       </span>
                     </span>
-                  </Link>
+                  </button>
                 </li>
               ))}
             </ul>
@@ -1473,11 +1501,11 @@ function buildSubagentItems(items: RenderItem[]): SubagentItem[] {
       // interpret "interacted" as evidence of a new running turn.
       const status: SubagentItem["status"] =
         kind?.toLowerCase() === "started"
-          ? "pending"
+          ? "started"
           : kind?.toLowerCase() === "completed"
-            ? "complete"
+            ? "completed"
             : kind?.toLowerCase() === "interrupted"
-              ? "aborted"
+              ? "interrupted"
               : (existing?.status ?? "unknown");
       if (existingIndex === undefined) {
         resultIndexBySessionId.set(sessionId, result.length);
@@ -1507,14 +1535,13 @@ function buildSubagentItems(items: RenderItem[]): SubagentItem[] {
             : typeof stateRaw.agent_type === "string"
               ? stateRaw.agent_type
               : undefined;
-        const agentStatus =
-          typeof stateRaw.status === "string" ? stateRaw.status : "unknown";
+        const agentStatus = normalizeCodexAgentStatus(stateRaw).status;
         const existingIndex = resultIndexBySessionId.get(threadId);
         const next: SubagentItem = {
           sessionId: threadId,
           description: nickname ?? threadId,
           ...(role && role !== "default" ? { agent: role } : {}),
-          status: collabAgentStatusToItemStatus(agentStatus),
+          status: agentStatus,
         };
         if (existingIndex === undefined) {
           resultIndexBySessionId.set(threadId, result.length);
@@ -1537,55 +1564,28 @@ function buildSubagentItems(items: RenderItem[]): SubagentItem[] {
   return result;
 }
 
-function collabAgentStatusToItemStatus(status: string): ToolCallItem["status"] {
-  switch (status) {
-    case "running":
-    case "in_progress":
-    case "inProgress":
-      return "pending";
-    case "completed":
-    case "complete":
-      return "complete";
-    case "errored":
-    case "error":
-    case "failed":
-      return "error";
-    case "interrupted":
-      return "aborted";
-    default:
-      return "pending";
-  }
-}
-
 function getSubagentStatusLabel(
   t: TFunction,
   status: SubagentItem["status"],
 ): string {
-  switch (status) {
-    case "pending":
-      return t("subagentStatusRunning");
-    case "error":
-      return t("subagentStatusFailed");
-    case "aborted":
-      return t("subagentStatusInterrupted");
-    case "unknown":
-      return t("subagentStatusUnknown");
-    default:
-      return t("subagentStatusCompleted");
-  }
+  return status === "started"
+    ? t("subagentDetailStarted")
+    : codexAgentStatusLabel(status, t);
 }
 
 function getSubagentDotStatus(status: SubagentItem["status"]): CheckStatus {
   switch (status) {
-    case "pending":
+    case "running":
+    case "pendingInit":
+    case "queued":
       return "running";
-    case "unknown":
-      return "pending";
-    case "error":
-    case "aborted":
+    case "errored":
+    case "interrupted":
       return "failed";
-    default:
+    case "completed":
       return "passed";
+    default:
+      return "pending";
   }
 }
 

@@ -4,6 +4,7 @@ import {
   render,
   screen,
   waitFor,
+  within,
 } from "@testing-library/react";
 import { useState } from "react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -34,6 +35,43 @@ function createSessionRoot() {
   root.appendChild(mount);
   document.body.appendChild(root);
   return { root, mount };
+}
+
+function NestedFilePanels({
+  onParentClose,
+  onFileClose,
+}: { onParentClose: () => void; onFileClose: () => void }) {
+  const [parentOpen, setParentOpen] = useState(true);
+  const [fileOpen, setFileOpen] = useState(false);
+  return (
+    <I18nProvider>
+      {parentOpen && (
+        <DetailPanel
+          title="Child conversation"
+          onClose={() => {
+            onParentClose();
+            setParentOpen(false);
+          }}
+        >
+          <p>Child transcript and inherited context</p>
+          <button type="button" onClick={() => setFileOpen(true)}>
+            Open referenced file
+          </button>
+          {fileOpen && (
+            <DetailPanel
+              title="source.ts"
+              onClose={() => {
+                onFileClose();
+                setFileOpen(false);
+              }}
+            >
+              Referenced file contents
+            </DetailPanel>
+          )}
+        </DetailPanel>
+      )}
+    </I18nProvider>
+  );
 }
 
 describe("DetailPanel", () => {
@@ -187,5 +225,122 @@ describe("DetailPanel", () => {
 
     if (host) fireEvent.click(host);
     expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("opens a transcript's file above its desktop panel and Escape closes only the file", () => {
+    stubDesktopViewport(true);
+    vi.spyOn(window.history, "back").mockImplementation(() => undefined);
+    const { root, mount } = createSessionRoot();
+    const onParentClose = vi.fn();
+    const onFileClose = vi.fn();
+    render(
+      <NestedFilePanels
+        onParentClose={onParentClose}
+        onFileClose={onFileClose}
+      />,
+      { container: mount },
+    );
+    const parent = screen.getByRole("dialog", { name: "Child conversation" });
+    const transcript = screen.getByText(
+      "Child transcript and inherited context",
+    );
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open referenced file" }),
+    );
+
+    const file = screen.getByRole("dialog", { name: "source.ts" });
+    expect(
+      root.querySelectorAll(":scope > .detail-panel-host--docked"),
+    ).toHaveLength(1);
+    expect(file.closest(".detail-panel-host--overlay")?.parentElement).toBe(
+      document.body,
+    );
+    expect(screen.getByRole("dialog", { name: "Child conversation" })).toBe(
+      parent,
+    );
+    expect(onParentClose).not.toHaveBeenCalled();
+    expect(document.body.style.overflow).toBe("hidden");
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onFileClose).toHaveBeenCalledTimes(1);
+    expect(onParentClose).not.toHaveBeenCalled();
+    expect(screen.queryByRole("dialog", { name: "source.ts" })).toBeNull();
+    expect(screen.getByText("Child transcript and inherited context")).toBe(
+      transcript,
+    );
+    expect(document.body.style.overflow).toBe("");
+
+    fireEvent.keyDown(document, { key: "Escape" });
+    expect(onParentClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps the mobile parent after a nested close button pops only the file history marker", () => {
+    stubDesktopViewport(false);
+    const back = vi
+      .spyOn(window.history, "back")
+      .mockImplementation(() => undefined);
+    const onParentClose = vi.fn();
+    const onFileClose = vi.fn();
+    render(
+      <NestedFilePanels
+        onParentClose={onParentClose}
+        onFileClose={onFileClose}
+      />,
+    );
+    const parentMarker = window.history.state;
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open referenced file" }),
+    );
+    const file = screen.getByRole("dialog", { name: "source.ts" });
+    fireEvent.click(within(file).getByRole("button", { name: "Close" }));
+    expect(back).toHaveBeenCalledTimes(1);
+    // history.back() resolves after React has unmounted the nested panel and
+    // deregistered it from its parent. The marker identity must still protect
+    // the parent's popstate listener at this point.
+    window.history.replaceState(parentMarker, "");
+    fireEvent.popState(window, { state: parentMarker });
+
+    expect(
+      screen.getByRole("dialog", { name: "Child conversation" }),
+    ).toBeDefined();
+    expect(screen.queryByRole("dialog", { name: "source.ts" })).toBeNull();
+    expect(onParentClose).not.toHaveBeenCalled();
+    expect(onFileClose).toHaveBeenCalledTimes(1);
+    expect(document.body.style.overflow).toBe("hidden");
+  });
+
+  it("handles mobile Back one detail layer at a time", () => {
+    stubDesktopViewport(false);
+    const back = vi
+      .spyOn(window.history, "back")
+      .mockImplementation(() => undefined);
+    const onParentClose = vi.fn();
+    const onFileClose = vi.fn();
+    render(
+      <NestedFilePanels
+        onParentClose={onParentClose}
+        onFileClose={onFileClose}
+      />,
+    );
+    const parentMarker = window.history.state;
+    fireEvent.click(
+      screen.getByRole("button", { name: "Open referenced file" }),
+    );
+
+    window.history.replaceState(parentMarker, "");
+    fireEvent.popState(window, { state: parentMarker });
+    expect(screen.queryByRole("dialog", { name: "source.ts" })).toBeNull();
+    expect(
+      screen.getByRole("dialog", { name: "Child conversation" }),
+    ).toBeDefined();
+    expect(onFileClose).toHaveBeenCalledTimes(1);
+    expect(onParentClose).not.toHaveBeenCalled();
+    expect(back).not.toHaveBeenCalled();
+
+    window.history.replaceState(null, "");
+    fireEvent.popState(window, { state: null });
+    expect(screen.queryByRole("dialog")).toBeNull();
+    expect(onParentClose).toHaveBeenCalledTimes(1);
+    expect(document.body.style.overflow).toBe("");
   });
 });
