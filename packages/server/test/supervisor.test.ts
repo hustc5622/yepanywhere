@@ -1118,6 +1118,83 @@ describe("Supervisor", () => {
   });
 
   describe("queue propagation", () => {
+    it.each([
+      { providerName: "codex", createOnly: true, replaces: true },
+      { providerName: "codex", createOnly: false, replaces: false },
+      { providerName: "pi", createOnly: true, replaces: false },
+    ] as const)(
+      "preserves empty-thread provenance on Feishu MCP restart: $providerName / $createOnly",
+      async ({ providerName, createOnly, replaces }) => {
+        const startSession = vi.fn(async (options: StartSessionOptions) => {
+          let aborted = false;
+          async function* iterator() {
+            yield {
+              type: "system",
+              subtype: "init",
+              session_id: options.resumeSessionId ?? "feishu-empty",
+            };
+            if (options.initialMessage) {
+              yield { type: "result", session_id: "feishu-empty" };
+            }
+            while (!aborted) {
+              await new Promise((resolve) => setTimeout(resolve, 5));
+            }
+          }
+          return {
+            iterator: iterator(),
+            queue: new MessageQueue(),
+            abort: () => {
+              aborted = true;
+            },
+          };
+        });
+        const local = new Supervisor({
+          provider:
+            providerName === "codex"
+              ? createCodexTestProvider(startSession)
+              : createPiTestProvider(startSession),
+          idleTimeoutMs: 60_000,
+        });
+        try {
+          const started = createOnly
+            ? await local.createSession("/tmp/feishu-empty")
+            : await local.startSession("/tmp/feishu-empty", {
+                text: "previous turn",
+              });
+          if (!("id" in started)) throw new Error("Expected process");
+          await vi.waitFor(() => expect(started.state.type).toBe("idle"));
+          const feishuMcpConfig = {
+            command: "node",
+            args: ["connector.mjs"],
+            env: {},
+            enabled: true,
+            tool_timeout_sec: 240,
+          };
+          await expect(
+            local.queueMessageToSession(
+              "feishu-empty",
+              "/tmp/feishu-empty",
+              { text: "first Feishu task" },
+              undefined,
+              { feishuMcpConfig },
+              { requireImmediate: true },
+            ),
+          ).resolves.toMatchObject({ success: true, restarted: true });
+          expect(startSession).toHaveBeenCalledTimes(2);
+          expect(startSession.mock.calls[1]?.[0]).toMatchObject({
+            resumeSessionId: "feishu-empty",
+            initialMessage: { text: "first Feishu task" },
+            feishuMcpConfig,
+          });
+          expect(
+            startSession.mock.calls[1]?.[0].allowMissingRolloutReplacement,
+          ).toBe(replaces ? true : undefined);
+        } finally {
+          await local.shutdown();
+        }
+      },
+    );
+
     it("preserves model settings when a queued session starts later", async () => {
       let aborted = false;
       const startSession = vi.fn(

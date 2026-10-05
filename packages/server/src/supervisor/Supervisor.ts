@@ -1177,6 +1177,10 @@ export class Supervisor {
           error:
             "Finish the current task before changing Feishu authorization.",
         };
+      // Capture provenance before aborting: create-only Codex threads may not
+      // have a rollout yet when the first message installs Feishu MCP access.
+      const allowMissingRolloutReplacement =
+        process.provider === "codex" && process.isUnmaterializedSession;
       await process.abort();
       this.unregisterProcess(process);
       const next = await this.resumeSession(
@@ -1185,7 +1189,12 @@ export class Supervisor {
         message,
         permissionMode,
         modelSettings,
-        admission,
+        {
+          ...admission,
+          ...(allowMissingRolloutReplacement
+            ? { allowMissingRolloutReplacement: true }
+            : {}),
+        },
       );
       return "id" in next
         ? { success: true, process: next, restarted: true }
