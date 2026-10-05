@@ -3,11 +3,13 @@ import {
   buildAttachmentToken,
   countAttachmentTokens,
   deleteAttachmentTokenAtCaret,
+  findAttachmentAfterPosition,
   findAttachmentTokens,
   hasAttachmentToken,
   insertAttachmentToken,
   matchTokenToAttachment,
   removeAttachmentToken,
+  removeAttachmentTokenOccurrence,
   sanitizeAttachmentTokenName,
   splitByAttachmentTokens,
   stripAttachmentTokensForTitle,
@@ -75,6 +77,57 @@ describe("attachmentTokens", () => {
     );
     expect(removeAttachmentToken("no token", "a.png")).toBe("no token");
   });
+
+  it.each([
+    [0, "first middle @[a.png] last @[a.png]", 6],
+    [1, "first @[a.png] middle last @[a.png]", 22],
+    [2, "first @[a.png] middle @[a.png] last", 35],
+  ])(
+    "removes only duplicate occurrence %i and returns the deletion point",
+    (occurrence, text, cursor) => {
+      expect(
+        removeAttachmentTokenOccurrence(
+          "first @[a.png] middle @[a.png] last @[a.png]",
+          "a.png",
+          occurrence,
+        ),
+      ).toEqual({ text, cursor });
+    },
+  );
+
+  it("counts occurrences separately for each sanitized name", () => {
+    expect(
+      removeAttachmentTokenOccurrence(
+        "@[a_b.png] @[other.png] @[a_b.png] end",
+        "/tmp/a[b.png",
+        1,
+      ),
+    ).toEqual({ text: "@[a_b.png] @[other.png] end", cursor: 24 });
+  });
+
+  it("preserves line breaks and places the caret at an edge deletion", () => {
+    expect(
+      removeAttachmentTokenOccurrence("@[a.png]\ntext", "a.png", 0),
+    ).toEqual({
+      text: "\ntext",
+      cursor: 0,
+    });
+    expect(
+      removeAttachmentTokenOccurrence("text @[a.png]", "a.png", 0),
+    ).toEqual({
+      text: "text",
+      cursor: 4,
+    });
+  });
+
+  it.each([-1, 1, 0.5, Number.NaN])(
+    "leaves a missing occurrence %s untouched",
+    (occurrence) => {
+      expect(
+        removeAttachmentTokenOccurrence("@[a.png]", "a.png", occurrence),
+      ).toBeNull();
+    },
+  );
 
   it("counts and detects tokens", () => {
     expect(countAttachmentTokens("@[a.png] @[a.png]", "a.png")).toBe(2);
@@ -147,5 +200,44 @@ describe("attachmentTokens", () => {
     expect(pick(0)?.id).toBe(1);
     expect(pick(1)?.id).toBe(2);
     expect(pick(5)?.id).toBe(1);
+  });
+
+  it("anchors insertion to the correct same-name attachment occurrence", () => {
+    const files = [
+      { name: "a.png", id: "first" },
+      { name: "b.png", id: "other" },
+      { name: "a.png", id: "second" },
+    ];
+    const text = "start @[a.png] middle @[b.png] then @[a.png] end";
+    const findAfter = (position: number) =>
+      findAttachmentAfterPosition(text, position, files, (file) => file.name);
+
+    expect(findAfter(0)).toBe(files[0]);
+    expect(findAfter(text.indexOf("@[a.png]"))).toBe(files[0]);
+    expect(findAfter(text.indexOf("middle"))).toBe(files[1]);
+    expect(findAfter(text.lastIndexOf("@[a.png]"))).toBe(files[2]);
+    expect(findAfter(text.length)).toBeUndefined();
+  });
+
+  it("skips tokens starting before the insertion point and unknown tokens", () => {
+    const files = [
+      { name: "/tmp/a[b.png", id: "first" },
+      { name: "next.png", id: "second" },
+    ];
+    const text = "@[unknown.png] @[a_b.png] @[next.png]";
+    const getName = (file: (typeof files)[number]) => file.name;
+    expect(findAttachmentAfterPosition(text, 0, files, getName)).toBe(files[0]);
+    expect(
+      findAttachmentAfterPosition(
+        text,
+        text.indexOf("@[a_b.png]") + 1,
+        files,
+        getName,
+      ),
+    ).toBe(files[1]);
+    expect(findAttachmentAfterPosition(text, 0, [], getName)).toBeUndefined();
+    expect(
+      findAttachmentAfterPosition("plain text", 0, files, getName),
+    ).toBeUndefined();
   });
 });

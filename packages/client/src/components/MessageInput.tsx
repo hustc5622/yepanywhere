@@ -9,6 +9,7 @@ import {
   useState,
 } from "react";
 import { ENTER_SENDS_MESSAGE } from "../constants";
+import { useComposerAttachmentPreviews } from "../hooks/useComposerAttachmentPreviews";
 import {
   type DraftControls,
   useDraftPersistence,
@@ -17,17 +18,20 @@ import { useI18n } from "../i18n";
 import type { AgentCommandConfig } from "../lib/agentCommands";
 import {
   countAttachmentTokens,
-  deleteAttachmentTokenAtCaret,
-  hasAttachmentToken,
+  findAttachmentAfterPosition,
   insertAttachmentToken,
-  matchTokenToAttachment,
+  removeAttachmentTokenOccurrence,
   sanitizeAttachmentTokenName,
 } from "../lib/attachmentTokens";
 import { readClipboardUserInput } from "../lib/clipboard";
 import { hasCoarsePointer } from "../lib/deviceDetection";
 import type { ContextUsage, PermissionMode } from "../types";
+import {
+  AttachmentComposer,
+  type AttachmentComposerHandle,
+} from "./AttachmentComposer";
 import { AttachmentPreviewModal } from "./AttachmentPreviewModal";
-import { ComposerTokenHighlight } from "./ComposerTokenHighlight";
+import { ComposerAttachmentCard } from "./ComposerAttachmentCard";
 import { MessageInputToolbar } from "./MessageInputToolbar";
 import type { VoiceInputButtonRef } from "./VoiceInputButton";
 
@@ -35,18 +39,10 @@ import type { VoiceInputButtonRef } from "./VoiceInputButton";
 export interface UploadProgress {
   fileId: string;
   fileName: string;
+  mimeType?: string;
   bytesUploaded: number;
   totalBytes: number;
   percent: number;
-}
-
-/** Format file size in human-readable form */
-function formatSize(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024)
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 type CommandPrefix = "/" | "$";
@@ -127,10 +123,13 @@ interface Props {
   sessionId?: string;
   /** Completed file attachments */
   attachments?: UploadedFile[];
+  /** Selection order, including uploads that have not completed yet. */
+  attachmentOrder?: string[];
   /** Callback when user selects files to attach */
-  onAttach?: (files: File[]) => void;
+  onAttach?: (files: File[], beforeAttachmentId?: string) => void;
   /** Callback when user removes an attachment */
   onRemoveAttachment?: (id: string) => void;
+  onRestoreAttachment?: (file: UploadedFile) => void;
   /** Progress info for in-flight uploads */
   uploadProgress?: UploadProgress[];
   /** Whether the provider supports permission modes (default: true) */
@@ -174,8 +173,10 @@ export function MessageInput({
   projectId,
   sessionId,
   attachments = [],
+  attachmentOrder,
   onAttach,
   onRemoveAttachment,
+  onRestoreAttachment,
   uploadProgress = [],
   supportsPermissionMode = true,
   provider,
@@ -190,7 +191,19 @@ export function MessageInput({
 }: Props) {
   const { t } = useI18n();
   const [text, setText, controls] = useDraftPersistence(draftKey);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const textareaRef = useRef<AttachmentComposerHandle>(null);
+  const removedAttachmentsRef = useRef<{
+    key: string;
+    files: Map<string, UploadedFile>;
+  }>({ key: draftKey, files: new Map() });
+  if (removedAttachmentsRef.current.key !== draftKey) {
+    removedAttachmentsRef.current = { key: draftKey, files: new Map() };
+  }
+  const removeDraftAttachment = (id: string) => {
+    const file = attachments.find((candidate) => candidate.id === id);
+    if (file) removedAttachmentsRef.current.files.set(id, file);
+    onRemoveAttachment?.(id);
+  };
   const fileInputRef = useRef<HTMLInputElement>(null);
   const voiceButtonRef = useRef<VoiceInputButtonRef>(null);
   // User-controlled collapse state (independent of external collapse from approval panel)
@@ -201,9 +214,6 @@ export function MessageInput({
   const [dismissedCompletionKey, setDismissedCompletionKey] = useState<
     string | null
   >(null);
-  // Attachment names that were inserted as inline tokens; deleting the token
-  // text is how the user removes such an attachment.
-  const inlinedNamesRef = useRef<Set<string>>(new Set());
 
   // Combined display text: committed text + interim transcript
   const displayText = interimTranscript
@@ -361,37 +371,43 @@ export function MessageInput({
    * Starts uploads and drops an inline token at the caret so the prompt keeps
    * the ordering between typed text and attached files.
    */
-  const attachFiles = useCallback(
-    (files: File[], baseText?: string, baseCursor?: number) => {
-      if (!onAttach || files.length === 0) return;
-      onAttach(files);
+  const attachFiles = (
+    files: File[],
+    baseText?: string,
+    baseCursor?: number,
+    copiedText = "",
+  ) => {
+    if (!onAttach || files.length === 0) return;
+    const textarea = textareaRef.current;
+    const anchor = findAttachmentAfterPosition(
+      textarea?.value ?? text,
+      textarea?.selectionStart ?? text.length,
+      composerAttachments,
+      (file) => file.name,
+    );
+    if (anchor) onAttach(files, anchor.id);
+    else onAttach(files);
+    let nextText = baseText ?? textarea?.value ?? text;
+    let nextCursor = baseCursor ?? textarea?.selectionStart ?? nextText.length;
+    // Pasted Yep clipboard payloads already carry `@[name]` inside the copied
+    // text; reuse those tokens instead of appending duplicates.
+    const consumed = new Map<string, number>();
+    for (const file of files) {
+      const name = sanitizeAttachmentTokenName(file.name);
+      const used = consumed.get(name) ?? 0;
+      consumed.set(name, used + 1);
+      if (countAttachmentTokens(copiedText, name) > used) continue;
+      const inserted = insertAttachmentToken(nextText, nextCursor, file.name);
+      nextText = inserted.text;
+      nextCursor = inserted.cursor;
+    }
 
-      const textarea = textareaRef.current;
-      let nextText = baseText ?? textarea?.value ?? text;
-      let nextCursor =
-        baseCursor ?? textarea?.selectionStart ?? nextText.length;
-      // Pasted Yep clipboard payloads already carry `@[name]` inside the copied
-      // text; reuse those tokens instead of appending duplicates.
-      const consumed = new Map<string, number>();
-      for (const file of files) {
-        const name = sanitizeAttachmentTokenName(file.name);
-        inlinedNamesRef.current.add(name);
-        const used = consumed.get(name) ?? 0;
-        consumed.set(name, used + 1);
-        if (countAttachmentTokens(nextText, name) > used) continue;
-        const inserted = insertAttachmentToken(nextText, nextCursor, file.name);
-        nextText = inserted.text;
-        nextCursor = inserted.cursor;
-      }
-
-      setInterimTranscript("");
-      setDismissedCompletionKey(null);
-      setText(nextText);
-      setCursorPosition(nextCursor);
-      setCaretSoon(nextCursor);
-    },
-    [onAttach, setCaretSoon, setText, text],
-  );
+    setInterimTranscript("");
+    setDismissedCompletionKey(null);
+    setText(nextText);
+    setCursorPosition(nextCursor);
+    setCaretSoon(nextCursor);
+  };
 
   const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = e.target.files;
@@ -456,6 +472,8 @@ export function MessageInput({
   }, [text, disabled, controls, onQueue, attachments.length]);
 
   const handleKeyDown = (e: KeyboardEvent) => {
+    // IME confirmation and deletion belong to the native editor.
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     // Ctrl+Space toggles voice input
     if (e.key === " " && e.ctrlKey && !e.shiftKey && !e.altKey) {
       e.preventDefault();
@@ -463,33 +481,6 @@ export function MessageInput({
         voiceButtonRef.current.toggle();
       }
       return;
-    }
-
-    // Attachment tokens delete as one unit, like a chip would.
-    if (
-      (e.key === "Backspace" || e.key === "Delete") &&
-      !e.metaKey &&
-      !e.ctrlKey &&
-      !e.altKey
-    ) {
-      const textarea = textareaRef.current;
-      const deletion = textarea
-        ? deleteAttachmentTokenAtCaret(
-            textarea.value,
-            textarea.selectionStart,
-            textarea.selectionEnd,
-            e.key === "Backspace" ? "backward" : "forward",
-            attachmentNames,
-          )
-        : null;
-      if (deletion) {
-        e.preventDefault();
-        setInterimTranscript("");
-        setText(deletion.text);
-        setCursorPosition(deletion.cursor);
-        setCaretSoon(deletion.cursor);
-        return;
-      }
     }
 
     if (isCommandCompletionOpen) {
@@ -606,11 +597,13 @@ export function MessageInput({
       let baseText = currentValue;
       let baseCursor = start;
       if (copiedInput.text) {
+        for (const id of textarea?.getSelectedAttachmentIds() ?? [])
+          removeDraftAttachment(id);
         baseText = `${currentValue.slice(0, start)}${copiedInput.text}${currentValue.slice(end)}`;
         baseCursor = start + copiedInput.text.length;
       }
 
-      attachFiles(copiedInput.images, baseText, baseCursor);
+      attachFiles(copiedInput.images, baseText, baseCursor, copiedInput.text);
       return;
     }
 
@@ -635,69 +628,72 @@ export function MessageInput({
     }
   };
 
-  // Names referenced by inline tokens (completed uploads + in-flight ones).
-  const attachmentNames = useMemo(
-    () => [
-      ...attachments.map((file) => file.originalName),
-      ...uploadProgress.map((progress) => progress.fileName),
-    ],
-    [attachments, uploadProgress],
+  const uploadedComposerAttachments = attachments.map((file) => ({
+    id: file.id,
+    name: file.originalName,
+    mimeType: file.mimeType,
+    apiPath:
+      projectId && sessionId
+        ? `/api/projects/${projectId}/sessions/${sessionId}/upload/${encodeURIComponent(file.name)}`
+        : undefined,
+  }));
+
+  const previewUrls = useComposerAttachmentPreviews(
+    uploadedComposerAttachments,
+  );
+  const composerAttachments = [
+    ...uploadedComposerAttachments.map((file) => ({
+      ...file,
+      previewUrl: previewUrls[file.id],
+    })),
+    ...uploadProgress.map((progress) => ({
+      id: progress.fileId,
+      name: progress.fileName,
+      mimeType: progress.mimeType,
+      pending: true,
+      progress: progress.percent,
+    })),
+  ].sort((left, right) =>
+    attachmentOrder
+      ? attachmentOrder.indexOf(left.id) - attachmentOrder.indexOf(right.id)
+      : 0,
   );
 
-  // Attachments without an inline token (legacy drafts, or the user deleted
-  // the token text) still need a visible chip below the textarea.
-  const detachedAttachments = useMemo(
-    () =>
-      attachments.filter(
-        (file) => !hasAttachmentToken(text, file.originalName),
-      ),
-    [attachments, text],
+  const occurrences = new Map<string, number>();
+  const detachedAttachments = composerAttachments.filter((file) => {
+    const name = sanitizeAttachmentTokenName(file.name);
+    const occurrence = occurrences.get(name) ?? 0;
+    occurrences.set(name, occurrence + 1);
+    return occurrence >= countAttachmentTokens(text, name);
+  });
+
+  const [previewAttachmentId, setPreviewAttachmentId] = useState<string | null>(
+    null,
+  );
+  const previewAttachment = uploadedComposerAttachments.find(
+    (file) => file.id === previewAttachmentId,
   );
 
-  const hasInlineTokens = useMemo(
-    () => attachmentNames.some((name) => hasAttachmentToken(text, name)),
-    [attachmentNames, text],
-  );
-
-  // Deleting the token text removes the attachment, mirroring how the chip
-  // behaves in other chat UIs. Attachments restored from a persisted draft are
-  // re-adopted here, so their tokens stay wired up after a navigation.
-  useEffect(() => {
-    for (const file of attachments) {
-      const name = sanitizeAttachmentTokenName(file.originalName);
-      if (hasAttachmentToken(text, name)) {
-        inlinedNamesRef.current.add(name);
-        continue;
-      }
-      if (!inlinedNamesRef.current.has(name)) continue;
-      inlinedNamesRef.current.delete(name);
-      onRemoveAttachment?.(file.id);
+  const handleRemoveAttachment = (id: string) => {
+    const file = composerAttachments.find((candidate) => candidate.id === id);
+    if (!file || !onRemoveAttachment) return;
+    const matchingFiles = composerAttachments.filter(
+      (candidate) =>
+        sanitizeAttachmentTokenName(candidate.name) ===
+        sanitizeAttachmentTokenName(file.name),
+    );
+    const deletion = removeAttachmentTokenOccurrence(
+      textareaRef.current?.value ?? text,
+      file.name,
+      matchingFiles.findIndex((candidate) => candidate.id === id),
+    );
+    if (deletion) {
+      setText(deletion.text);
+      setCursorPosition(deletion.cursor);
+      setCaretSoon(deletion.cursor);
     }
-  }, [attachments, onRemoveAttachment, text]);
-
-  // Inline token preview (click an `@[name]` chip in the composer).
-  const [previewAttachment, setPreviewAttachment] = useState<{
-    name: string;
-    apiPath: string | null;
-  } | null>(null);
-
-  const handleTokenClick = useCallback(
-    (name: string, occurrence: number) => {
-      const file = matchTokenToAttachment(
-        attachments,
-        (candidate) => candidate.originalName,
-        name,
-        occurrence,
-      );
-      if (!file) return;
-      const apiPath =
-        projectId && sessionId
-          ? `/api/projects/${projectId}/sessions/${sessionId}/upload/${encodeURIComponent(file.name)}`
-          : null;
-      setPreviewAttachment({ name: file.originalName, apiPath });
-    },
-    [attachments, projectId, sessionId],
-  );
+    removeDraftAttachment(id);
+  };
 
   // Voice input handlers
   const handleVoiceTranscript = useCallback(
@@ -800,16 +796,25 @@ export function MessageInput({
           </div>
         )}
         <div className="message-input-composer">
-          <textarea
+          <AttachmentComposer
             ref={textareaRef}
-            className={hasInlineTokens && !collapsed ? "has-token-mirror" : ""}
             value={displayText}
+            attachments={composerAttachments}
+            onPreview={setPreviewAttachmentId}
+            onRemove={onRemoveAttachment ? handleRemoveAttachment : undefined}
             onChange={(e) => {
               // If user edits while recording, only update committed text
               // This clears interim since they're now typing
               setInterimTranscript("");
               setDismissedCompletionKey(null);
               setCursorPosition(e.target.selectionStart);
+              for (const id of e.target.removedAttachmentIds ?? []) {
+                removeDraftAttachment(id);
+              }
+              for (const id of e.target.restoredAttachmentIds ?? []) {
+                const file = removedAttachmentsRef.current.files.get(id);
+                if (file) onRestoreAttachment?.(file);
+              }
               setText(e.target.value);
             }}
             onKeyDown={handleKeyDown}
@@ -823,53 +828,24 @@ export function MessageInput({
             disabled={disabled}
             rows={collapsed ? 1 : 3}
           />
-          {hasInlineTokens && !collapsed && (
-            <ComposerTokenHighlight
-              textareaRef={textareaRef}
-              text={displayText}
-              names={attachmentNames}
-              onTokenClick={handleTokenClick}
-            />
-          )}
         </div>
 
         {/* Attachment chips - only for files not referenced inline in the text */}
-        {!collapsed &&
-          (detachedAttachments.length > 0 || uploadProgress.length > 0) && (
-            <div className="attachment-list">
-              {detachedAttachments.map((file) => (
-                <div key={file.id} className="attachment-chip">
-                  <span className="attachment-name" title={file.path}>
-                    {file.originalName}
-                  </span>
-                  <span className="attachment-size">
-                    {formatSize(file.size)}
-                  </span>
-                  <button
-                    type="button"
-                    className="attachment-remove"
-                    onClick={() => onRemoveAttachment?.(file.id)}
-                    aria-label={t("messageInputRemoveAttachment", {
-                      name: file.originalName,
-                    })}
-                  >
-                    x
-                  </button>
-                </div>
-              ))}
-              {uploadProgress.map((progress) => (
-                <div
-                  key={progress.fileId}
-                  className="attachment-chip uploading"
-                >
-                  <span className="attachment-name">{progress.fileName}</span>
-                  <span className="attachment-progress">
-                    {progress.percent}%
-                  </span>
-                </div>
-              ))}
-            </div>
-          )}
+        {!collapsed && detachedAttachments.length > 0 && (
+          <div className="attachment-list">
+            {detachedAttachments.map((file) => (
+              <ComposerAttachmentCard
+                key={file.id}
+                attachment={file}
+                disabled={disabled}
+                onPreview={setPreviewAttachmentId}
+                onRemove={
+                  onRemoveAttachment ? handleRemoveAttachment : undefined
+                }
+              />
+            ))}
+          </div>
+        )}
 
         {/* Hidden file input */}
         <input
@@ -924,7 +900,7 @@ export function MessageInput({
         <AttachmentPreviewModal
           name={previewAttachment.name}
           apiPath={previewAttachment.apiPath}
-          onClose={() => setPreviewAttachment(null)}
+          onClose={() => setPreviewAttachmentId(null)}
         />
       )}
     </div>

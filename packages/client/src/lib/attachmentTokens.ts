@@ -141,6 +141,26 @@ export function removeAttachmentToken(text: string, name: string): string {
   const token = tokens.at(-1);
   if (!token) return text;
 
+  return removeTokenMatch(text, token).text;
+}
+
+/** Removes a specific zero-based occurrence and returns the deletion caret. */
+export function removeAttachmentTokenOccurrence(
+  text: string,
+  name: string,
+  occurrence: number,
+): { text: string; cursor: number } | null {
+  const target = sanitizeAttachmentTokenName(name);
+  const token = findAttachmentTokens(text).filter(
+    (candidate) => candidate.name === target,
+  )[occurrence];
+  return token ? removeTokenMatch(text, token) : null;
+}
+
+function removeTokenMatch(
+  text: string,
+  token: AttachmentTokenMatch,
+): { text: string; cursor: number } {
   let start = token.start;
   let end = token.end;
   // Swallow one adjacent space so removing a token does not leave "a  b".
@@ -149,7 +169,7 @@ export function removeAttachmentToken(text: string, name: string): string {
   } else if (text[start - 1] === " ") {
     start -= 1;
   }
-  return text.slice(0, start) + text.slice(end);
+  return { text: text.slice(0, start) + text.slice(end), cursor: start };
 }
 
 /** Splits text into plain runs and attachment token runs, in order. */
@@ -207,18 +227,8 @@ export function deleteAttachmentTokenAtCaret(
   );
   if (!token) return null;
 
-  let start = token.start;
-  let end = token.end;
-  // Swallow one adjacent space so the sentence does not keep a double gap.
-  if (text[end] === " " && /\s|^$/.test(text[start - 1] ?? "")) {
-    end += 1;
-  } else if (text[start - 1] === " ") {
-    start -= 1;
-  }
-
   return {
-    text: text.slice(0, start) + text.slice(end),
-    cursor: start,
+    ...removeTokenMatch(text, token),
     name: token.name,
   };
 }
@@ -259,4 +269,22 @@ export function matchTokenToAttachment<T>(
     (item) => sanitizeAttachmentTokenName(getName(item)) === tokenName,
   );
   return candidates[occurrence] ?? candidates[0];
+}
+
+/** Finds the attachment whose token starts at or after an insertion point. */
+export function findAttachmentAfterPosition<T>(
+  text: string,
+  position: number,
+  items: T[],
+  getName: (item: T) => string,
+): T | undefined {
+  const occurrences = new Map<string, number>();
+  for (const token of findAttachmentTokens(text, items.map(getName))) {
+    const occurrence = occurrences.get(token.name) ?? 0;
+    if (token.start >= position) {
+      return matchTokenToAttachment(items, getName, token.name, occurrence);
+    }
+    occurrences.set(token.name, occurrence + 1);
+  }
+  return undefined;
 }

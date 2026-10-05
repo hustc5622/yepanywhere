@@ -53,11 +53,9 @@ import { useI18n } from "../i18n";
 import { getAgentCommandConfigs } from "../lib/agentCommands";
 import {
   countAttachmentTokens,
-  deleteAttachmentTokenAtCaret,
-  hasAttachmentToken,
+  findAttachmentAfterPosition,
   insertAttachmentToken,
-  matchTokenToAttachment,
-  removeAttachmentToken,
+  removeAttachmentTokenOccurrence,
   sanitizeAttachmentTokenName,
 } from "../lib/attachmentTokens";
 import { readClipboardUserInput } from "../lib/clipboard";
@@ -76,10 +74,14 @@ import {
   shouldRestoreHistoricalEditAfterFailure,
 } from "../lib/sessionBranching";
 import type { PermissionMode, SessionNavigationState } from "../types";
+import {
+  AttachmentComposer,
+  type AttachmentComposerHandle,
+} from "./AttachmentComposer";
 import { AttachmentPreviewModal } from "./AttachmentPreviewModal";
 import { CodexAccountSelect } from "./CodexAccountSelect";
 import { CodexUsageCard } from "./CodexUsageCard";
-import { ComposerTokenHighlight } from "./ComposerTokenHighlight";
+import { ComposerAttachmentCard } from "./ComposerAttachmentCard";
 import { FilterDropdown, type FilterOption } from "./FilterDropdown";
 import { clearFabPrefill, getFabPrefill } from "./FloatingActionButton";
 import { PiGatewayKeySelect } from "./PiGatewayKeySelect";
@@ -349,6 +351,8 @@ export function NewSessionForm({
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
   const [previewFileId, setPreviewFileId] = useState<string | null>(null);
   const pendingFilesRef = useRef<PendingFile[]>(pendingFiles);
+  const removedPendingFilesRef = useRef(new Map<string, PendingFile>());
+  const pendingFileOrderRef = useRef<string[]>([]);
   pendingFilesRef.current = pendingFiles;
   const [isStarting, setIsStarting] = useState(false);
   const [startRetryBlockedMessage, setStartRetryBlockedMessage] = useState<
@@ -399,7 +403,10 @@ export function NewSessionForm({
   // route changes, cancelled drafts, and failed starts that unmount the form.
   useEffect(
     () => () => {
-      for (const pendingFile of pendingFilesRef.current) {
+      for (const pendingFile of [
+        ...pendingFilesRef.current,
+        ...removedPendingFilesRef.current.values(),
+      ]) {
         if (pendingFile.previewUrl) {
           URL.revokeObjectURL(pendingFile.previewUrl);
         }
@@ -412,7 +419,7 @@ export function NewSessionForm({
   const [showUnavailableProviders, setShowUnavailableProviders] =
     useState(false);
   const fileInputRef = useRef<HTMLInputElement>(null);
-  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const textareaRef = useRef<AttachmentComposerHandle>(null);
   const voiceButtonRef = useRef<VoiceInputButtonRef>(null);
   const hasInitializedDefaultsRef = useRef(false);
   // Thinking toggle state
@@ -1141,6 +1148,7 @@ export function NewSessionForm({
     files: File[],
     baseMessage?: string,
     baseCursor?: number,
+    copiedText = "",
   ) => {
     if (files.length === 0) return;
 
@@ -1151,7 +1159,25 @@ export function NewSessionForm({
         ? URL.createObjectURL(file)
         : undefined,
     }));
-    setPendingFiles((prev) => [...prev, ...newPendingFiles]);
+    const editor = textareaRef.current;
+    const anchor = findAttachmentAfterPosition(
+      editor?.value ?? message,
+      editor?.selectionStart ?? message.length,
+      pendingFiles,
+      (pending) => pending.file.name,
+    );
+    const order = pendingFileOrderRef.current;
+    const anchorIndex = anchor ? order.indexOf(anchor.id) : -1;
+    order.splice(
+      anchorIndex < 0 ? order.length : anchorIndex,
+      0,
+      ...newPendingFiles.map((file) => file.id),
+    );
+    setPendingFiles((prev) =>
+      [...prev, ...newPendingFiles].sort(
+        (left, right) => order.indexOf(left.id) - order.indexOf(right.id),
+      ),
+    );
 
     // Drop an inline token at the caret so the prompt records where each file
     // belongs relative to the typed text.
@@ -1166,7 +1192,7 @@ export function NewSessionForm({
       const name = sanitizeAttachmentTokenName(pendingFile.file.name);
       const used = consumed.get(name) ?? 0;
       consumed.set(name, used + 1);
-      if (countAttachmentTokens(nextMessage, name) > used) continue;
+      if (countAttachmentTokens(copiedText, name) > used) continue;
       const inserted = insertAttachmentToken(
         nextMessage,
         nextCursor,
@@ -1189,17 +1215,35 @@ export function NewSessionForm({
     e.target.value = ""; // Reset for re-selection
   };
 
+  const removePendingFiles = (ids: string[]) => {
+    if (ids.length === 0) return;
+    for (const file of pendingFilesRef.current) {
+      if (ids.includes(file.id))
+        removedPendingFilesRef.current.set(file.id, file);
+    }
+    setPendingFiles((prev) => prev.filter((file) => !ids.includes(file.id)));
+  };
+
   const handleRemoveFile = (id: string) => {
-    const file = pendingFilesRef.current.find((f) => f.id === id);
-    if (file?.previewUrl) {
-      URL.revokeObjectURL(file.previewUrl);
+    const file = pendingFilesRef.current.find(
+      (candidate) => candidate.id === id,
+    );
+    if (!file) return;
+    const matchingFiles = pendingFilesRef.current.filter(
+      (candidate) =>
+        sanitizeAttachmentTokenName(candidate.file.name) ===
+        sanitizeAttachmentTokenName(file.file.name),
+    );
+    const deletion = removeAttachmentTokenOccurrence(
+      textareaRef.current?.value ?? message,
+      file.file.name,
+      matchingFiles.findIndex((candidate) => candidate.id === id),
+    );
+    if (deletion) {
+      setMessage(deletion.text);
+      setCaretSoon(deletion.cursor);
     }
-    if (file) {
-      const textarea = textareaRef.current;
-      const currentValue = textarea?.value ?? message;
-      setMessage(removeAttachmentToken(currentValue, file.file.name));
-    }
-    setPendingFiles((prev) => prev.filter((f) => f.id !== id));
+    removePendingFiles([id]);
   };
 
   const handleModeSelect = (selectedMode: PermissionMode) => {
@@ -1561,42 +1605,7 @@ export function NewSessionForm({
   };
 
   const handleKeyDown = (e: KeyboardEvent) => {
-    // Attachment tokens delete as one unit, like a chip would.
-    if (
-      (e.key === "Backspace" || e.key === "Delete") &&
-      !e.metaKey &&
-      !e.ctrlKey &&
-      !e.altKey
-    ) {
-      const textarea = textareaRef.current;
-      const deletion = textarea
-        ? deleteAttachmentTokenAtCaret(
-            textarea.value,
-            textarea.selectionStart,
-            textarea.selectionEnd,
-            e.key === "Backspace" ? "backward" : "forward",
-            pendingFileNames,
-          )
-        : null;
-      if (deletion) {
-        e.preventDefault();
-        setInterimTranscript("");
-        setMessage(deletion.text);
-        setCaretSoon(deletion.cursor);
-        const removed = matchTokenToAttachment(
-          pendingFiles,
-          (candidate) => candidate.file.name,
-          deletion.name,
-          0,
-        );
-        if (removed) {
-          if (removed.previewUrl) URL.revokeObjectURL(removed.previewUrl);
-          setPendingFiles((prev) => prev.filter((f) => f.id !== removed.id));
-        }
-        return;
-      }
-    }
-
+    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
     if (e.key === "Enter") {
       // Skip Enter during IME composition (e.g. Chinese/Japanese/Korean input)
       if (e.nativeEvent.isComposing) return;
@@ -1643,11 +1652,17 @@ export function NewSessionForm({
       let baseMessage = currentValue;
       let baseCursor = start;
       if (copiedInput.text) {
+        removePendingFiles(textarea?.getSelectedAttachmentIds() ?? []);
         baseMessage = `${currentValue.slice(0, start)}${copiedInput.text}${currentValue.slice(end)}`;
         baseCursor = start + copiedInput.text.length;
       }
 
-      addPendingFiles(copiedInput.images, baseMessage, baseCursor);
+      addPendingFiles(
+        copiedInput.images,
+        baseMessage,
+        baseCursor,
+        copiedInput.text,
+      );
       return;
     }
 
@@ -1734,26 +1749,21 @@ export function NewSessionForm({
   );
 
   const hasContent = message.trim() || pendingFiles.length > 0;
-  const pendingFileNames = pendingFiles.map((pf) => pf.file.name);
   // Files referenced inline in the prompt are rendered as tokens; only the
   // remaining ones still need a chip below the composer.
-  const detachedPendingFiles = pendingFiles.filter(
-    (pf) => !hasAttachmentToken(displayText, pf.file.name),
-  );
-  const hasInlineTokens = pendingFileNames.some((name) =>
-    hasAttachmentToken(displayText, name),
-  );
-
-  const handleTokenClick = (name: string, occurrence: number) => {
-    const pendingFile = matchTokenToAttachment(
-      pendingFiles,
-      (candidate) => candidate.file.name,
-      name,
-      occurrence,
-    );
-    if (!pendingFile) return;
-    setPreviewFileId(pendingFile.id);
-  };
+  const pendingOccurrences = new Map<string, number>();
+  const detachedPendingFiles = pendingFiles.filter((pending) => {
+    const name = sanitizeAttachmentTokenName(pending.file.name);
+    const occurrence = pendingOccurrences.get(name) ?? 0;
+    pendingOccurrences.set(name, occurrence + 1);
+    return occurrence >= countAttachmentTokens(displayText, name);
+  });
+  const composerAttachments = pendingFiles.map((pending) => ({
+    id: pending.id,
+    name: pending.file.name,
+    mimeType: pending.file.type,
+    previewUrl: pending.previewUrl,
+  }));
 
   const previewFile = previewFileId
     ? pendingFiles.find((pf) => pf.id === previewFileId)
@@ -1866,11 +1876,31 @@ export function NewSessionForm({
   const inputArea = (
     <>
       <div className="new-session-composer">
-        <textarea
+        <AttachmentComposer
           ref={textareaRef}
           value={displayText}
+          attachments={composerAttachments}
+          onPreview={setPreviewFileId}
+          onRemove={handleRemoveFile}
           onChange={(e) => {
             setInterimTranscript("");
+            removePendingFiles(e.target.removedAttachmentIds ?? []);
+            const restored = (e.target.restoredAttachmentIds ?? []).flatMap(
+              (id) => {
+                const file = removedPendingFilesRef.current.get(id);
+                if (!file) return [];
+                removedPendingFilesRef.current.delete(id);
+                return [file];
+              },
+            );
+            if (restored.length > 0)
+              setPendingFiles((prev) =>
+                [...prev, ...restored].sort(
+                  (left, right) =>
+                    pendingFileOrderRef.current.indexOf(left.id) -
+                    pendingFileOrderRef.current.indexOf(right.id),
+                ),
+              );
             setMessage(e.target.value);
           }}
           onKeyDown={handleKeyDown}
@@ -1878,16 +1908,8 @@ export function NewSessionForm({
           placeholder={resolvedPlaceholder}
           disabled={isStarting}
           rows={rows}
-          className={`new-session-form-textarea${hasInlineTokens ? " has-token-mirror" : ""}`}
+          className="new-session-form-textarea"
         />
-        {hasInlineTokens && (
-          <ComposerTokenHighlight
-            textareaRef={textareaRef}
-            text={displayText}
-            names={pendingFileNames}
-            onTokenClick={handleTokenClick}
-          />
-        )}
       </div>
       <div className="new-session-form-toolbar">
         <div className="new-session-form-toolbar-left">
@@ -2076,50 +2098,27 @@ export function NewSessionForm({
         </div>
       )}
       {detachedPendingFiles.length > 0 && (
-        <div className="pending-files-list">
+        <div className="attachment-list">
           {detachedPendingFiles.map((pf) => {
             const progress = uploadProgress[pf.id];
             return (
-              <div key={pf.id} className="pending-file-chip">
-                {pf.previewUrl && (
-                  <img
-                    src={pf.previewUrl}
-                    alt=""
-                    className="pending-file-preview"
-                  />
-                )}
-                <div className="pending-file-info">
-                  <span className="pending-file-name">{pf.file.name}</span>
-                  <span className="pending-file-size">
-                    {progress
-                      ? `${Math.round((progress.uploaded / progress.total) * 100)}%`
-                      : formatSize(pf.file.size)}
-                  </span>
-                </div>
-                {!isStarting && (
-                  <button
-                    type="button"
-                    className="pending-file-remove"
-                    onClick={() => handleRemoveFile(pf.id)}
-                    aria-label={t("newSessionRemoveFile", {
-                      name: pf.file.name,
-                    })}
-                  >
-                    <svg
-                      width="14"
-                      height="14"
-                      viewBox="0 0 24 24"
-                      fill="none"
-                      stroke="currentColor"
-                      strokeWidth="2"
-                      aria-hidden="true"
-                    >
-                      <line x1="18" y1="6" x2="6" y2="18" />
-                      <line x1="6" y1="6" x2="18" y2="18" />
-                    </svg>
-                  </button>
-                )}
-              </div>
+              <ComposerAttachmentCard
+                key={pf.id}
+                attachment={{
+                  id: pf.id,
+                  name: pf.file.name,
+                  mimeType: pf.file.type,
+                  previewUrl: pf.previewUrl,
+                }}
+                detail={
+                  progress
+                    ? `${Math.round((progress.uploaded / progress.total) * 100)}%`
+                    : formatSize(pf.file.size)
+                }
+                disabled={isStarting}
+                onPreview={setPreviewFileId}
+                onRemove={handleRemoveFile}
+              />
             );
           })}
         </div>

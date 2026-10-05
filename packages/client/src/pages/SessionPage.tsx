@@ -828,6 +828,13 @@ function SessionPageContent({
   const pendingUploadsRef = useRef<Map<string, Promise<UploadedFile | null>>>(
     new Map(),
   );
+  const cancelledUploadIdsRef = useRef(new Set<string>());
+  // Preserve selection order when same-named uploads finish out of order.
+  const attachmentOrderRef = useRef<string[]>([]);
+  for (const file of attachments) {
+    if (!attachmentOrderRef.current.includes(file.id))
+      attachmentOrderRef.current.push(file.id);
+  }
 
   // Approval panel collapsed state (separate from message input collapse)
   const [approvalCollapsed, setApprovalCollapsed] = useState(false);
@@ -970,6 +977,11 @@ function SessionPageContent({
       for (const result of results) {
         if (result) currentAttachments.push(result);
       }
+      currentAttachments.sort(
+        (left, right) =>
+          attachmentOrderRef.current.indexOf(left.id) -
+          attachmentOrderRef.current.indexOf(right.id),
+      );
       // Remove uploaded files that handleAttach added to state during the wait
       // (they're already captured in currentAttachments). Preserve any new uploads
       // started after send was clicked.
@@ -1331,6 +1343,11 @@ function SessionPageContent({
       for (const result of results) {
         if (result) currentAttachments.push(result);
       }
+      currentAttachments.sort(
+        (left, right) =>
+          attachmentOrderRef.current.indexOf(left.id) -
+          attachmentOrderRef.current.indexOf(right.id),
+      );
       const sentIds = new Set(currentAttachments.map((a) => a.id));
       setAttachments((prev) => prev.filter((a) => !sentIds.has(a.id)));
       updatePendingMessage(tempId, { status: undefined });
@@ -1638,9 +1655,14 @@ function SessionPageContent({
   // Each file uploads independently (parallel) and its promise is tracked
   // so handleSend can wait for in-flight uploads before sending
   const handleAttach = useCallback(
-    (files: File[]) => {
+    (files: File[], beforeAttachmentId?: string) => {
       for (const file of files) {
         const tempId = generateUUID();
+        const order = attachmentOrderRef.current;
+        const anchorIndex = beforeAttachmentId
+          ? order.indexOf(beforeAttachmentId)
+          : -1;
+        order.splice(anchorIndex < 0 ? order.length : anchorIndex, 0, tempId);
 
         // Add to progress tracking
         setUploadProgress((prev) => [
@@ -1648,6 +1670,7 @@ function SessionPageContent({
           {
             fileId: tempId,
             fileName: file.name,
+            mimeType: file.type,
             bytesUploaded: 0,
             totalBytes: file.size,
             percent: 0,
@@ -1673,10 +1696,21 @@ function SessionPageContent({
           })
           .then(
             (uploaded) => {
-              setAttachments((prev) => [...prev, uploaded]);
+              if (cancelledUploadIdsRef.current.has(tempId)) return null;
+              const order = attachmentOrderRef.current;
+              const index = order.indexOf(tempId);
+              if (index >= 0) order[index] = uploaded.id;
+              else order.push(uploaded.id);
+              setAttachments((prev) =>
+                [...prev, uploaded].sort(
+                  (left, right) =>
+                    order.indexOf(left.id) - order.indexOf(right.id),
+                ),
+              );
               return uploaded;
             },
             (err) => {
+              if (cancelledUploadIdsRef.current.has(tempId)) return null;
               console.error("Upload failed:", err);
               const errorMsg =
                 err instanceof Error ? err.message : t("sessionShareFailed");
@@ -1695,6 +1729,7 @@ function SessionPageContent({
               prev.filter((p) => p.fileId !== tempId),
             );
             pendingUploadsRef.current.delete(tempId);
+            cancelledUploadIdsRef.current.delete(tempId);
           });
 
         pendingUploadsRef.current.set(tempId, uploadPromise);
@@ -1705,6 +1740,13 @@ function SessionPageContent({
 
   const handleRemoveAttachment = useCallback(
     (id: string) => {
+      if (pendingUploadsRef.current.has(id)) {
+        cancelledUploadIdsRef.current.add(id);
+        pendingUploadsRef.current.delete(id);
+        setUploadProgress((prev) =>
+          prev.filter((progress) => progress.fileId !== id),
+        );
+      }
       setAttachments((prev) => prev.filter((a) => a.id !== id));
     },
     [setAttachments],
@@ -2633,6 +2675,16 @@ function SessionPageContent({
                 attachments={attachments}
                 onAttach={handleAttach}
                 onRemoveAttachment={handleRemoveAttachment}
+                onRestoreAttachment={(file) =>
+                  setAttachments((prev) =>
+                    [...prev.filter((item) => item.id !== file.id), file].sort(
+                      (left, right) =>
+                        attachmentOrderRef.current.indexOf(left.id) -
+                        attachmentOrderRef.current.indexOf(right.id),
+                    ),
+                  )
+                }
+                attachmentOrder={attachmentOrderRef.current}
                 uploadProgress={uploadProgress}
                 commandPrefix={commandPrefix}
                 commandLabel={commandLabel}

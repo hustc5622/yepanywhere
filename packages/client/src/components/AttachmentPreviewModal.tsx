@@ -38,7 +38,7 @@ function FetchedPreview({ apiPath, alt }: { apiPath: string; alt: string }) {
 
 /**
  * Preview modal for a composer attachment, used when clicking an inline
- * `@[name]` token in the message input.
+ * attachment card in the message input.
  */
 export function AttachmentPreviewModal({ name, src, apiPath, onClose }: Props) {
   return (

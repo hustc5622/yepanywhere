@@ -125,9 +125,9 @@ describe("Codex new session reasoning", () => {
     async (compact, label, effort) => {
       renderForm(compact);
       selectEffort(compact, label);
-      fireEvent.change(screen.getByRole("textbox"), {
-        target: { value: "test prompt" },
-      });
+      const composer = screen.getByRole("textbox");
+      composer.textContent = "test prompt";
+      fireEvent.input(composer);
       fireEvent.click(screen.getByRole("button", { name: "Start session" }));
       await waitFor(() =>
         expect(api.startSession).toHaveBeenCalledWith(
@@ -157,9 +157,9 @@ describe("Codex new session reasoning", () => {
         .getByRole("button", { name: "Thinking effort: High" })
         .getAttribute("aria-pressed"),
     ).toBe("false");
-    fireEvent.change(screen.getByRole("textbox"), {
-      target: { value: "test prompt" },
-    });
+    const composer = screen.getByRole("textbox");
+    composer.textContent = "test prompt";
+    fireEvent.input(composer);
     fireEvent.click(screen.getByRole("button", { name: "Start session" }));
     await waitFor(() =>
       expect(api.startSession).toHaveBeenCalledWith(

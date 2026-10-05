@@ -554,6 +554,8 @@
   "messageInputExpand": "展开消息输入框",
   "messageInputCollapse": "收起消息输入框",
   "messageInputContinueAbove": "在上方响应时可继续输入...",
+  "composerAttachmentPreview": "预览 {name}",
+  "composerAttachmentRemove": "删除 {name}",
   "attachmentPreviewLoading": "图片加载中...",
   "messageInputRemoveAttachment": "移除 {name}",
   "toolbarAttachFiles": "添加文件",

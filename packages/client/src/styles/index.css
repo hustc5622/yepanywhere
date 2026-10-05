@@ -476,7 +476,8 @@ html.mobile-navigation-viewport .session-page {
 
 html.mobile-navigation-viewport .session-messages,
 html.mobile-navigation-viewport .page-scroll-container,
-html.mobile-navigation-viewport textarea {
+html.mobile-navigation-viewport textarea,
+html.mobile-navigation-viewport .attachment-composer {
   overscroll-behavior-y: contain;
 }
 
@@ -1246,16 +1247,15 @@ h2 {
   margin-bottom: 1.5rem;
 }
 
-/* Keep the attachment mirror in the textarea's scrolling coordinate space.
-   A dedicated container also follows layout shifts from account/usage cards. */
+/* Shared native editor containers. */
 .new-session-composer,
 .message-input-composer {
   position: relative;
   min-width: 0;
 }
 
-.new-session-composer > textarea,
-.message-input-composer > textarea {
+.new-session-composer > .attachment-composer,
+.message-input-composer > .attachment-composer {
   display: block;
   width: 100%;
   margin: 0;
@@ -4772,7 +4772,7 @@ a.sidebar-nav-item {
   white-space: nowrap;
 }
 
-.message-input textarea {
+.message-input .attachment-composer {
   flex: 1;
   padding: 0.75rem;
   background: var(--bg-input);
@@ -4795,7 +4795,7 @@ a.sidebar-nav-item {
   opacity: 1;
 }
 
-.message-input-collapsed textarea {
+.message-input-collapsed .attachment-composer {
   padding: 0.5rem 0.75rem;
   font-size: var(--font-size-sm);
   min-height: 0;
@@ -5351,7 +5351,7 @@ a.sidebar-nav-item {
     width: 44px;
     height: 44px;
   }
-  .message-input textarea {
+  .message-input .attachment-composer {
     flex: none;
     min-height: 64px;
     height: clamp(64px, 14dvh, 96px);
@@ -5360,7 +5360,7 @@ a.sidebar-nav-item {
     line-height: 1.4;
     overflow-y: auto;
   }
-  .message-input-collapsed textarea {
+  .message-input-collapsed .attachment-composer {
     min-height: 40px;
     height: 40px;
   }
@@ -5939,58 +5939,245 @@ a.sidebar-nav-item {
   border-radius: var(--radius-md);
 }
 
-/* Inline attachment tokens in the composer */
-.composer-token-mirror {
-  position: absolute;
-  inset: 0;
-  box-sizing: border-box;
-  z-index: 1;
-  margin: 0;
-  overflow: hidden;
-  white-space: pre-wrap;
-  /* Must match the textarea's line-breaking exactly, otherwise the caret
-     (drawn by the textarea) drifts away from the mirrored glyphs. */
-  overflow-wrap: break-word;
-  word-break: normal;
-  color: var(--text-primary);
-  background: var(--bg-input);
-  border-style: solid;
-  border-color: transparent;
-  pointer-events: none;
-}
-
-/*
- * Chips may only change paint, never text metrics: any font-weight,
- * letter-spacing or padding change here shifts every following glyph relative
- * to the textarea's own caret position.
- */
-.composer-token-chip {
-  border-radius: 4px;
-  background: color-mix(in srgb, var(--link-color) 34%, var(--bg-input));
-  box-shadow: 0 0 0 2px
-    color-mix(in srgb, var(--link-color) 34%, var(--bg-input));
-  color: var(--link-color);
-  -webkit-box-decoration-break: clone;
-  box-decoration-break: clone;
-}
-
-.composer-token-chip[data-hovered] {
-  background: color-mix(in srgb, var(--link-color) 52%, var(--bg-input));
-  box-shadow: 0 0 0 2px
-    color-mix(in srgb, var(--link-color) 52%, var(--bg-input));
-  color: var(--text-primary);
-}
-
-.message-input textarea.has-token-mirror,
-.new-session-form-textarea.has-token-mirror {
+/* One native text/selection layer. Attachments are non-editable inline cards. */
+.attachment-composer {
   position: relative;
-  z-index: 2;
-  background: transparent;
+  min-height: calc(var(--composer-rows, 3) * 1.5em + 1.5rem + 2px);
+  max-height: min(320px, 40dvh);
+  overflow-y: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  line-height: 1.5;
   caret-color: var(--text-primary);
+  text-align: start;
+  cursor: text;
 }
 
-.has-token-mirror[data-token-hovered] {
+.attachment-composer:focus {
+  outline: none;
+  border-color: var(--new-session-accent, var(--app-yep-green));
+  box-shadow: 0 0 0 2px
+    color-mix(
+      in srgb,
+      var(--new-session-accent, var(--app-yep-green)) 20%,
+      transparent
+    );
+}
+
+.attachment-composer[data-empty="true"]::before {
+  content: attr(data-placeholder);
+  color: var(--text-muted);
+  pointer-events: none;
+  position: absolute;
+}
+
+.attachment-composer[aria-disabled="true"] {
+  opacity: 0.6;
+  cursor: default;
+}
+
+.attachment-composer-card {
+  position: relative;
+  display: inline-flex;
+  vertical-align: middle;
+  align-items: center;
+  max-width: min(100%, 280px);
+  margin-block: 3px;
+  border: 1px solid color-mix(in srgb, var(--border-color) 70%, transparent);
+  border-radius: 10px;
+  background: color-mix(in srgb, var(--bg-code) 55%, var(--bg-input));
+  color: var(--text-primary);
+  white-space: normal;
+  user-select: none;
+  -webkit-user-select: none;
+  cursor: default;
+}
+
+.attachment-composer-preview {
+  display: inline-flex;
+  flex: 1;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  min-height: 44px;
+  padding: 4px 8px;
+  border: 0;
+  border-radius: 9px 0 0 9px;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  font-size: var(--font-size-sm);
+  text-align: start;
   cursor: pointer;
+  overflow: hidden;
+}
+
+.attachment-composer-card > .attachment-composer-preview {
+  align-self: stretch;
+}
+
+.attachment-composer-preview:disabled {
+  opacity: 1;
+  cursor: default;
+}
+
+.attachment-composer-thumbnail,
+.attachment-composer-preview img {
+  width: 36px;
+  height: 36px;
+  flex: 0 0 36px;
+  object-fit: cover;
+  border-radius: 5px;
+}
+
+.attachment-composer-name {
+  display: block;
+  min-width: 0;
+  max-width: 180px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.attachment-composer-remove {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  flex: 0 0 44px;
+  width: 44px;
+  min-height: 44px;
+  padding: 0;
+  border: 0;
+  border-radius: 0 9px 9px 0;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 20px;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+
+.attachment-composer-remove:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+
+.attachment-composer-preview:hover:not(:disabled),
+.attachment-composer-remove:hover:not(:disabled) {
+  background: var(--bg-hover);
+  color: var(--text-primary);
+}
+
+.attachment-composer-preview:focus-visible,
+.attachment-composer-remove:focus-visible {
+  outline: 2px solid var(--app-yep-green);
+  outline-offset: -2px;
+}
+
+/* Image references stay in the text flow, with a readable preview and a
+   quiet caption instead of a filename stretching across the editor. */
+.attachment-composer-card[data-kind="image"] {
+  width: 96px;
+  max-width: 100%;
+  box-sizing: border-box;
+  vertical-align: bottom;
+  border-radius: 12px;
+  background: var(--bg-code);
+  box-shadow: 0 1px 2px color-mix(in srgb, var(--border-color) 25%, transparent);
+}
+
+.attachment-composer-card[data-kind="image"] .attachment-composer-preview {
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  gap: 0;
+  width: 100%;
+  padding: 0;
+  border-radius: 11px;
+}
+
+.attachment-composer-card[data-kind="image"] .attachment-composer-preview img,
+.attachment-composer-card[data-kind="image"] .attachment-composer-icon {
+  width: 100%;
+  height: 80px;
+  flex: 0 0 80px;
+  border-radius: 0;
+  object-fit: cover;
+  object-position: center top;
+  background: var(--bg-input);
+}
+
+.attachment-composer-card[data-kind="image"] .attachment-composer-name {
+  box-sizing: border-box;
+  width: 100%;
+  padding: 6px 7px;
+  color: var(--text-secondary);
+  font-size: 11px;
+  line-height: 16px;
+}
+
+.attachment-composer-card[data-kind="image"] .attachment-size {
+  padding: 0 7px 6px;
+  line-height: 14px;
+}
+
+.attachment-composer-card[data-kind="image"] .attachment-composer-remove {
+  position: absolute;
+  z-index: 1;
+  top: 0;
+  inset-inline-end: 0;
+  height: 44px;
+  border-radius: 11px;
+  background: transparent;
+  color: var(--text-primary);
+  line-height: 1;
+}
+
+/* Keep a 44px touch target while drawing only a small circular control. */
+.attachment-composer-card[data-kind="image"]
+  .attachment-composer-remove::before {
+  content: "";
+  position: absolute;
+  z-index: -1;
+  inset: 10px;
+  border-radius: 50%;
+  background: var(--bg-input);
+  box-shadow: 0 1px 4px #0003;
+}
+
+.attachment-composer-card[data-kind="image"]
+  .attachment-composer-remove:hover:not(:disabled)::before {
+  background: var(--bg-hover);
+}
+
+.attachment-composer-card[data-kind="image"][data-pending]
+  .attachment-composer-preview
+  img {
+  opacity: 0.55;
+}
+
+.attachment-composer-card[data-kind="image"] .attachment-composer-progress {
+  position: absolute;
+  inset-inline-start: 6px;
+  top: 54px;
+  padding: 2px 6px;
+  border-radius: 6px;
+  background: var(--bg-input);
+  color: var(--text-primary);
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+  line-height: 16px;
+}
+
+@media (max-width: 600px) {
+  .attachment-composer-name {
+    max-width: 160px;
+  }
+
+  .message-input:not(.message-input-collapsed)
+    .attachment-composer:has(.attachment-composer-card[data-kind="image"]) {
+    min-height: min(136px, 40dvh);
+    height: min(144px, 40dvh);
+  }
 }
 
 /* Attachment list */
@@ -6001,73 +6188,21 @@ a.sidebar-nav-item {
   padding: var(--space-2) 0;
 }
 
-.attachment-chip {
-  display: flex;
-  align-items: center;
-  gap: var(--space-1);
-  padding: var(--space-1) var(--space-2);
-  padding-right: var(--space-1);
-  background: var(--bg-code);
-  border: 1px solid var(--border-color);
-  border-radius: 16px;
+.attachment-size,
+.attachment-composer-progress {
+  color: var(--text-dimmed);
+  flex-shrink: 0;
   font-size: var(--font-size-xs);
 }
 
-.attachment-chip.uploading {
-  opacity: 0.7;
-}
-
-.attachment-name {
-  max-width: 120px;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  color: var(--text-primary);
-}
-
-.attachment-size {
-  color: var(--text-dimmed);
-  flex-shrink: 0;
-}
-
-.attachment-progress {
-  color: var(--app-yep-green);
-  font-weight: 500;
-  flex-shrink: 0;
-}
-
-.attachment-remove {
-  display: flex;
+.attachment-composer-icon {
+  display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 18px;
-  height: 18px;
-  padding: 0;
-  margin-left: var(--space-1);
-  background: transparent;
-  border: none;
-  border-radius: 50%;
-  color: var(--text-dimmed);
-  font-size: var(--font-size-sm);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-}
-
-.attachment-remove:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
-}
-
-/* Mobile adjustments */
-@media (max-width: 600px) {
-  .attachment-name {
-    max-width: 80px;
-  }
-
-  .attachment-chip {
-    padding: 2px var(--space-1);
-    padding-right: 2px;
-  }
+  width: 28px;
+  flex: 0 0 28px;
+  color: var(--text-muted);
+  font-size: 24px;
 }
 
 /* Status */
@@ -9763,72 +9898,6 @@ button.context-usage-indicator--button:focus-visible {
 
 .new-session-input-area {
   margin-bottom: 1.5rem;
-}
-
-.pending-files-list {
-  display: flex;
-  flex-wrap: wrap;
-  gap: var(--space-2);
-  margin-top: var(--space-3);
-}
-
-.pending-file-chip {
-  display: flex;
-  align-items: center;
-  gap: var(--space-2);
-  padding: var(--space-2);
-  background: var(--bg-code);
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-md);
-  max-width: 200px;
-}
-
-.pending-file-preview {
-  width: 32px;
-  height: 32px;
-  border-radius: var(--radius-sm);
-  object-fit: cover;
-  flex-shrink: 0;
-}
-
-.pending-file-info {
-  display: flex;
-  flex-direction: column;
-  min-width: 0;
-}
-
-.pending-file-name {
-  font-size: var(--font-size-sm);
-  color: var(--text-primary);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.pending-file-size {
-  font-size: var(--font-size-xs);
-  color: var(--text-dimmed);
-}
-
-.pending-file-remove {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 20px;
-  height: 20px;
-  padding: 0;
-  background: transparent;
-  border: none;
-  border-radius: 50%;
-  color: var(--text-dimmed);
-  cursor: pointer;
-  transition: background 0.15s, color 0.15s;
-  flex-shrink: 0;
-}
-
-.pending-file-remove:hover {
-  background: var(--bg-hover);
-  color: var(--error-color);
 }
 
 /* Provider Selection Section */

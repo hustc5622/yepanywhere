@@ -554,6 +554,8 @@
   "messageInputExpand": "Expand message input",
   "messageInputCollapse": "Collapse message input",
   "messageInputContinueAbove": "Continue typing while responding above...",
+  "composerAttachmentPreview": "Preview {name}",
+  "composerAttachmentRemove": "Remove {name}",
   "attachmentPreviewLoading": "Loading image...",
   "messageInputRemoveAttachment": "Remove {name}",
   "toolbarAttachFiles": "Attach files",
