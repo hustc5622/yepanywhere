@@ -52,6 +52,9 @@ function SubagentDetailContent({
     enabled: true,
   });
   const [tab, setTab] = useState<"conversation" | "result">("conversation");
+  const isCodexAgent = data?.messages.some(
+    (message) => message.codexThreadItem || message.codexMessagePhase,
+  );
   const status = data?.descriptor?.status ?? data?.status;
   const isStreaming =
     status === "running" ||
@@ -68,7 +71,11 @@ function SubagentDetailContent({
   }, [onStatus, status, target.agentId, error, visible]);
   const statusLabel =
     status === "completed"
-      ? t("subagentStatusCompleted")
+      ? t(
+          isCodexAgent
+            ? "codexAgentStatusCompleted"
+            : "subagentStatusCompleted",
+        )
       : status === "failed"
         ? t("subagentStatusFailed")
         : status === "interrupted"
@@ -160,19 +167,24 @@ function SubagentDetailContent({
             projectPath={projectPath}
             sessionId={target.agentId}
           >
-            {data.hasInheritedContext && (
-              <InheritedSubagentContext
-                key={`${projectId}:${rootSessionId}:${target.agentId}`}
-                projectId={projectId}
-                rootSessionId={rootSessionId}
-                agentId={target.agentId}
-                active={tab === "conversation"}
-              />
-            )}
             <SubagentTranscript
               messages={data.messages}
+              agentPath={[data.descriptor?.description, target.name].find(
+                (name) => name?.startsWith("/root/"),
+              )}
               isStreaming={isStreaming}
               mode={tab}
+              inheritedContext={
+                data.hasInheritedContext ? (
+                  <InheritedSubagentContext
+                    key={`${projectId}:${rootSessionId}:${target.agentId}`}
+                    projectId={projectId}
+                    rootSessionId={rootSessionId}
+                    agentId={target.agentId}
+                    active={tab === "conversation"}
+                  />
+                ) : undefined
+              }
               emptyMessage={
                 tab === "result"
                   ? t("subagentDetailNoResult")

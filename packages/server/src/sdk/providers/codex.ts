@@ -44,6 +44,10 @@ import {
   resolveCodexEventProjectionMode,
 } from "../../codex-events/index.js";
 import {
+  CodexAgentWaitTracker,
+  codexAgentWaitMessage,
+} from "../../codex/agent-wait.js";
+import {
   isCodexCorrelationDebugEnabled,
   logCodexCorrelationDebug,
   summarizeCodexNormalizedMessage,
@@ -71,6 +75,10 @@ import {
   summarizeCodexImageGenerationResult,
 } from "../../codex/image-generation.js";
 import { codexImagePreviewUrl } from "../../codex/image-preview.js";
+import {
+  normalizeCodexInterAgentMessage,
+  readCodexInterAgentMessageIdentity,
+} from "../../codex/inter-agent-message.js";
 import {
   getCodexMcpAppServerArgs,
   resolveCodexMcpThreadProfile,
@@ -1306,6 +1314,10 @@ export class CodexAppServerClient {
  * Codex Provider implementation using app-server JSON-RPC.
  */
 export class CodexProvider implements AgentProvider {
+  private readonly waitTrackers = new WeakMap<
+    Map<string, CodexToolCallContext>,
+    CodexAgentWaitTracker
+  >();
   readonly name = "codex" as const;
   readonly displayName = "Codex";
   readonly supportsPermissionMode = true;
@@ -4693,6 +4705,48 @@ export class CodexProvider implements AgentProvider {
   ): SDKMessage[] {
     const threadId = asRecord(notification.params)?.threadId;
     if (typeof threadId === "string" && threadId !== sessionId) return [];
+    if (
+      ["rawResponseItem/completed", "item/started", "item/completed"].includes(
+        notification.method,
+      )
+    ) {
+      const params = asRecord(notification.params);
+      const item = asRecord(params?.item);
+      if (params && item) {
+        let tracker = this.waitTrackers.get(customToolContexts);
+        if (!tracker) {
+          tracker = new CodexAgentWaitTracker();
+          this.waitTrackers.set(customToolContexts, tracker);
+        }
+        const wait = tracker.observe({
+          type:
+            notification.method === "rawResponseItem/completed"
+              ? "response_item"
+              : "event_msg",
+          payload:
+            notification.method === "rawResponseItem/completed"
+              ? item
+              : {
+                  ...params,
+                  type:
+                    notification.method === "item/started"
+                      ? "item_started"
+                      : "item_completed",
+                },
+          ...(typeof params.turnId === "string"
+            ? { turnId: params.turnId }
+            : {}),
+          timestamp: new Date().toISOString(),
+        });
+        if (wait)
+          return [
+            {
+              ...codexAgentWaitMessage(wait, sessionId),
+              session_id: sessionId,
+            } as SDKMessage,
+          ];
+      }
+    }
     switch (notification.method) {
       case "thread/tokenUsage/updated": {
         const usage = this.extractTurnUsage(notification.params);
@@ -4718,6 +4772,24 @@ export class CodexProvider implements AgentProvider {
         const params = this.asTurnCompletedNotification(notification.params);
         const turnId = params?.turn.id ?? null;
         const turnStatus = params?.turn.status ?? "completed";
+        const waitMessages = (
+          this.waitTrackers
+            .get(customToolContexts)
+            ?.finishTurn(
+              turnId ?? undefined,
+              turnStatus === "failed"
+                ? "failed"
+                : turnStatus === "interrupted"
+                  ? "interrupted"
+                  : "completed",
+            ) ?? []
+        ).map(
+          (wait) =>
+            ({
+              ...codexAgentWaitMessage(wait, sessionId),
+              session_id: sessionId,
+            }) as SDKMessage,
+        );
         if (turnId) {
           const keyPrefix = `${turnId}\0`;
           for (const key of commandOutputBuffers.keys()) {
@@ -4760,6 +4832,7 @@ export class CodexProvider implements AgentProvider {
           const codexError = retryExhausted ? retryCause : classifiedError;
           if (turnId) retryableErrorsByTurnId.delete(turnId);
           return [
+            ...waitMessages,
             {
               type: "error",
               session_id: sessionId,
@@ -4772,7 +4845,7 @@ export class CodexProvider implements AgentProvider {
           ];
         }
         if (turnId) retryableErrorsByTurnId.delete(turnId);
-        return [message];
+        return [...waitMessages, message];
       }
 
       case "error": {
@@ -5122,6 +5195,15 @@ export class CodexProvider implements AgentProvider {
     event: CodexEventEnvelope,
     sessionId: string,
   ): SDKMessage[] {
+    if (
+      messages.some(
+        (message) =>
+          asRecord(
+            (message as unknown as Record<string, unknown>).codexThreadItem,
+          )?.type === "agentWait",
+      )
+    )
+      return messages;
     if (event.method !== "item/started" && event.method !== "item/completed") {
       return messages;
     }
@@ -5183,6 +5265,30 @@ export class CodexProvider implements AgentProvider {
     if (!turnId || !record.item || typeof record.item !== "object") return [];
 
     const item = record.item as Record<string, unknown>;
+    const communicationIdentity = readCodexInterAgentMessageIdentity(item);
+    if (communicationIdentity) {
+      const communication = normalizeCodexInterAgentMessage(
+        item,
+        `live-${randomUUID()}`,
+      );
+      if (!communication) return [];
+      const messageTurnId = communicationIdentity.turnId ?? turnId;
+      return [
+        withCodexTimestamp({
+          type: "system",
+          subtype: "codex_native_item",
+          session_id: sessionId,
+          uuid: `codex-inter-agent:${sessionId}:${messageTurnId}:${communication.id}`,
+          turnId: messageTurnId,
+          codexThreadId: sessionId,
+          codexTurnId: messageTurnId,
+          codexThreadItemId: communication.id,
+          codexThreadItemLifecycle: "completed",
+          codexCorrelationKey: `codex:${messageTurnId}:inter-agent-message:${communication.id}`,
+          codexThreadItem: communication,
+        } as SDKMessage),
+      ];
+    }
     const type = this.getOptionalString(item.type);
     const callId = this.getOptionalString(item.call_id);
     if (!callId) return [];

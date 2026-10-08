@@ -7,6 +7,7 @@ import {
   codexAgentStatusLabel,
   normalizeCodexAgentStatus,
 } from "../../../lib/codexAgentStatus";
+import type { CodexSubagentActivity } from "../../../types/renderItems";
 
 interface Props {
   kind?: string;
@@ -22,6 +23,9 @@ interface Props {
   /** The collaboration operation's lifecycle, not the child agent's status. */
   status?: string;
   lifecycle: "started" | "completed";
+  activity?: CodexSubagentActivity;
+  startedAt?: string;
+  operation?: string;
 }
 
 function asString(value: unknown): string | undefined {
@@ -81,17 +85,10 @@ function toolLabel(
   }
 }
 
-function messagePreview(message: string): string {
-  const text = message.replace(/\s+/g, " ").trim();
-  const characters = Array.from(text);
-  return characters.length > 240
-    ? `${characters.slice(0, 240).join("")}…`
-    : text;
-}
-
 /** Compact task cards open a child transcript inside its parent conversation. */
 export function CodexNativeSubAgentBlock(props: Props) {
-  const t = useOptionalI18n()?.t ?? codexAgentFallbackText;
+  const i18n = useOptionalI18n();
+  const t = i18n?.t ?? codexAgentFallbackText;
   const session = useOptionalSessionMetadata();
   const detail = useSubagentDetail();
   const parentSessionId = session?.sessionId;
@@ -154,12 +151,7 @@ export function CodexNativeSubAgentBlock(props: Props) {
               asString(state?.nickname) ?? asString(state?.agent_nickname);
             const role = asString(state?.role) ?? asString(state?.agent_type);
             const name = taskName(path, nickname ?? threadId.slice(0, 8));
-            const normalized = normalizeCodexAgentStatus(
-              detail?.statuses[threadId] ?? states[threadId],
-            );
-            const lastMessage =
-              normalizeCodexAgentStatus(states[threadId]).message ??
-              asString(state?.last_message);
+            const normalized = normalizeCodexAgentStatus(states[threadId]);
             return (
               <div
                 key={threadId}
@@ -178,11 +170,6 @@ export function CodexNativeSubAgentBlock(props: Props) {
                   <code className="codex-native-subagent-path">
                     {path ?? threadId}
                   </code>
-                  {lastMessage && (
-                    <p className="codex-native-subagent-state-message">
-                      {messagePreview(lastMessage)}
-                    </p>
-                  )}
                 </div>
                 {openButton(
                   threadId,
@@ -201,27 +188,65 @@ export function CodexNativeSubAgentBlock(props: Props) {
     props.agentPath,
     props.agentThreadId?.slice(0, 8) ?? t("codexNativeSubagentFallback"),
   );
-  const verifiedStatus = props.agentThreadId
-    ? detail?.statuses[props.agentThreadId]
-    : undefined;
-  const normalized = verifiedStatus
-    ? normalizeCodexAgentStatus(verifiedStatus)
-    : undefined;
+  if (props.kind === "interacted") {
+    const recipient =
+      props.agentPath === "/root"
+        ? t("codexAgentMainAgent")
+        : (props.agentPath ?? name);
+    return (
+      <div className="codex-agent-interaction">
+        {t(
+          props.operation === "send_message"
+            ? "codexAgentInteractionSent"
+            : "codexAgentInteractionRecorded",
+          { agent: recipient },
+        )}
+      </div>
+    );
+  }
+  const historicalStatus =
+    props.kind === "completed" || props.kind === "interrupted"
+      ? props.kind
+      : undefined;
+  const hasStart =
+    props.kind === "started" ||
+    props.activity?.events.some((event) => event.kind === "started");
+  const startDate =
+    hasStart && props.startedAt ? new Date(props.startedAt) : undefined;
+  const startTime =
+    startDate && Number.isFinite(startDate.getTime())
+      ? startDate.toLocaleTimeString(i18n?.locale, {
+          hour: "2-digit",
+          minute: "2-digit",
+          second: "2-digit",
+        })
+      : undefined;
+  const entryLabel =
+    props.activity?.entryKind === "followup" ||
+    props.operation === "followup_task"
+      ? "codexAgentDelegatedFollowup"
+      : hasStart && !props.activity?.orphanTerminal
+        ? "codexAgentDelegatedTask"
+        : "codexAgentTaskRecord";
   return (
     <div className="codex-native-subagent codex-native-subagent-activity">
       <div className="codex-native-subagent-info">
         <div className="codex-native-subagent-title">
+          <span className="codex-native-subagent-action">{t(entryLabel)}</span>
           <span className="codex-native-subagent-name">{name}</span>
-          {normalized && (
-            <span
-              className={`codex-native-subagent-state-status status-${normalized.status}`}
-            >
-              {codexAgentStatusLabel(normalized.status, t)}
-            </span>
-          )}
         </div>
-        <div className="codex-native-subagent-event">
-          {activityLabel(props.kind, t)}
+        <div className="codex-native-subagent-meta">
+          <span className="codex-native-subagent-event">
+            {activityLabel(props.kind, t)}
+          </span>
+          {startTime && (
+            <time
+              dateTime={props.startedAt}
+              title={startDate?.toLocaleString(i18n?.locale)}
+            >
+              {t("codexAgentAssignedAt", { time: startTime })}
+            </time>
+          )}
         </div>
         {(props.agentPath || props.agentThreadId) && (
           <code className="codex-native-subagent-path">
@@ -232,7 +257,7 @@ export function CodexNativeSubAgentBlock(props: Props) {
       {openButton(
         props.agentThreadId,
         props.agentPath ?? name,
-        normalized?.status,
+        historicalStatus,
       )}
     </div>
   );

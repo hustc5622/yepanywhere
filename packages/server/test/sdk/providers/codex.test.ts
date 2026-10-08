@@ -5934,6 +5934,172 @@ describe("CodexProvider Event Normalization", () => {
     expect(retryableErrorsByTurnId.has("turn-1")).toBe(false);
   });
 
+  it("streams one mailbox wait identity with actual elapsed time and wake reason", () => {
+    const testProvider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+        contexts: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+    const contexts = new Map<string, unknown>();
+    const project = (method: string, params: Record<string, unknown>) =>
+      testProvider.convertNotificationToSDKMessages(
+        {
+          method,
+          params: { threadId: "thread-1", turnId: "turn-1", ...params },
+        },
+        "thread-1",
+        new Map(),
+        contexts,
+      );
+    const item = {
+      type: "collabAgentToolCall",
+      id: "wait-call",
+      tool: "wait",
+      status: "inProgress",
+    };
+    const started = project("item/started", { item, startedAtMs: 1000 });
+    expect(started[0]?.codexThreadItem).toMatchObject({
+      type: "agentWait",
+      id: "wait-call",
+      status: "running",
+      startedAt: "1970-01-01T00:00:01.000Z",
+    });
+    const completed = project("item/completed", {
+      item: { ...item, status: "completed" },
+      startedAtMs: 1000,
+      completedAtMs: 4000,
+    });
+    expect(completed[0]?.uuid).toBe(started[0]?.uuid);
+    expect(completed[0]?.codexThreadItem).toMatchObject({
+      durationMs: 3000,
+      outcome: "unknown",
+    });
+    const result = project("rawResponseItem/completed", {
+      item: {
+        type: "function_call_output",
+        call_id: "wait-call",
+        output:
+          '{"message":"Wait interrupted by new input.","timed_out":false}',
+      },
+    });
+    expect(result[0]?.uuid).toBe(started[0]?.uuid);
+    expect(result[0]?.codexThreadItem).toMatchObject({
+      status: "interrupted",
+      outcome: "user_input",
+      durationMs: 3000,
+    });
+    expect(result[0]?.message).toBeUndefined();
+  });
+
+  it("settles a pending wait when its parent turn is interrupted", () => {
+    const testProvider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+        contexts: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+    const contexts = new Map<string, unknown>();
+    testProvider.convertNotificationToSDKMessages(
+      {
+        method: "item/started",
+        params: {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            type: "collabAgentToolCall",
+            id: "wait-call",
+            tool: "wait",
+            status: "inProgress",
+          },
+        },
+      },
+      "thread-1",
+      new Map(),
+      contexts,
+    );
+    const ended = testProvider.convertNotificationToSDKMessages(
+      {
+        method: "turn/completed",
+        params: {
+          threadId: "thread-1",
+          turn: { id: "turn-1", status: "interrupted" },
+        },
+      },
+      "thread-1",
+      new Map(),
+      contexts,
+    );
+    expect(ended[0]?.codexThreadItem).toMatchObject({
+      type: "agentWait",
+      status: "interrupted",
+      outcome: "unknown",
+    });
+    expect(ended[1]?.subtype).toBe("turn_complete");
+  });
+
+  it("streams encrypted inter-agent tasks without requiring a tool call id", () => {
+    const testProvider = createTestProvider() as unknown as {
+      convertNotificationToSDKMessages: (
+        notification: { method: string; params?: unknown },
+        sessionId: string,
+        usageByTurnId: Map<string, unknown>,
+      ) => Array<Record<string, unknown>>;
+    };
+    const messages = testProvider.convertNotificationToSDKMessages(
+      {
+        method: "rawResponseItem/completed",
+        params: {
+          threadId: "child-thread",
+          turnId: "turn-1",
+          item: {
+            type: "agent_message",
+            id: "mail-1",
+            author: "/root",
+            recipient: "/root/review",
+            internal_chat_message_metadata_passthrough: { turn_id: "turn-1" },
+            content: [
+              {
+                type: "input_text",
+                text: "Message Type: NEW_TASK\nTask name: /root/review\nSender: /root\nPayload:\n",
+              },
+              {
+                type: "encrypted_content",
+                encrypted_content: "private-ciphertext",
+              },
+            ],
+          },
+        },
+      },
+      "child-thread",
+      new Map(),
+    );
+    expect(messages).toHaveLength(1);
+    expect(messages[0]).toMatchObject({
+      type: "system",
+      subtype: "codex_native_item",
+      session_id: "child-thread",
+      codexThreadId: "child-thread",
+      codexTurnId: "turn-1",
+      codexThreadItemId: "mail-1",
+      codexCorrelationKey: "codex:turn-1:inter-agent-message:mail-1",
+      codexThreadItem: {
+        type: "interAgentMessage",
+        id: "mail-1",
+        kind: "task",
+        sender: "/root",
+        recipient: "/root/review",
+        encrypted: true,
+      },
+    });
+    expect(JSON.stringify(messages)).not.toContain("private-ciphertext");
+    expect(messages[0]?.message).toBeUndefined();
+  });
+
   it("streams raw code-mode exec calls and their results", () => {
     const testProvider = createTestProvider() as unknown as {
       convertNotificationToSDKMessages: (

@@ -5,6 +5,7 @@ import {
   SESSION_DISPLAY_MAX_NOTICE_LENGTH,
   SESSION_DISPLAY_MAX_TOOL_NAMES,
   SESSION_DISPLAY_THINKING_PREVIEW_MAX_LENGTH,
+  SessionDisplayNoticeSegmentSchema,
   type SessionDisplayPage,
   SessionDisplayPageSchema,
   type SessionDisplayQuestion,
@@ -139,6 +140,17 @@ export function buildSessionDisplayProjection(
 ): SessionDisplayProjection {
   const { resultsByToolId, latestToolUseById, orphanedToolIds } =
     collectToolFacts(params.messages);
+  const waitMessages = new Map<string, Message>();
+  for (const message of params.messages) {
+    if (
+      isRecord(message.codexThreadItem) &&
+      message.codexThreadItem.type === "agentWait" &&
+      typeof message.codexThreadItem.id === "string"
+    ) {
+      waitMessages.set(message.codexThreadItem.id, message);
+    }
+  }
+  const displayedWaits = new Set<string>();
   const turns: TurnBuilder[] = [];
   const detailLocators: SessionDisplayDetailLocator[] = [];
   const seenToolIds = new Set<string>();
@@ -310,7 +322,30 @@ export function buildSessionDisplayProjection(
     }
 
     if (message.type === "system") {
-      const notice = projectSystemNotice(message, messageId);
+      const nativeId = isRecord(message.codexThreadItem)
+        ? firstString(message.codexThreadItem.id)
+        : undefined;
+      if (
+        nativeId &&
+        waitMessages.has(nativeId) &&
+        isRecord(message.codexThreadItem) &&
+        message.codexThreadItem.type === "agentWait"
+      ) {
+        if (displayedWaits.has(nativeId)) continue;
+        displayedWaits.add(nativeId);
+      }
+      const noticeMessage =
+        nativeId &&
+        waitMessages.has(nativeId) &&
+        isRecord(message.codexThreadItem) &&
+        message.codexThreadItem.type === "agentWait"
+          ? (waitMessages.get(nativeId) ?? message)
+          : message;
+      const notice = projectSystemNotice(
+        noticeMessage,
+        messageId,
+        nativeId ? latestToolUseById.get(nativeId)?.name : undefined,
+      );
       if (notice) {
         flushToolGroup();
         appendSegment(notice);
@@ -435,6 +470,7 @@ export function buildSessionDisplayProjection(
       ) {
         continue;
       }
+      if (waitMessages.has(rawBlock.id)) continue;
 
       seenToolIds.add(rawBlock.id);
       const latestBlock = latestToolUseById.get(rawBlock.id) ?? rawBlock;
@@ -1032,9 +1068,21 @@ export function isCheckTool(input: unknown): boolean {
   );
 }
 
+/** Only recognized mailbox tools carry execution semantics into display rows. */
+export function getCodexSubagentOperation(
+  toolName: unknown,
+): "followup_task" | "send_message" | undefined {
+  const operation =
+    typeof toolName === "string" ? toolName.split(/[.:/]/).at(-1) : undefined;
+  return operation === "followup_task" || operation === "send_message"
+    ? operation
+    : undefined;
+}
+
 function projectSystemNotice(
   message: Message,
   messageId: string,
+  toolName?: unknown,
 ): Extract<SessionDisplaySegment, { type: "notice" }> | null {
   const subtype = typeof message.subtype === "string" ? message.subtype : "";
   const timestamp = message.timestamp;
@@ -1075,6 +1123,55 @@ function projectSystemNotice(
   if (!itemType || INSPECTOR_ONLY_CODEX_ITEM_TYPES.has(itemType)) return null;
   const lifecycle =
     message.codexThreadItemLifecycle === "started" ? "running" : "completed";
+  if (itemType === "agentWait") {
+    const parsed =
+      SessionDisplayNoticeSegmentSchema.shape.agentWait.safeParse(item);
+    return parsed.success && parsed.data
+      ? {
+          type: "notice",
+          id: messageId,
+          kind: "agent_wait",
+          agentWait: parsed.data,
+          status: parsed.data.status,
+          ...(timestamp ? { timestamp } : {}),
+        }
+      : null;
+  }
+  if (itemType === "interAgentMessage") {
+    if (
+      (item.kind !== "task" &&
+        item.kind !== "message" &&
+        item.kind !== "result") ||
+      typeof item.id !== "string" ||
+      !item.id ||
+      typeof item.sender !== "string" ||
+      typeof item.recipient !== "string"
+    )
+      return null;
+    return {
+      type: "notice",
+      id: messageId,
+      kind: "inter_agent_message",
+      interAgentMessage: {
+        type: "interAgentMessage",
+        id: boundedText(item.id, 512),
+        kind: item.kind,
+        sender: boundedText(item.sender, 512),
+        recipient: boundedText(item.recipient, 512),
+        ...(typeof item.text === "string"
+          ? { text: boundedText(item.text) }
+          : {}),
+        encrypted: item.encrypted === true,
+        ...(item.truncated === true ||
+        (typeof item.text === "string" &&
+          item.text.length > SESSION_DISPLAY_MAX_NOTICE_LENGTH)
+          ? { truncated: true }
+          : {}),
+      },
+      status: lifecycle,
+      ...(timestamp ? { timestamp } : {}),
+    };
+  }
   if (itemType === "plan") {
     return {
       type: "notice",
@@ -1091,6 +1188,9 @@ function projectSystemNotice(
     const title = firstString(item.tool, item.kind);
     const agentThreadId = firstString(item.agentThreadId);
     const agentPath = firstString(item.agentPath);
+    const operation =
+      getCodexSubagentOperation(item.operation) ??
+      getCodexSubagentOperation(toolName);
     return {
       type: "notice",
       id: messageId,
@@ -1100,6 +1200,10 @@ function projectSystemNotice(
         ? {
             subagent: {
               kind: boundedText(firstString(item.kind) ?? "unknown", 64),
+              ...(firstString(item.id)
+                ? { eventId: boundedText(item.id as string, 512) }
+                : {}),
+              ...(operation ? { operation } : {}),
               ...(agentThreadId && agentThreadId.length <= 512
                 ? { agentThreadId }
                 : {}),

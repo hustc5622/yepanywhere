@@ -233,8 +233,8 @@ describe("RenderItemComponent provider-native items", () => {
     });
 
     expect(screen.getAllByText("child-thread").length).toBeGreaterThan(0);
-    expect(screen.getByText("completed")).not.toBeNull();
-    expect(screen.getByText("Review complete")).not.toBeNull();
+    expect(screen.getByText("turn finished")).not.toBeNull();
+    expect(screen.queryByText("Review complete")).toBeNull();
   });
 
   it("renders lowercase Codex subagent activity kinds", () => {
@@ -296,7 +296,7 @@ describe("RenderItemComponent provider-native items", () => {
       );
       expect(
         await screen.findByText(
-          locale === "en" ? "Task completed" : "本轮任务已完成",
+          locale === "en" ? "Turn finished" : "本轮已结束",
         ),
       ).not.toBeNull();
       expect(screen.getByText("reviewer")).not.toBeNull();
@@ -306,6 +306,7 @@ describe("RenderItemComponent provider-native items", () => {
         agentId: "child-thread",
         parentSessionId: "parent-thread",
         name: "/root/reviewer",
+        status: "completed",
       });
       expect(screen.queryByRole("link")).toBeNull();
     },

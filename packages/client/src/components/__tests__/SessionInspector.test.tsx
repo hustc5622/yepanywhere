@@ -596,7 +596,9 @@ describe("SessionInspector", () => {
       })),
     );
     const link = screen.getByRole("button", { name: /worker|child-thread/ });
-    expect(link.textContent).toContain(status);
+    expect(link.textContent).toContain(
+      status === "completed" ? "turn finished" : status,
+    );
     if (kinds.length > 1) expect(link.textContent).toContain("/root/worker");
   });
 

@@ -55,6 +55,10 @@ import {
   parseKimiReadMediaOutput,
 } from "@yep-anywhere/shared";
 import {
+  CodexAgentWaitTracker,
+  codexAgentWaitMessage,
+} from "../codex/agent-wait.js";
+import {
   isCodexCorrelationDebugEnabled,
   logCodexCorrelationDebug,
   summarizeCodexNormalizedMessage,
@@ -73,6 +77,10 @@ import {
   summarizeCodexImageGenerationResult,
 } from "../codex/image-generation.js";
 import { codexImagePreviewUrl } from "../codex/image-preview.js";
+import {
+  normalizeCodexInterAgentMessage,
+  readCodexInterAgentMessageIdentity,
+} from "../codex/inter-agent-message.js";
 import {
   type CodexToolCallContext,
   canonicalizeCodexToolName,
@@ -1563,6 +1571,7 @@ export function convertCodexEntries(
     ),
   );
   const emittedAsyncIds = new Set<string>();
+  const emittedInterAgentIds = new Set<string>();
   const nativeCollaborationIndices = new Map<string, number>();
   const toolCallContexts = new Map<string, CodexToolCallContext>();
   const externalToolCalls: PendingExternalCodexToolCall[] = [];
@@ -1577,10 +1586,31 @@ export function convertCodexEntries(
     contextOptions.patchApplyCallIds ?? new Set(patchApplyEndByCallId.keys());
   const directEditCallIds =
     contextOptions.directEditCallIds ?? collectCodexDirectEditCallIds(entries);
+  const waitTracker = new CodexAgentWaitTracker();
+  const waitByEntry = new Map<number, string>();
+  for (let index = 0; index < entries.length; index++) {
+    const entry = entries[index];
+    if (!entry) continue;
+    const wait = waitTracker.observe(entry);
+    if (wait) waitByEntry.set(index, wait.item.id);
+  }
+  const waits = new Map(
+    waitTracker.values().map((wait) => [wait.item.id, wait]),
+  );
+  const emittedWaitIds = new Set<string>();
 
   for (let entryIndex = 0; entryIndex < entries.length; entryIndex++) {
     const entry = entries[entryIndex];
     if (!entry) continue;
+    const waitId = waitByEntry.get(entryIndex);
+    if (waitId) {
+      const wait = waits.get(waitId);
+      if (wait && !emittedWaitIds.has(waitId)) {
+        messages.push(codexAgentWaitMessage(wait, sessionId));
+        emittedWaitIds.add(waitId);
+      }
+      continue;
+    }
 
     // Identity is anchored to the entry, not to how far into this array we are,
     // so a tail read of the same rollout produces the same ids.
@@ -1621,6 +1651,20 @@ export function convertCodexEntries(
         responseUserClientIds.get(entry),
       );
       for (const msg of convertedMessages) {
+        if (
+          msg.type === "system" &&
+          msg.subtype === "codex_native_item" &&
+          isRecord(msg.codexThreadItem) &&
+          msg.codexThreadItem.type === "interAgentMessage"
+        ) {
+          msg.codexThreadId = sessionId;
+          const identity = readCodexInterAgentMessageIdentity(entry.payload);
+          if (identity?.id) {
+            const key = `${identity.turnId ?? ""}:${identity.id}`;
+            if (emittedInterAgentIds.has(key)) continue;
+            emittedInterAgentIds.add(key);
+          }
+        }
         if (
           entry.payload.type === "function_call" &&
           canonicalizeCodexToolName(entry.payload.name).split(".").pop() ===
@@ -1698,6 +1742,15 @@ export function convertCodexEntries(
           ? normalizeCodexCollaborationItem(item)
           : null;
         if (nativeItem) {
+          const operation = toolCallContexts
+            .get(nativeItem.id)
+            ?.toolName.split(".")
+            .pop();
+          const projectedItem =
+            nativeItem.type === "subAgentActivity" &&
+            (operation === "followup_task" || operation === "send_message")
+              ? { ...nativeItem, operation }
+              : nativeItem;
           const turnId = getCodexEventPayloadTurnId(entry.payload);
           const key = `${turnId ?? ""}:${nativeItem.type}:${nativeItem.id}`;
           const previousIndex = nativeCollaborationIndices.get(key);
@@ -1706,7 +1759,7 @@ export function convertCodexEntries(
             if (previous)
               messages[previousIndex] = {
                 ...previous,
-                codexThreadItem: nativeItem,
+                codexThreadItem: projectedItem,
               };
           } else {
             nativeCollaborationIndices.set(key, messages.length);
@@ -1719,7 +1772,7 @@ export function convertCodexEntries(
               ...(turnId ? { codexTurnId: turnId } : {}),
               codexThreadItemId: nativeItem.id,
               codexThreadItemLifecycle: "completed",
-              codexThreadItem: nativeItem,
+              codexThreadItem: projectedItem,
             });
           }
           continue;
@@ -2004,6 +2057,8 @@ function getCodexResponsePayloadCallId(
 function getCodexResponsePayloadItemId(
   payload: CodexResponseItemEntry["payload"],
 ): string | undefined {
+  const communication = readCodexInterAgentMessageIdentity(payload);
+  if (communication) return communication.id;
   switch (payload.type) {
     case "message":
     case "reasoning":
@@ -2027,6 +2082,8 @@ function getCodexResponsePayloadItemId(
 function getCodexResponsePayloadTurnId(
   payload: CodexResponseItemEntry["payload"],
 ): string | undefined {
+  const communication = readCodexInterAgentMessageIdentity(payload);
+  if (communication) return communication.turnId;
   if (payload.type !== "message" && payload.type !== "reasoning") {
     return undefined;
   }
@@ -2039,6 +2096,10 @@ function getCodexResponseCorrelationKey(
   const itemId = getCodexResponsePayloadItemId(payload);
   const turnId = getCodexResponsePayloadTurnId(payload);
   if (!itemId || !turnId) return undefined;
+
+  if (readCodexInterAgentMessageIdentity(payload)) {
+    return `codex:${turnId}:inter-agent-message:${itemId}`;
+  }
 
   if (payload.type === "message" && payload.role === "assistant") {
     return `codex:${turnId}:agent-message:${itemId}`;
@@ -2309,6 +2370,19 @@ function convertCodexResponseItem(
 ): Message | Message[] | null {
   const payload = entry.payload;
   const uuid = `codex-${anchor}`;
+
+  const communication = normalizeCodexInterAgentMessage(payload, uuid);
+  if (communication) {
+    return {
+      uuid,
+      type: "system",
+      subtype: "codex_native_item",
+      timestamp: entry.timestamp,
+      codexThreadItemId: communication.id,
+      codexThreadItemLifecycle: "completed",
+      codexThreadItem: communication,
+    };
+  }
 
   switch (payload.type) {
     case "message":

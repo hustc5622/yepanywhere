@@ -57,6 +57,69 @@ function fixture(pollMs = 60_000) {
   };
 }
 describe("SessionDisplayService", () => {
+  it.each(["interAgentMessage", "subAgentActivity"])(
+    "acknowledges persisted %s despite different live and rollout message ids",
+    async (itemType) => {
+      vi.useFakeTimers();
+      const { service, source, push } = fixture(10);
+      const initial = await source.read();
+      await service.subscribe(selection, vi.fn());
+      const native: Message = {
+        uuid: "live-native",
+        type: "system",
+        subtype: "codex_native_item",
+        codexThreadId: "session",
+        codexTurnId: "turn",
+        codexThreadItemLifecycle: "completed",
+        codexThreadItem:
+          itemType === "interAgentMessage"
+            ? {
+                type: itemType,
+                id: "mail-id",
+                kind: "result",
+                sender: "/root/review",
+                recipient: "/root",
+                text: "Review complete",
+                encrypted: false,
+              }
+            : {
+                type: itemType,
+                id: "child-complete",
+                kind: "completed",
+                agentThreadId: "child",
+                agentPath: "/root/review",
+              },
+      };
+      push("message", native);
+      expect(
+        (await service.snapshot(selection)).nodes.filter(
+          (node) => node.type === "segment",
+        ),
+      ).toHaveLength(1);
+      source.read.mockResolvedValue({
+        ...initial,
+        messages: [...initial.messages, { ...native, uuid: "rollout-native" }],
+        stamp: "2",
+      });
+      source.stamp.mockResolvedValue("2");
+      await vi.advanceTimersByTimeAsync(30);
+      expect(
+        (await service.snapshot(selection)).nodes.filter(
+          (node) => node.type === "segment",
+        ),
+      ).toHaveLength(1);
+      // A later history rewrite must not resurrect the acknowledged overlay.
+      source.read.mockResolvedValue({ ...initial, stamp: "3" });
+      source.stamp.mockResolvedValue("3");
+      await vi.advanceTimersByTimeAsync(30);
+      expect(
+        (await service.snapshot(selection)).nodes.filter(
+          (node) => node.type === "segment",
+        ),
+      ).toHaveLength(0);
+    },
+  );
+
   it.each(["completed", "failed", "interrupted"] as const)(
     "retains an id-less Codex %s notification while history lags",
     async (outcome) => {

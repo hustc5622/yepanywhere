@@ -8,8 +8,12 @@ import { api } from "../../api/client";
 import { useElapsedLabel } from "../../hooks/useElapsedLabel";
 import { useI18n } from "../../i18n";
 import { preprocessMessages } from "../../lib/preprocessMessages";
+import { isHiddenCodexMainControlTool } from "../../lib/preprocessMessagesSubagents";
 import type { Message } from "../../types";
-import type { DisplayToolGroupItem } from "../../types/renderItems";
+import type {
+  DisplayToolGroupItem,
+  ToolCallItem,
+} from "../../types/renderItems";
 import { LiveOutputPreview } from "./LiveOutputPreview";
 import { ToolCallRow } from "./ToolCallRow";
 
@@ -18,6 +22,8 @@ interface ToolSelection {
   sessionId: string;
   branchId?: string;
   sessionProvider?: string;
+  mainTimeline?: boolean;
+  representedAgentCallIds?: string[];
 }
 
 // Row virtualization must not erase a user's explicit reading choice. Raw
@@ -177,10 +183,18 @@ export function ProjectedToolStepRow({
     () =>
       detail
         ? preprocessMessages(detail.messages).filter(
-            (item) => item.type === "tool_call",
+            (item): item is ToolCallItem =>
+              item.type === "tool_call" &&
+              (!selection.mainTimeline ||
+                !isHiddenCodexMainControlTool(
+                  item.toolName,
+                  item.status,
+                  item.id,
+                  selection.representedAgentCallIds,
+                )),
           )
         : [],
-    [detail],
+    [detail, selection.mainTimeline, selection.representedAgentCallIds],
   );
   const elapsed = useElapsedLabel(step.timestamp, step.status === "running");
   const showLiveOutput =
@@ -351,15 +365,31 @@ export function ProjectedToolGroupRow({
       ? lastProjectedSteps.current
       : [];
   const steps = useMemo(
-    () => [
-      ...new Map(
-        [...retainedSteps, ...loadedSteps, ...projectedSteps].map((step) => [
-          step.id,
-          step,
-        ]),
-      ).values(),
+    () =>
+      [
+        ...new Map(
+          [...retainedSteps, ...loadedSteps, ...projectedSteps].map((step) => [
+            step.id,
+            step,
+          ]),
+        ).values(),
+      ].filter(
+        (step) =>
+          !item.mainTimeline ||
+          !isHiddenCodexMainControlTool(
+            step.name,
+            step.status,
+            step.id,
+            item.representedAgentCallIds,
+          ),
+      ),
+    [
+      retainedSteps,
+      loadedSteps,
+      projectedSteps,
+      item.mainTimeline,
+      item.representedAgentCallIds,
     ],
-    [retainedSteps, loadedSteps, projectedSteps],
   );
   const load = useCallback(
     async (before?: string) => {
@@ -527,6 +557,8 @@ export function ProjectedToolGroupRow({
               sessionId={item.sessionId}
               branchId={item.branchId}
               sessionProvider={sessionProvider}
+              mainTimeline={item.mainTimeline}
+              representedAgentCallIds={item.representedAgentCallIds}
               onRead={pinReading}
             />
           ))}

@@ -6,6 +6,7 @@ import type {
 } from "@yep-anywhere/shared";
 import type { ContentBlock, Message } from "../types";
 import type { RenderItem } from "../types/renderItems";
+import { collapseCodexSubagentActivities } from "./preprocessMessagesSubagents";
 
 type DisplayNotice = Extract<SessionDisplaySegment, { type: "notice" }>;
 
@@ -177,13 +178,60 @@ export function buildSessionDisplayRenderItems(
           });
           break;
         case "notice":
+          if (segment.kind === "agent_wait" && segment.agentWait) {
+            items.push({
+              type: "codex_native_item",
+              id: segment.id,
+              projectId: options.projectId,
+              threadId: page.sessionId,
+              turnId:
+                typeof source.codexTurnId === "string"
+                  ? source.codexTurnId
+                  : undefined,
+              threadItem: segment.agentWait,
+              lifecycle:
+                segment.agentWait.status === "running"
+                  ? "started"
+                  : "completed",
+              sourceMessages: [source],
+            });
+            break;
+          }
           if (segment.kind === "subagent" && segment.subagent) {
             items.push({
               type: "codex_native_item",
               id: segment.id,
               projectId: options.projectId,
-              threadItem: { type: "subAgentActivity", ...segment.subagent },
+              threadId: page.sessionId,
+              turnId:
+                typeof source.codexTurnId === "string"
+                  ? source.codexTurnId
+                  : undefined,
+              threadItem: {
+                type: "subAgentActivity",
+                ...segment.subagent,
+                id: segment.subagent.eventId ?? segment.id,
+              },
               lifecycle: segment.status === "running" ? "started" : "completed",
+              sourceMessages: [source],
+            });
+            break;
+          }
+          if (
+            segment.kind === "inter_agent_message" &&
+            segment.interAgentMessage
+          ) {
+            items.push({
+              type: "codex_native_item",
+              id: segment.id,
+              projectId: options.projectId,
+              threadId: page.sessionId,
+              turnId:
+                typeof source.codexTurnId === "string"
+                  ? source.codexTurnId
+                  : undefined,
+              threadItem: segment.interAgentMessage,
+              lifecycle: "completed",
               sourceMessages: [source],
             });
             break;
@@ -207,7 +255,7 @@ export function buildSessionDisplayRenderItems(
     }
   }
 
-  return items;
+  return collapseCodexSubagentActivities(items);
 }
 
 function questionSourceMessage(

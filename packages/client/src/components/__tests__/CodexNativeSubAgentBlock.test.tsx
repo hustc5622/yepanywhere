@@ -114,14 +114,14 @@ describe("CodexNativeSubAgentBlock", () => {
         }}
       />,
     );
-    for (const status of ["completed", "closed", "unavailable", "starting"])
+    for (const status of ["turn finished", "closed", "unavailable", "starting"])
       expect(screen.getAllByText(status).length).toBeGreaterThan(0);
     expect(container.querySelector(".status-running")).toBeNull();
-    expect(screen.getByText("Task result")).toBeDefined();
+    expect(screen.queryByText("Task result")).toBeNull();
     expect(screen.getAllByRole("button")).toHaveLength(4);
   });
 
-  it("uses the verified child status without rewriting its earlier activity", () => {
+  it("does not rewrite an earlier activity with the child's current status", () => {
     withParent(
       <CodexNativeSubAgentBlock
         kind="started"
@@ -132,10 +132,10 @@ describe("CodexNativeSubAgentBlock", () => {
       { child: "completed" },
     );
     expect(screen.getByText("Task started")).toBeDefined();
-    expect(screen.getByText("completed")).toBeDefined();
+    expect(screen.queryByText("turn finished")).toBeNull();
   });
 
-  it("prefers a verified current status to the old spawn snapshot", () => {
+  it("keeps a historical collaboration snapshot when the current child status changes", () => {
     withParent(
       <CodexNativeSubAgentBlock
         tool="spawnAgent"
@@ -146,9 +146,73 @@ describe("CodexNativeSubAgentBlock", () => {
       />,
       { child: "completed" },
     );
-    expect(screen.getByText("completed")).toBeDefined();
+    expect(screen.queryByText("turn finished")).toBeNull();
+    expect(screen.getByText("running")).toBeDefined();
+    expect(screen.queryByText("Earlier update")).toBeNull();
+  });
+
+  it("keeps the delegation entry and historical status without exposing messages in the main flow", () => {
+    const { openAgent } = withParent(
+      <CodexNativeSubAgentBlock
+        kind="completed"
+        agentPath="/root/reviewer"
+        agentThreadId="child"
+        lifecycle="completed"
+        startedAt="2026-10-08T03:07:14Z"
+        activity={{
+          events: [
+            { id: "start", kind: "started" },
+            { id: "end", kind: "completed" },
+          ],
+          task: { encrypted: true },
+          result: { text: "No blocking issues", encrypted: false },
+        }}
+      />,
+      { child: "running" },
+    );
+    expect(screen.getByText("Turn finished")).toBeDefined();
     expect(screen.queryByText("running")).toBeNull();
-    expect(screen.getByText("Earlier update")).toBeDefined();
+    expect(screen.getByText("Delegated subtask")).toBeDefined();
+    expect(screen.queryByText("Assigned task")).toBeNull();
+    expect(
+      screen.queryByText(
+        "Codex encrypted this message. Its text is unavailable.",
+      ),
+    ).toBeNull();
+    expect(screen.queryByText("Returned result")).toBeNull();
+    expect(screen.queryByText("No blocking issues")).toBeNull();
+    fireEvent.click(screen.getByRole("button"));
+    expect(openAgent).toHaveBeenCalledWith(
+      expect.objectContaining({ agentId: "child", status: "completed" }),
+    );
+  });
+
+  it("renders communication to root as a message event, not a new child task", () => {
+    const { container } = withParent(
+      <CodexNativeSubAgentBlock
+        kind="interacted"
+        operation="send_message"
+        agentPath="/root"
+        agentThreadId="root-thread"
+        lifecycle="completed"
+      />,
+    );
+    expect(screen.getByText("Sent a message to Main agent")).toBeDefined();
+    expect(container.querySelector(".codex-native-subagent")).toBeNull();
+    expect(screen.queryByRole("button")).toBeNull();
+  });
+
+  it("does not invent a delegation start when only a terminal page is loaded", () => {
+    withParent(
+      <CodexNativeSubAgentBlock
+        kind="completed"
+        agentPath="/root/review"
+        agentThreadId="child"
+        lifecycle="completed"
+      />,
+    );
+    expect(screen.getByText("Subtask record")).toBeDefined();
+    expect(screen.queryByText("Delegated subtask")).toBeNull();
   });
 
   it.each([

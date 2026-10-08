@@ -124,6 +124,10 @@ export interface DisplayToolGroupItem extends RenderItemBase {
   sessionId: string;
   revision: string;
   branchId?: string;
+  /** Suppress coordination logs only when this group belongs to the main timeline. */
+  mainTimeline?: boolean;
+  /** Native task/wait rows that already represent these call ids. */
+  representedAgentCallIds?: string[];
 }
 
 /**
@@ -135,6 +139,28 @@ export interface DisplayToolGroupItem extends RenderItemBase {
  * and collaboration tool-call content that the generic system renderer would
  * silently drop.
  */
+export interface CodexSubagentCommunicationPreview {
+  text?: string;
+  encrypted: boolean;
+  truncated?: boolean;
+}
+
+export interface CodexSubagentActivity {
+  entryKind?: "spawn" | "followup";
+  /** A paginated terminal event whose dispatch is not in the loaded history. */
+  orphanTerminal?: boolean;
+  /** Stable event identities retain replay deduplication after aggregation. */
+  events: Array<{
+    id: string;
+    nativeId?: string;
+    kind: string;
+    /** Scoped message identity retains its original execution on replay. */
+    communicationKey?: string;
+  }>;
+  task?: CodexSubagentCommunicationPreview;
+  result?: CodexSubagentCommunicationPreview;
+}
+
 export interface CodexNativeItem extends RenderItemBase {
   type: "codex_native_item";
   id: string;
@@ -152,4 +178,6 @@ export interface CodexNativeItem extends RenderItemBase {
   threadId?: string;
   /** The Codex turn id this item belongs to, when known. */
   turnId?: string;
+  /** One child execution, assembled from its lifecycle events. */
+  subagentActivity?: CodexSubagentActivity;
 }

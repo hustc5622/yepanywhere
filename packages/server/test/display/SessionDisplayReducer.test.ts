@@ -66,6 +66,57 @@ function facts(snapshot: SessionDisplaySnapshot) {
   );
 }
 describe("SessionDisplayReducer", () => {
+  it.each(["followup_task", "send_message"])(
+    "retains %s identity through compact live messages and a cold restore",
+    (operation) => {
+      const call = {
+        ...tool("call-1"),
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "call-1",
+              name: `collaboration.${operation}`,
+              input: { target: "review", message: "Check this" },
+            },
+          ],
+        },
+      };
+      const activity = {
+        uuid: "activity",
+        type: "system",
+        subtype: "codex_native_item",
+        codexTurnId: "turn",
+        codexThreadItem: {
+          type: "subAgentActivity",
+          id: "call-1",
+          kind: "interacted",
+          agentThreadId: "child",
+          agentPath: "/root/review",
+        },
+      };
+      const live = new SessionDisplayReducer(view, "codex");
+      for (const message of [prompt, call, activity])
+        live.message(compactDisplayMessage(message));
+      const cold = new SessionDisplayReducer(view, "codex");
+      cold.restore([prompt, call, activity] as Message[]);
+      for (const model of [live, cold]) {
+        const notice = model
+          .snapshot()
+          .nodes.find(
+            (node) => node.type === "segment" && node.segment.type === "notice",
+          );
+        expect(notice).toMatchObject({
+          segment: {
+            kind: "subagent",
+            subagent: { operation, kind: "interacted" },
+          },
+        });
+      }
+    },
+  );
+
   it.each(["completed", "failed", "interrupted"])(
     "projects compaction progress and clears it on %s",
     (outcome) => {

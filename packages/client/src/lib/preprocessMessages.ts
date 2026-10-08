@@ -16,6 +16,9 @@ import type {
 } from "../types/renderItems";
 import { getCodexExecResultOverview } from "./codexExec";
 import { getMessageId } from "./mergeMessages";
+import { collapseCodexSubagentActivities } from "./preprocessMessagesSubagents";
+
+export { collapseCodexSubagentActivities } from "./preprocessMessagesSubagents";
 
 const CODEX_TURN_ABORTED_DISPLAY_TEXT = "Conversation stopped by user";
 
@@ -26,6 +29,8 @@ const CODEX_NATIVE_ITEM_TYPES_WITH_DEDICATED_RENDERERS = new Set([
   "turnPlan",
   "subAgentActivity",
   "collabAgentToolCall",
+  "interAgentMessage",
+  "agentWait",
 ]);
 
 function shouldKeepCodexNativeItemType(type: string): boolean {
@@ -110,7 +115,9 @@ export function preprocessMessages(
 
   const enrichedItems = enrichWriteStdinWithCommand(items);
   const compactWaits = collapseCodexWaitPolls(enrichedItems);
-  return collapsePlanProgressItems(collapseSessionSetupRuns(compactWaits));
+  return collapseCodexSubagentActivities(
+    collapsePlanProgressItems(collapseSessionSetupRuns(compactWaits)),
+  );
 }
 
 const SESSION_SETUP_PREFIXES = [

@@ -39,6 +39,72 @@ describe("DisplayToolGroupRow", () => {
     vi.restoreAllMocks();
   });
 
+  it.each([false, true])(
+    "filters hydrated coordination logs only on the main timeline: %s",
+    async (mainTimeline) => {
+      vi.spyOn(api, "getSessionToolGroupDetails").mockResolvedValue({
+        sessionId: "session-1",
+        revision: "revision-1",
+        detailRef: "detail-1",
+        messages: [
+          {
+            id: "calls",
+            type: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "send",
+                name: "collaboration.send_message",
+                input: {
+                  target: "review",
+                  message: "Keep this in agent details",
+                },
+              },
+              {
+                type: "tool_use",
+                id: "read",
+                name: "Read",
+                input: { file_path: "src/example.ts" },
+              },
+            ],
+          },
+          {
+            id: "results",
+            type: "user",
+            content: [
+              {
+                type: "tool_result",
+                tool_use_id: "send",
+                content: "delivered",
+              },
+              {
+                type: "tool_result",
+                tool_use_id: "read",
+                content: "file body",
+              },
+            ],
+          },
+        ],
+      });
+      const group = { ...item(), mainTimeline };
+      const { container } = render(
+        <I18nProvider>
+          <ToastProvider>
+            <SchemaValidationProvider>
+              <DisplayToolGroupRow item={group} sessionProvider="codex" />
+            </SchemaValidationProvider>
+          </ToastProvider>
+        </I18nProvider>,
+      );
+      fireEvent.click(screen.getByRole("button", { expanded: false }));
+      await waitFor(() =>
+        expect(container.querySelectorAll(".tool-row")).toHaveLength(
+          mainTimeline ? 1 : 2,
+        ),
+      );
+    },
+  );
+
   it("fetches normalized tool messages only after expansion", async () => {
     const getDetails = vi
       .spyOn(api, "getSessionToolGroupDetails")

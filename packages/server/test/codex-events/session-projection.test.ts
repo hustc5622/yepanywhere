@@ -22,6 +22,44 @@ import type { Message } from "../../src/supervisor/types.js";
 import { testEvent } from "./helpers.js";
 
 describe("canonical Codex persisted session projection", () => {
+  it("preserves the correlated mailbox wait outcome when overlaying a native wait", () => {
+    const wait: Message = {
+      uuid: "wait-message",
+      type: "system",
+      subtype: "codex_native_item",
+      codexThreadId: "thread-1",
+      codexTurnId: "turn-1",
+      codexThreadItemId: "wait-call",
+      codexThreadItem: {
+        type: "agentWait",
+        id: "wait-call",
+        status: "completed",
+        durationMs: 1800,
+        outcome: "message",
+      },
+    };
+    const result = overlayCanonicalCodexSessionMessages(
+      "session-1",
+      [wait],
+      [
+        testEvent(1, "item/completed", {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          item: {
+            id: "wait-call",
+            type: "collabAgentToolCall",
+            tool: "wait",
+            status: "completed",
+            senderThreadId: "thread-1",
+            receiverThreadIds: [],
+            agentsStates: {},
+          },
+        }),
+      ],
+    );
+    expect(result.messages).toHaveLength(1);
+    expect(result.messages[0]?.codexThreadItem).toEqual(wait.codexThreadItem);
+  });
   it("keeps subagent identity through canonical history and the lightweight display page", () => {
     const events = [
       testEvent(1, "item/completed", {
@@ -58,6 +96,7 @@ describe("canonical Codex persisted session projection", () => {
         kind: "subagent",
         subagent: {
           kind: "completed",
+          eventId: "activity-1",
           agentThreadId: "child-thread",
           agentPath: "/root/reviewer",
         },

@@ -1,4 +1,6 @@
 import type { CodexNativeItem } from "../../../types/renderItems";
+import { CodexAgentMessageBlock } from "./CodexAgentMessageBlock";
+import { CodexAgentWaitBlock } from "./CodexAgentWaitBlock";
 import { CodexNativeGoalBlock } from "./CodexNativeGoalBlock";
 import { CodexNativePlanBlock } from "./CodexNativePlanBlock";
 import { CodexNativePlanChecklistBlock } from "./CodexNativePlanChecklistBlock";
@@ -41,6 +43,30 @@ export function CodexNativeItemBlock({ item }: Props) {
   const { threadItem, lifecycle } = item;
 
   switch (threadItem.type) {
+    case "agentWait":
+      return (
+        <CodexAgentWaitBlock
+          status={asString(threadItem.status)}
+          startedAt={asString(threadItem.startedAt)}
+          completedAt={asString(threadItem.completedAt)}
+          durationMs={asNumber(threadItem.durationMs)}
+          outcome={asString(threadItem.outcome)}
+        />
+      );
+    case "interAgentMessage":
+      return (
+        <CodexAgentMessageBlock
+          kind={asString(threadItem.kind)}
+          sender={asString(threadItem.sender)}
+          recipient={asString(threadItem.recipient)}
+          text={asString(threadItem.text)}
+          encrypted={threadItem.encrypted === true}
+          truncated={threadItem.truncated === true}
+          resultAlreadyShown={threadItem.resultAlreadyShown === true}
+          timestamp={item.sourceMessages[0]?.timestamp}
+        />
+      );
+
     // Thread-level goal snapshot (objective, status, token/time budget).
     case "threadGoal":
       return (
@@ -77,6 +103,9 @@ export function CodexNativeItemBlock({ item }: Props) {
     case "subAgentActivity":
       return (
         <CodexNativeSubAgentBlock
+          activity={item.subagentActivity}
+          startedAt={item.sourceMessages[0]?.timestamp}
+          operation={asString(threadItem.operation)}
           kind={asString(threadItem.kind)}
           agentPath={asString(threadItem.agentPath)}
           agentThreadId={asString(threadItem.agentThreadId)}

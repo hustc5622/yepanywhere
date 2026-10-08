@@ -76,11 +76,15 @@ import {
 import { normalizeExternalHttpUrl } from "../lib/externalUrl";
 import { getMessageId } from "../lib/mergeMessages";
 import { isStalePendingInputError } from "../lib/pendingInputError";
-import { preprocessMessages } from "../lib/preprocessMessages";
+import {
+  collapseCodexSubagentActivities,
+  preprocessMessages,
+} from "../lib/preprocessMessages";
 import {
   type PreprocessMessagesCache,
   preprocessMessagesCached,
 } from "../lib/preprocessMessagesCache";
+import { projectCodexMainTimeline } from "../lib/preprocessMessagesSubagents";
 import { getProviderPermissionModes } from "../lib/providerPermissionModes";
 import { restorePromptAttachments } from "../lib/restorePromptAttachments";
 import {
@@ -163,6 +167,10 @@ function formatDisplayNotice(notice: DisplayNotice, t: Translate): string {
       return withDetail(t("sessionDisplayPlan"));
     case "subagent":
       return withDetail(t("sessionDisplaySubagent"));
+    case "inter_agent_message":
+      return withDetail(t("codexAgentCommunication"));
+    case "agent_wait":
+      return t("codexAgentWaiting");
     case "provider_event":
       return withDetail(t("sessionDisplayProviderEvent"));
   }
@@ -1887,9 +1895,12 @@ function SessionPageContent({
     );
     preprocessCacheRef.current = result.cache;
     const combined = [...displayItems, ...result.renderItems];
-    return combined;
+    return effectiveProvider === "codex" || effectiveProvider === "codex-oss"
+      ? projectCodexMainTimeline(combined)
+      : collapseCodexSubagentActivities(combined);
   }, [
     displayPage,
+    effectiveProvider,
     hydratedLiveTailDetailRef,
     messages,
     markdownAugments,

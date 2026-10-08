@@ -38,7 +38,15 @@ import {
   getModelContextWindow,
   parseCodexSessionEntry,
 } from "@yep-anywhere/shared";
+import {
+  CodexAgentWaitTracker,
+  codexAgentWaitMessage,
+} from "../codex/agent-wait.js";
 import { isCodexImageGenerationRecord } from "../codex/image-generation.js";
+import {
+  type CodexInterAgentMessageSupplement,
+  readCodexInterAgentMessageIdentity,
+} from "../codex/inter-agent-message.js";
 import { canonicalizeCodexToolName } from "../codex/normalization.js";
 import {
   codexEventUserMessageClientId,
@@ -356,6 +364,7 @@ function codexEntryOutputCount(
       case "message":
         return entry.payload.role === "developer" ? 0 : 1;
       case "reasoning":
+      case "agent_message":
       case "function_call":
       case "web_search_call":
         return 1;
@@ -635,6 +644,395 @@ function latestVisibleEntryTimestamp(
  * response_item, event_msg, and turn_context entries.
  */
 export class CodexSessionReader implements ISessionReader {
+  private readonly interAgentMessageCache = new Map<
+    string,
+    CodexInterAgentMessageSupplement[]
+  >();
+  private readonly outgoingAgentMessageCache = new Map<string, Message[]>();
+
+  /** Read only an agent's delivered mailbox messages from an authorized receiver. */
+  private async readDeliveredAgentMessages(
+    receiver: CodexSessionManifestEntry,
+    senderPath: string,
+    since: number | null,
+    before: number | null,
+  ): Promise<Message[]> {
+    const revision = codexRolloutRevision(await stat(receiver.filePath));
+    const key = JSON.stringify([
+      receiver.id,
+      revision.key,
+      senderPath,
+      since,
+      before,
+    ]);
+    const cached = this.outgoingAgentMessageCache.get(key);
+    if (cached) return cached;
+    const messages: Message[] = [];
+    let boundary: number | null = null;
+    let foundMetadata = false;
+    await withCodexRolloutAdmission(receiver.filePath, async () => {
+      for await (const line of iterateCodexRolloutLines(receiver.filePath, {
+        maxLineBytes: CODEX_MAX_ROLLOUT_LINE_BYTES,
+        maxBytes: CODEX_MAX_ROLLOUT_SCAN_BYTES,
+      })) {
+        const entry = parseCodexSessionEntry(line.line);
+        if (!entry) continue;
+        if (!foundMetadata) {
+          boundary = getCodexSubagentHistoryStart(entry, receiver.id);
+          foundMetadata = true;
+          continue;
+        }
+        if (
+          !isCodexOwnHistoryEntry(entry, boundary) ||
+          entry.type !== "response_item"
+        )
+          continue;
+        if (!readCodexInterAgentMessageIdentity(entry.payload)) continue;
+        const timestamp = timestampToMs(entry.timestamp);
+        if (
+          timestamp !== null &&
+          ((since !== null && timestamp < since) ||
+            (before !== null && timestamp >= before))
+        )
+          continue;
+        attachCodexEntryByteOffset(entry, line.offset);
+        const message = convertCodexEntries([entry], receiver.id)[0];
+        const item = message?.codexThreadItem;
+        if (
+          !message ||
+          !isRecord(item) ||
+          item.type !== "interAgentMessage" ||
+          item.sender !== senderPath
+        )
+          continue;
+        const receiverPath =
+          receiver.agentPath ?? (!receiver.isSubagent ? "/root" : undefined);
+        if (receiverPath && item.recipient !== receiverPath) continue;
+        messages.push(message);
+        if (messages.length > CODEX_MAX_BRANCH_ITEMS) {
+          throw new CodexHistoryUnavailableError(
+            "Codex agent messages exceed the safe load budget",
+          );
+        }
+      }
+    });
+    if (
+      !sameCodexRolloutRevision(
+        revision,
+        codexRolloutRevision(await stat(receiver.filePath)),
+      )
+    ) {
+      throw new Error("ROLLOUT_CHANGED_DURING_SCAN");
+    }
+    if (this.outgoingAgentMessageCache.size >= 32) {
+      const oldest = this.outgoingAgentMessageCache.keys().next().value;
+      if (oldest) this.outgoingAgentMessageCache.delete(oldest);
+    }
+    this.outgoingAgentMessageCache.set(key, messages);
+    return messages;
+  }
+
+  /** Supplement only delivered messages authored by this child, never parent prose. */
+  private async includeOutgoingAgentMessages(
+    messages: Message[],
+    agent: CodexSessionManifestEntry,
+    rootSessionId: string,
+    manifest: CodexSessionManifest,
+  ): Promise<Message[]> {
+    if (!agent.agentPath) return messages;
+    const root = manifest.byId.get(rootSessionId);
+    if (!root || !this.isManifestEntryInScope(root)) return messages;
+    const projectPath = canonicalizeProjectPath(root.cwd);
+    const tree = new Map<string, CodexSessionManifestEntry>([[root.id, root]]);
+    const pending = [root];
+    for (let index = 0; index < pending.length; index += 1) {
+      const parent = pending[index];
+      if (!parent) continue;
+      for (const child of manifest.byParentThread.get(parent.id) ?? []) {
+        if (
+          tree.has(child.id) ||
+          !child.isSubagent ||
+          child.parentThreadId !== parent.id ||
+          !this.isManifestEntryInScope(child) ||
+          canonicalizeProjectPath(child.cwd) !== projectPath
+        )
+          continue;
+        tree.set(child.id, child);
+        pending.push(child);
+      }
+      if (tree.size > CODEX_MAX_BRANCH_ITEMS)
+        throw new CodexHistoryUnavailableError(
+          "Codex agent tree exceeds the safe load budget",
+        );
+    }
+    if (!tree.has(agent.id)) return messages;
+    const since = timestampToMs(agent.timestamp);
+    // A recreated task can reuse its path. Its earlier/later incarnations are
+    // separate agents even though the mailbox envelope contains only a path.
+    let before: number | null = null;
+    for (const candidate of tree.values()) {
+      if (candidate.id === agent.id || candidate.agentPath !== agent.agentPath)
+        continue;
+      const created = timestampToMs(candidate.timestamp);
+      if (
+        created !== null &&
+        since !== null &&
+        created > since &&
+        (before === null || created < before)
+      )
+        before = created;
+    }
+    const delivered: Message[] = [];
+    for (const receiver of tree.values()) {
+      if (receiver.id === agent.id) continue;
+      delivered.push(
+        ...(await this.readDeliveredAgentMessages(
+          receiver,
+          agent.agentPath,
+          since,
+          before,
+        )),
+      );
+      if (delivered.length > CODEX_MAX_BRANCH_ITEMS)
+        throw new CodexHistoryUnavailableError(
+          "Codex agent messages exceed the safe load budget",
+        );
+    }
+    if (delivered.length === 0) return messages;
+    const seen = new Set<string>();
+    const merged = [...messages, ...delivered].filter((message) => {
+      const item = message.codexThreadItem;
+      if (
+        !isRecord(item) ||
+        item.type !== "interAgentMessage" ||
+        typeof item.id !== "string"
+      )
+        return true;
+      const identity = JSON.stringify([item.id, item.sender, item.recipient]);
+      if (seen.has(identity)) return false;
+      seen.add(identity);
+      return true;
+    });
+    return merged.sort((left, right) => {
+      const leftTimestamp = timestampToMs(left.timestamp);
+      const rightTimestamp = timestampToMs(right.timestamp);
+      return leftTimestamp !== null && rightTimestamp !== null
+        ? leftTimestamp - rightTimestamp
+        : 0;
+    });
+  }
+
+  async getInterAgentRevision(sessionId: string): Promise<string | undefined> {
+    const sessionFile = await this.findSessionFile(sessionId);
+    if (!sessionFile) return undefined;
+    try {
+      return codexRolloutRevision(await stat(sessionFile.filePath)).key;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+      throw error;
+    }
+  }
+
+  /** Mailbox input is absent from Codex's native ThreadItem history projection. */
+  async getInterAgentMessages(
+    sessionId: string,
+    turnIds: readonly string[],
+    itemIds: readonly string[],
+  ): Promise<CodexInterAgentMessageSupplement[]> {
+    if (turnIds.length === 0) return [];
+    const sessionFile = await this.findSessionFile(sessionId);
+    if (!sessionFile) return [];
+    const revision = codexRolloutRevision(await stat(sessionFile.filePath));
+    const cacheKey = JSON.stringify([
+      sessionId,
+      revision.key,
+      turnIds,
+      itemIds,
+    ]);
+    const cached = this.interAgentMessageCache.get(cacheKey);
+    if (cached) return cached;
+    const selectedTurns = new Set(turnIds);
+    const selectedItems = new Set(itemIds);
+    const rows: CodexInterAgentMessageSupplement[] = [];
+    const previousItems = new Map<string, string>();
+    const pending = new Map<string, CodexInterAgentMessageSupplement[]>();
+    const canonicalTurns = new Set<string>();
+    const operations = new Map<string, "followup_task" | "send_message">();
+    const waitTracker = new CodexAgentWaitTracker();
+    let ownHistoryStart: number | null = null;
+    let hasCanonicalMetadata = false;
+    let currentTurnId: string | undefined;
+    await withCodexRolloutAdmission(sessionFile.filePath, async () => {
+      for await (const line of iterateCodexRolloutLines(sessionFile.filePath, {
+        maxLineBytes: CODEX_MAX_ROLLOUT_LINE_BYTES,
+        maxBytes: CODEX_MAX_ROLLOUT_SCAN_BYTES,
+      })) {
+        const entry = parseCodexSessionEntry(line.line);
+        if (!entry) continue;
+        if (entry.type === "session_meta" && !hasCanonicalMetadata) {
+          ownHistoryStart = getCodexSubagentHistoryStart(entry, sessionId);
+          hasCanonicalMetadata = true;
+          continue;
+        }
+        if (!isCodexOwnHistoryEntry(entry, ownHistoryStart)) continue;
+        const waitPayload = entry.payload as Record<string, unknown>;
+        const waitItem = isRecord(waitPayload.item)
+          ? waitPayload.item
+          : undefined;
+        if (
+          entry.type === "turn_context" ||
+          (entry.type === "event_msg" &&
+            (waitPayload.type === "task_started" ||
+              waitPayload.type === "turn_started" ||
+              waitPayload.type === "turn_aborted" ||
+              waitPayload.type === "task_complete" ||
+              waitPayload.type === "turn_complete")) ||
+          (typeof waitPayload.call_id === "string" &&
+            selectedItems.has(waitPayload.call_id)) ||
+          (typeof waitItem?.id === "string" && selectedItems.has(waitItem.id))
+        ) {
+          waitTracker.observe(entry);
+        }
+        if (entry.type === "event_msg") {
+          const event = entry.payload as Record<string, unknown>;
+          if (event.type === "task_started" || event.type === "turn_started") {
+            currentTurnId =
+              typeof event.turn_id === "string" ? event.turn_id : undefined;
+          }
+        }
+        const communication =
+          entry.type === "response_item"
+            ? readCodexInterAgentMessageIdentity(entry.payload)
+            : undefined;
+        if (communication) {
+          // A delayed completion belongs to its explicit receiving turn, not
+          // whichever task happens to be running when we read the file.
+          if (!communication.turnId || !selectedTurns.has(communication.turnId))
+            continue;
+          attachCodexEntryByteOffset(entry, line.offset);
+          const message = convertCodexEntries([entry], sessionId)[0];
+          if (!message) continue;
+          const row: CodexInterAgentMessageSupplement = {
+            message,
+            ...(previousItems.get(communication.turnId)
+              ? { afterItemId: previousItems.get(communication.turnId) }
+              : {}),
+          };
+          rows.push(row);
+          if (rows.length > CODEX_MAX_BRANCH_ITEMS)
+            throw new CodexHistoryUnavailableError(
+              "Codex agent messages exceed the safe load budget",
+            );
+          const waiting = pending.get(communication.turnId) ?? [];
+          waiting.push(row);
+          pending.set(communication.turnId, waiting);
+          continue;
+        }
+        const payload = entry.payload as Record<string, unknown>;
+        if (
+          entry.type === "response_item" &&
+          (payload.type === "function_call" ||
+            payload.type === "custom_tool_call") &&
+          typeof payload.call_id === "string" &&
+          selectedItems.has(payload.call_id) &&
+          typeof payload.name === "string"
+        ) {
+          const operation = payload.name.split(".").pop();
+          if (operation === "followup_task" || operation === "send_message") {
+            operations.set(payload.call_id, operation);
+          }
+        }
+        const item =
+          entry.type === "event_msg" &&
+          payload.type === "item_completed" &&
+          isRecord(payload.item)
+            ? payload.item
+            : entry.type === "response_item"
+              ? payload
+              : undefined;
+        if (!item) continue;
+        const itemId =
+          typeof item.id === "string"
+            ? item.id
+            : typeof item.call_id === "string"
+              ? item.call_id
+              : undefined;
+        const metadata = isRecord(
+          item.internal_chat_message_metadata_passthrough,
+        )
+          ? item.internal_chat_message_metadata_passthrough
+          : undefined;
+        const turnId =
+          typeof metadata?.turn_id === "string"
+            ? metadata.turn_id
+            : typeof payload.turn_id === "string"
+              ? payload.turn_id
+              : currentTurnId;
+        if (!itemId || !turnId || !selectedTurns.has(turnId)) continue;
+        // Native history projects ItemCompleted records, including neighbors
+        // on other pages. After its first canonical item, do not let raw-only
+        // response ids or tool outputs replace a turn's history boundaries.
+        if (entry.type === "event_msg") canonicalTurns.add(turnId);
+        else if (canonicalTurns.has(turnId) || !selectedItems.has(itemId))
+          continue;
+        const operation = operations.get(itemId);
+        if (item.type === "SubAgentActivity" && operation) {
+          attachCodexEntryByteOffset(entry, line.offset);
+          const message = convertCodexEntries([entry], sessionId, undefined, {
+            provider: "codex",
+            includeNativeCollaborationItems: true,
+          })[0];
+          if (message && isRecord(message.codexThreadItem)) {
+            rows.push({
+              updateOnly: true,
+              message: {
+                ...message,
+                codexThreadItem: { ...message.codexThreadItem, operation },
+              },
+            });
+            if (rows.length > CODEX_MAX_BRANCH_ITEMS) {
+              throw new CodexHistoryUnavailableError(
+                "Codex agent messages exceed the safe load budget",
+              );
+            }
+          }
+        }
+        for (const row of pending.get(turnId) ?? []) row.beforeItemId = itemId;
+        pending.delete(turnId);
+        previousItems.set(turnId, itemId);
+      }
+    });
+    for (const snapshot of waitTracker.values()) {
+      if (
+        snapshot.turnId &&
+        selectedTurns.has(snapshot.turnId) &&
+        selectedItems.has(snapshot.item.id)
+      ) {
+        rows.push({
+          updateOnly: true,
+          message: codexAgentWaitMessage(snapshot, sessionId),
+        });
+      }
+    }
+    if (rows.length > CODEX_MAX_BRANCH_ITEMS)
+      throw new CodexHistoryUnavailableError(
+        "Codex agent messages exceed the safe load budget",
+      );
+    if (
+      !sameCodexRolloutRevision(
+        revision,
+        codexRolloutRevision(await stat(sessionFile.filePath)),
+      )
+    ) {
+      throw new Error("ROLLOUT_CHANGED_DURING_SCAN");
+    }
+    if (this.interAgentMessageCache.size >= 16) {
+      const oldest = this.interAgentMessageCache.keys().next().value;
+      if (oldest) this.interAgentMessageCache.delete(oldest);
+    }
+    this.interAgentMessageCache.set(cacheKey, rows);
+    return rows;
+  }
   private sessionsDir: string;
   private projectPath?: string;
 
@@ -651,6 +1049,8 @@ export class CodexSessionReader implements ISessionReader {
 
   invalidateCache(): void {
     this.sessionFileCache.clear();
+    this.interAgentMessageCache.clear();
+    this.outgoingAgentMessageCache.clear();
     this.cacheTimestamp = 0;
     invalidateCodexSessionManifest(this.sessionsDir);
   }
@@ -2168,7 +2568,10 @@ export class CodexSessionReader implements ISessionReader {
   async getAgentSession(
     agentId: string,
     sessionId?: string,
-    options: { includeInheritedContext?: boolean } = {},
+    options: {
+      includeInheritedContext?: boolean;
+      communicationRootSessionId?: string;
+    } = {},
   ): Promise<{
     messages: Message[];
     hasInheritedContext?: boolean;
@@ -2203,10 +2606,16 @@ export class CodexSessionReader implements ISessionReader {
         await readCodexEntries(entry.filePath),
         agentId,
       );
-      const messages = convertCodexEntries(entries, agentId, undefined, {
+      const ownMessages = convertCodexEntries(entries, agentId, undefined, {
         provider: "codex",
         includeNativeCollaborationItems: true,
       });
+      const messages = await this.includeOutgoingAgentMessages(
+        ownMessages,
+        entry,
+        options.communicationRootSessionId ?? sessionId,
+        manifest,
+      );
       const inheritedContentAvailable =
         hasDisplayableCodexInheritedHistory(inherited);
       const inheritedMessages = options.includeInheritedContext
@@ -2278,7 +2687,10 @@ export class CodexSessionReader implements ISessionReader {
       // stopping there could otherwise accept a cycle containing that root.
       if (!current.isSubagent) {
         return foundRoot
-          ? this.getAgentSession(agentId, immediateParentId, options)
+          ? this.getAgentSession(agentId, immediateParentId, {
+              ...options,
+              communicationRootSessionId: rootSessionId,
+            })
           : null;
       }
       if (!current.parentThreadId) return null;

@@ -1507,6 +1507,14 @@ function attachCanonicalItem(
   message: Message,
   candidate: CanonicalMessageCandidate,
 ): Message {
+  // The raw wait result carries wake reason and item timing that the native
+  // collaboration snapshot omits. Keep that already-correlated projection.
+  if (
+    asUnknownObject(message.codexThreadItem)?.type === "agentWait" &&
+    candidate.nativeType === "collabAgentToolCall" &&
+    asUnknownObject(candidate.message.codexThreadItem)?.tool === "wait"
+  )
+    return message;
   const threadItem = structuredClone(candidate.message.codexThreadItem);
   const nativeItem = asUnknownObject(threadItem);
   if (

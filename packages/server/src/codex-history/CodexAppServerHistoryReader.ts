@@ -5,12 +5,17 @@ import type {
   UrlProjectId,
   ZCodeStoredMessage,
 } from "@yep-anywhere/shared";
+import { codexAgentWaitMessage } from "../codex/agent-wait.js";
 import {
   buildCodexEditInput,
   publicCodexFileChanges,
   publicCodexFilePath,
 } from "../codex/file-change.js";
 import { codexImagePreviewUrl } from "../codex/image-preview.js";
+import {
+  type CodexInterAgentMessageSupplement,
+  mergeCodexInterAgentMessages,
+} from "../codex/inter-agent-message.js";
 import { codexUserMessageIdentity } from "../codex/user-message-identity.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
 import type { ThreadItem } from "../sdk/providers/codex-protocol/generated/v2/ThreadItem.js";
@@ -131,6 +136,17 @@ export interface CodexAppServerHistoryReaderOptions {
     "readThread" | "listTurns" | "listItems" | "getCapability"
   >;
   mode?: "auto" | "rollout" | "app-server";
+  /** Cross-agent mailbox inputs are not part of upstream ThreadItem history. */
+  readInterAgentMessages?: (
+    sessionId: string,
+    projectPath: string,
+    turnIds: readonly string[],
+    itemIds: readonly string[],
+  ) => Promise<readonly CodexInterAgentMessageSupplement[]>;
+  readInterAgentRevision?: (
+    sessionId: string,
+    projectPath: string,
+  ) => Promise<string | undefined>;
 }
 
 type AppServerCursorDirection = "older" | "newer";
@@ -196,6 +212,47 @@ export class CodexAppServerHistoryReader {
       resolveHistoryReadMode(process.env.YEP_CODEX_HISTORY_READ_MODE);
   }
 
+  private async semanticRevision(
+    sessionId: string,
+    updatedAt: number,
+    projectPath: string,
+  ): Promise<string> {
+    const native = codexAppServerSemanticRevision(sessionId, updatedAt);
+    const mailbox = await this.options.readInterAgentRevision?.(
+      sessionId,
+      projectPath,
+    );
+    return mailbox
+      ? `${native}.${Buffer.from(mailbox).toString("base64url")}`
+      : native;
+  }
+
+  private async supplementInterAgentMessages(
+    messages: Message[],
+    sessionId: string,
+    projectPath: string,
+    turnIds: readonly string[],
+    completeTurns = true,
+  ): Promise<Message[]> {
+    if (!this.options.readInterAgentMessages) return messages;
+    const itemIds = [
+      ...new Set(
+        messages.flatMap((message) =>
+          typeof message.codexThreadItemId === "string"
+            ? [message.codexThreadItemId]
+            : [],
+        ),
+      ),
+    ];
+    const supplements = await this.options.readInterAgentMessages(
+      sessionId,
+      projectPath,
+      turnIds,
+      itemIds,
+    );
+    return mergeCodexInterAgentMessages(messages, supplements, completeTurns);
+  }
+
   /**
    * Read provider-native turn pages for the lightweight display/questions API.
    * Each selected turn is hydrated through thread/items/list because Codex's
@@ -237,9 +294,10 @@ export class CodexAppServerHistoryReader {
         ? Promise.reject(staleCursorError())
         : semanticFallback("legacy_history");
     }
-    const revision = codexAppServerSemanticRevision(
+    const revision = await this.semanticRevision(
       thread.id,
       thread.updatedAt,
+      projectPath,
     );
     if (options.expectedRevision && options.expectedRevision !== revision) {
       throw staleCursorError();
@@ -329,9 +387,26 @@ export class CodexAppServerHistoryReader {
         }
       }
 
+      const supplementedMessages =
+        options.itemsView === "full"
+          ? await this.supplementInterAgentMessages(
+              messages,
+              sessionId,
+              projectPath,
+              pageTurns.map((turn) => turn.id),
+            )
+          : messages;
+      if (
+        revision !==
+        (await this.semanticRevision(thread.id, thread.updatedAt, projectPath))
+      )
+        throw staleCursorError();
       return {
         kind: "loaded",
-        messages,
+        messages: settleTerminalAgentWaits(
+          supplementedMessages,
+          new Map(pageTurns.map((turn) => [turn.id, turn])),
+        ),
         summary: threadSummary(
           thread,
           projectId,
@@ -396,9 +471,10 @@ export class CodexAppServerHistoryReader {
     ) {
       throw staleCursorError();
     }
-    const revision = codexAppServerSemanticRevision(
+    const revision = await this.semanticRevision(
       thread.id,
       thread.updatedAt,
+      projectPath,
     );
     if (expectedRevision && revision !== expectedRevision)
       throw staleCursorError();
@@ -422,7 +498,22 @@ export class CodexAppServerHistoryReader {
         projectPath,
         "semantic-display",
       );
-      return { kind: "loaded", messages, revision };
+      const supplementedMessages = await this.supplementInterAgentMessages(
+        messages,
+        sessionId,
+        projectPath,
+        [turnId],
+      );
+      if (
+        revision !==
+        (await this.semanticRevision(thread.id, thread.updatedAt, projectPath))
+      )
+        throw staleCursorError();
+      return {
+        kind: "loaded",
+        messages: supplementedMessages,
+        revision,
+      };
     } catch (error) {
       if (error instanceof CodexHistoryParityError) {
         return { kind: "fallback", reason: "transcript_parity" };
@@ -621,7 +712,7 @@ export class CodexAppServerHistoryReader {
       }
       const chronologicalEntries =
         direction === "older" ? [...entries].reverse() : entries;
-      const messages = projectThreadEntries(
+      const nativeMessages = projectThreadEntries(
         sessionId,
         chronologicalEntries,
         turnsById,
@@ -631,6 +722,16 @@ export class CodexAppServerHistoryReader {
         options.inspectorProjection || options.titleProjection
           ? "semantic-display"
           : "strict",
+      );
+      const messages = settleTerminalAgentWaits(
+        await this.supplementInterAgentMessages(
+          nativeMessages,
+          sessionId,
+          projectPath,
+          [...new Set(chronologicalEntries.map((entry) => entry.turnId))],
+          false,
+        ),
+        turnsById,
       );
       if (messages.length > messageLimit) {
         throw new CodexHistoryParityError();
@@ -1325,6 +1426,39 @@ function hasStableThreadItemIdentity(value: unknown): boolean {
   );
 }
 
+/** A terminal turn cannot retain an active wait, even if its return was never saved. */
+function settleTerminalAgentWaits(
+  messages: Message[],
+  turns: ReadonlyMap<string, Turn>,
+): Message[] {
+  return messages.map((message) => {
+    const candidate = message.codexThreadItem;
+    const item =
+      candidate && typeof candidate === "object" && !Array.isArray(candidate)
+        ? (candidate as Record<string, unknown>)
+        : undefined;
+    const status =
+      typeof message.codexTurnId === "string"
+        ? turns.get(message.codexTurnId)?.status
+        : undefined;
+    if (
+      !item ||
+      item.type !== "agentWait" ||
+      item.status !== "running" ||
+      (status !== "completed" &&
+        status !== "interrupted" &&
+        status !== "failed")
+    )
+      return message;
+    // Turn timing is not the wait's duration. Preserve only recorded item timing.
+    return {
+      ...message,
+      codexThreadItemLifecycle: "completed",
+      codexThreadItem: { ...item, status, outcome: item.outcome ?? "unknown" },
+    };
+  });
+}
+
 function nativeSystemMessage(
   base: Record<string, unknown> & { uuid: string },
   item: Extract<
@@ -1332,6 +1466,32 @@ function nativeSystemMessage(
     { type: "plan" | "collabAgentToolCall" | "subAgentActivity" }
   >,
 ): Message {
+  if (item.type === "collabAgentToolCall" && item.tool === "wait") {
+    return {
+      ...base,
+      ...codexAgentWaitMessage(
+        {
+          item: {
+            type: "agentWait",
+            id: item.id,
+            status:
+              item.status === "inProgress"
+                ? "running"
+                : item.status === "failed"
+                  ? "failed"
+                  : "completed",
+            ...(item.status !== "inProgress"
+              ? { outcome: "unknown" as const }
+              : {}),
+          },
+          ...(typeof base.codexTurnId === "string"
+            ? { turnId: base.codexTurnId }
+            : {}),
+        },
+        typeof base.codexThreadId === "string" ? base.codexThreadId : "",
+      ),
+    };
+  }
   return {
     ...base,
     type: "system",

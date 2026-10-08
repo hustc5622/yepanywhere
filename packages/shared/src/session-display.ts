@@ -209,17 +209,49 @@ export const SessionDisplayNoticeSegmentSchema = z
       "goal",
       "plan",
       "subagent",
+      "inter_agent_message",
+      "agent_wait",
       "provider_event",
     ]),
     title: z.string().max(512).optional(),
     message: z.string().max(SESSION_DISPLAY_MAX_NOTICE_LENGTH).optional(),
     status: z.string().max(64).optional(),
+    agentWait: z
+      .object({
+        type: z.literal("agentWait"),
+        id: z.string().min(1).max(512),
+        status: z.enum(["running", "completed", "interrupted", "failed"]),
+        startedAt: TimestampSchema.optional(),
+        completedAt: TimestampSchema.optional(),
+        durationMs: z.number().nonnegative().optional(),
+        outcome: z
+          .enum(["message", "timeout", "user_input", "unknown"])
+          .optional(),
+      })
+      .strict()
+      .optional(),
     /** Identity only: task bodies and results stay in the child conversation. */
     subagent: z
       .object({
         kind: z.string().max(64),
+        eventId: z.string().min(1).max(512).optional(),
+        operation: z.enum(["followup_task", "send_message"]).optional(),
         agentThreadId: z.string().min(1).max(512).optional(),
         agentPath: z.string().min(1).max(512).optional(),
+      })
+      .strict()
+      .optional(),
+    /** Sanitized agent communication; encrypted payloads are never exposed. */
+    interAgentMessage: z
+      .object({
+        type: z.literal("interAgentMessage"),
+        id: z.string().min(1).max(512),
+        kind: z.enum(["task", "message", "result"]),
+        sender: z.string().max(512),
+        recipient: z.string().max(512),
+        text: z.string().max(SESSION_DISPLAY_MAX_NOTICE_LENGTH).optional(),
+        encrypted: z.boolean(),
+        truncated: z.boolean().optional(),
       })
       .strict()
       .optional(),

@@ -11,10 +11,12 @@ import {
   type SessionDisplayView,
 } from "@yep-anywhere/shared";
 import { renderSafeMarkdown } from "../augments/safe-markdown.js";
+import { isCodexAgentWaitTool } from "../codex/agent-wait.js";
 import { normalizeCodexToolInvocation } from "../codex/normalization.js";
 import {
   buildSessionDisplayProjection,
   extractToolPaths,
+  getCodexSubagentOperation,
   isCheckTool,
 } from "../sessions/display-projection.js";
 import type { Message } from "../supervisor/types.js";
@@ -288,6 +290,12 @@ export class SessionDisplayReducer {
     let tool = this.tools.get(id);
     if (!replay && !tool && this.runtime !== "hold") this.runtime = "running";
     const originalName = string(block.name) ?? tool?.step.name ?? "Tool";
+    // Codex projects mailbox waits as agentWait notices with the same call id.
+    if (
+      (this.provider === "codex" || this.provider === "codex-oss") &&
+      isCodexAgentWaitTool(originalName)
+    )
+      return;
     const normalized =
       block.input !== undefined &&
       (this.provider === "codex" || this.provider === "codex-oss")
@@ -622,10 +630,21 @@ export class SessionDisplayReducer {
     if (runId) this.currentRun = runId;
     const effectiveRun = runId ?? this.currentRun;
     if (message.type === "system" || message.type === "kimi_goal") {
+      const nativeItem = record(message.codexThreadItem);
+      const nativeId = string(nativeItem?.id);
+      const collaborationTool =
+        nativeItem?.type === "subAgentActivity" && nativeId
+          ? this.tools.get(displayToolId(effectiveRun, nativeId))
+          : undefined;
+      const operation = getCodexSubagentOperation(collaborationTool?.step.name);
+      const projectedMessage =
+        operation && nativeItem
+          ? { ...message, codexThreadItem: { ...nativeItem, operation } }
+          : message;
       const projection = buildSessionDisplayProjection({
         sessionId: this.view.sessionId,
         revision: "display-v2",
-        messages: [message as Message],
+        messages: [projectedMessage as Message],
         questionCoverage: "partial",
         provider: this.provider,
       });

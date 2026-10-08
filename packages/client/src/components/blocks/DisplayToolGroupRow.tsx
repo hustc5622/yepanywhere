@@ -2,8 +2,12 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { useI18n } from "../../i18n";
 import { preprocessMessages } from "../../lib/preprocessMessages";
+import { isHiddenCodexMainControlTool } from "../../lib/preprocessMessagesSubagents";
 import type { Message } from "../../types";
-import type { DisplayToolGroupItem } from "../../types/renderItems";
+import type {
+  DisplayToolGroupItem,
+  ToolCallItem,
+} from "../../types/renderItems";
 import { ProjectedToolGroupRow } from "./ProjectedToolGroupRow";
 import { ToolCallRow } from "./ToolCallRow";
 
@@ -41,9 +45,17 @@ function LegacyDisplayToolGroupRow({
   const toolItems = useMemo(
     () =>
       preprocessMessages(messages).filter(
-        (entry) => entry.type === "tool_call",
+        (entry): entry is ToolCallItem =>
+          entry.type === "tool_call" &&
+          (!item.mainTimeline ||
+            !isHiddenCodexMainControlTool(
+              entry.toolName,
+              entry.status,
+              entry.id,
+              item.representedAgentCallIds,
+            )),
       ),
-    [messages],
+    [messages, item.mainTimeline, item.representedAgentCallIds],
   );
 
   const loadDetails = useCallback(

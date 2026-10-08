@@ -162,7 +162,7 @@ describe("Codex collaboration tool renderers", () => {
     expect(screen.getByText("1 running · 7 subagents")).toBeDefined();
     fireEvent.click(container.querySelector("summary") as HTMLElement);
     for (const label of [
-      "completed",
+      "turn finished",
       "failed",
       "closed",
       "unavailable",
@@ -213,7 +213,7 @@ describe("Codex collaboration tool renderers", () => {
       await screen.findByText("0 个进行中 · 共 1 个子智能体"),
     ).toBeDefined();
     fireEvent.click(container.querySelector("summary") as HTMLElement);
-    expect(screen.getByText("本轮已完成")).toBeDefined();
+    expect(screen.getByText("本轮已结束")).toBeDefined();
   });
 
   it("keeps relative child task names relative until the tool returns its canonical path", () => {
@@ -245,7 +245,7 @@ describe("Codex collaboration tool renderers", () => {
       />,
     );
     expect(
-      screen.getByText("Interrupted /root/reviewer · was completed"),
+      screen.getByText("Interrupted /root/reviewer · was turn finished"),
     ).toBeDefined();
     const summary = container.querySelector("summary");
     if (!summary) throw new Error("Missing disclosure");

@@ -5,6 +5,7 @@ import { getMessageId } from "./mergeMessages";
 import {
   type ActiveToolApproval,
   type PreprocessAugments,
+  collapseCodexSubagentActivities,
   collapsePlanProgressItems,
   preprocessMessages,
 } from "./preprocessMessages";
@@ -69,10 +70,12 @@ function tryPreprocessStreamingTail(
     previous.messages.length === messages.length - 1 &&
     hasSameMessagePrefix(previous.messages, messages, previous.messages.length)
   ) {
-    return collapsePlanProgressItems([
-      ...previous.renderItems,
-      ...preprocessMessages([nextTail], augments),
-    ]);
+    return collapseCodexSubagentActivities(
+      collapsePlanProgressItems([
+        ...previous.renderItems,
+        ...preprocessMessages([nextTail], augments),
+      ]),
+    );
   }
 
   if (
@@ -97,10 +100,12 @@ function tryPreprocessStreamingTail(
       return null;
     }
 
-    return collapsePlanProgressItems([
-      ...prefixItems,
-      ...preprocessMessages([nextTail], augments),
-    ]);
+    return collapseCodexSubagentActivities(
+      collapsePlanProgressItems([
+        ...prefixItems,
+        ...preprocessMessages([nextTail], augments),
+      ]),
+    );
   }
 
   return null;

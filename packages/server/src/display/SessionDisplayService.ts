@@ -8,6 +8,10 @@ import type {
   SessionDisplayTurnStatus,
   SessionDisplayView,
 } from "@yep-anywhere/shared";
+import {
+  SESSION_DISPLAY_MAX_NOTICE_LENGTH,
+  SessionDisplayNoticeSegmentSchema,
+} from "@yep-anywhere/shared";
 import type {
   RuntimeController,
   RuntimeSessionSubscription,
@@ -130,6 +134,76 @@ export function compactDisplayMessage(message: RecordValue): RecordValue {
     "branch",
   ]) {
     if (message[key] !== undefined) result[key] = message[key];
+  }
+  const nativeItem = asRecord(message.codexThreadItem);
+  if (message.subtype === "codex_native_item" && nativeItem) {
+    if (nativeItem.type === "interAgentMessage") {
+      const parsed =
+        SessionDisplayNoticeSegmentSchema.shape.interAgentMessage.safeParse({
+          type: "interAgentMessage",
+          id:
+            typeof nativeItem.id === "string"
+              ? nativeItem.id.slice(0, 512)
+              : undefined,
+          kind: nativeItem.kind,
+          sender:
+            typeof nativeItem.sender === "string"
+              ? nativeItem.sender.slice(0, 512)
+              : undefined,
+          recipient:
+            typeof nativeItem.recipient === "string"
+              ? nativeItem.recipient.slice(0, 512)
+              : undefined,
+          ...(typeof nativeItem.text === "string"
+            ? {
+                text: nativeItem.text.slice(
+                  0,
+                  SESSION_DISPLAY_MAX_NOTICE_LENGTH,
+                ),
+              }
+            : {}),
+          encrypted: nativeItem.encrypted === true,
+          ...(nativeItem.truncated === true ||
+          (typeof nativeItem.text === "string" &&
+            nativeItem.text.length > SESSION_DISPLAY_MAX_NOTICE_LENGTH)
+            ? { truncated: true }
+            : {}),
+        });
+      if (parsed.success) result.codexThreadItem = parsed.data;
+    } else if (nativeItem.type === "agentWait") {
+      const projected: RecordValue = {};
+      for (const key of [
+        "type",
+        "id",
+        "status",
+        "startedAt",
+        "completedAt",
+        "durationMs",
+        "outcome",
+      ]) {
+        if (nativeItem[key] !== undefined) projected[key] = nativeItem[key];
+      }
+      const parsed =
+        SessionDisplayNoticeSegmentSchema.shape.agentWait.safeParse(projected);
+      if (parsed.success) result.codexThreadItem = parsed.data;
+    } else if (nativeItem.type === "subAgentActivity") {
+      const item: RecordValue = { type: "subAgentActivity" };
+      for (const key of ["id", "kind", "agentThreadId", "agentPath"]) {
+        if (typeof nativeItem[key] === "string")
+          item[key] = nativeItem[key].slice(0, 512);
+      }
+      if (
+        nativeItem.operation === "followup_task" ||
+        nativeItem.operation === "send_message"
+      ) {
+        item.operation = nativeItem.operation;
+      }
+      result.codexThreadItem = item;
+    }
+    if (result.codexThreadItem) {
+      result.codexThreadItemLifecycle = message.codexThreadItemLifecycle;
+      result.codexThreadItemId = message.codexThreadItemId;
+    }
   }
   const content = messageContent(message);
   const compact = Array.isArray(content)
@@ -662,6 +736,27 @@ export class SessionDisplayService {
     const results = new Set<string>();
     const questions = new Set<string>();
     const texts = new Map<string, string>();
+    const nativeItems = new Set<string>();
+    const nativeIdentity = (message: RecordValue): string | undefined => {
+      const item = asRecord(message.codexThreadItem);
+      if (
+        message.subtype !== "codex_native_item" ||
+        (item?.type !== "interAgentMessage" &&
+          item?.type !== "subAgentActivity" &&
+          item?.type !== "agentWait") ||
+        typeof item.id !== "string"
+      )
+        return undefined;
+      return JSON.stringify([
+        message.codexThreadId ?? entry.selection.sessionId,
+        message.codexTurnId ?? message.turnId ?? "",
+        item.type,
+        item.id,
+        item.type === "agentWait"
+          ? `${item.status}:${item.outcome ?? ""}`
+          : item.kind,
+      ]);
+    };
     const completedAnswerTurns = new Set<string>();
     const identity = (message: RecordValue) =>
       String(
@@ -685,6 +780,8 @@ export class SessionDisplayService {
               .join("")
           : "";
     for (const message of page.messages) {
+      const nativeKey = nativeIdentity(message);
+      if (nativeKey) nativeItems.add(nativeKey);
       const content = messageContent(message);
       const blocks = Array.isArray(content) ? content.map(asRecord) : [];
       const run = String(message.codexTurnId ?? message.turnId ?? "session");
@@ -714,6 +811,11 @@ export class SessionDisplayService {
       }
     }
     for (const [key, message] of entry.overlay) {
+      const nativeKey = nativeIdentity(message);
+      if (nativeKey && nativeItems.has(nativeKey)) {
+        entry.overlay.delete(key);
+        continue;
+      }
       const turnId = message.codexTurnId ?? message.turnId;
       const window = page.codexTurnWindow;
       const timestamp =

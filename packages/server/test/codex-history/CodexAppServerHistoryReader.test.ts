@@ -10,6 +10,7 @@ import { CodexHistoryClientError } from "../../src/codex-history/types.js";
 import type { Thread } from "../../src/sdk/providers/codex-protocol/generated/v2/Thread.js";
 import type { Turn } from "../../src/sdk/providers/codex-protocol/generated/v2/Turn.js";
 import { publicCodexThreadItem } from "../../src/sdk/providers/codex.js";
+import type { Message } from "../../src/supervisor/types.js";
 
 function thread(historyMode: "legacy" | "paginated" = "paginated"): Thread {
   return {
@@ -119,6 +120,124 @@ function client(overrides: Record<string, unknown> = {}) {
 }
 
 describe("CodexAppServerHistoryReader", () => {
+  it("supplements mailbox results before the parent's answer across history APIs and revises mailbox-only changes", async () => {
+    const items = [
+      {
+        turnId: "turn-1",
+        item: {
+          type: "userMessage",
+          id: "user-1",
+          clientId: null,
+          content: [{ type: "text", text: "Review", text_elements: [] }],
+        },
+      },
+      {
+        turnId: "turn-1",
+        item: {
+          type: "agentMessage",
+          id: "answer-1",
+          text: "Done",
+          phase: "final_answer",
+          memoryCitation: null,
+        },
+      },
+    ];
+    const fake = client({
+      listItems: vi.fn(async (params: { sortDirection: string }) => ({
+        data: params.sortDirection === "desc" ? [...items].reverse() : items,
+        nextCursor: null,
+        backwardsCursor: null,
+      })),
+    });
+    const message: Message = {
+      uuid: "mailbox-1",
+      type: "system",
+      subtype: "codex_native_item",
+      codexThreadId: thread().id,
+      codexTurnId: "turn-1",
+      codexThreadItemId: "amsg-1",
+      codexCorrelationKey: "codex:turn-1:inter-agent-message:amsg-1",
+      codexThreadItem: {
+        type: "interAgentMessage",
+        id: "amsg-1",
+        kind: "result",
+        sender: "/root/review",
+        recipient: "/root",
+        text: "Review passed",
+        encrypted: false,
+      },
+    };
+    const readInterAgentMessages = vi.fn(async () => [
+      { message, beforeItemId: "answer-1", afterItemId: "user-1" },
+    ]);
+    let mailboxRevision = "one";
+    const reader = new CodexAppServerHistoryReader({
+      client: fake,
+      readInterAgentMessages,
+      readInterAgentRevision: async () => mailboxRevision,
+    });
+    const page = await reader.getSemanticTurnsPage(
+      thread().id,
+      "project" as UrlProjectId,
+      "/tmp/project",
+      { limit: 20, itemsView: "full" },
+    );
+    expect(page.kind).toBe("loaded");
+    if (page.kind !== "loaded") throw new Error("Expected loaded");
+    expect(page.messages.map((entry) => entry.codexThreadItemId)).toEqual([
+      "user-1",
+      "amsg-1",
+      "answer-1",
+    ]);
+    expect(readInterAgentMessages).toHaveBeenCalledWith(
+      thread().id,
+      "/tmp/project",
+      ["turn-1"],
+      ["user-1", "answer-1"],
+    );
+    const detail = await reader.getSemanticTurn(
+      thread().id,
+      "/tmp/project",
+      "turn-1",
+      page.revision,
+    );
+    expect(
+      detail.kind === "loaded" &&
+        detail.messages.map((entry) => entry.codexThreadItemId),
+    ).toEqual(["user-1", "amsg-1", "answer-1"]);
+    const ordinary = await reader.getSession(
+      thread().id,
+      "project" as UrlProjectId,
+      "/tmp/project",
+      undefined,
+      {},
+    );
+    expect(
+      ordinary.kind === "loaded" &&
+        ordinary.session.projectedMessages?.map(
+          (entry) => entry.codexThreadItemId,
+        ),
+    ).toEqual(["user-1", "amsg-1", "answer-1"]);
+    mailboxRevision = "two";
+    await expect(
+      reader.getSemanticTurnsPage(
+        thread().id,
+        "project" as UrlProjectId,
+        "/tmp/project",
+        { limit: 20, itemsView: "full", expectedRevision: page.revision },
+      ),
+    ).rejects.toThrow("ROLLOUT_CURSOR_STALE");
+    const refreshed = await reader.getSemanticTurnsPage(
+      thread().id,
+      "project" as UrlProjectId,
+      "/tmp/project",
+      { limit: 20, itemsView: "full" },
+    );
+    expect(refreshed.kind === "loaded" && refreshed.revision).not.toBe(
+      page.revision,
+    );
+  });
+
   it("retains async question metadata in paginated history", async () => {
     const questions = [
       { title: "Which address?", options: ["Production", "Local"] },
@@ -368,13 +487,46 @@ describe("CodexAppServerHistoryReader", () => {
           nextCursor: null,
           backwardsCursor: null,
         })),
-        listItems: vi.fn(async () => ({
-          data: [],
+        listItems: vi.fn(async ({ turnId }: { turnId: string }) => ({
+          data: [
+            {
+              turnId,
+              item: {
+                type: "collabAgentToolCall",
+                id: `wait-${turnId}`,
+                tool: "wait",
+                status: "inProgress",
+                senderThreadId: thread().id,
+                receiverThreadIds: [],
+                receiverAgents: [],
+                agentsStates: {},
+              },
+            },
+          ],
           nextCursor: null,
           backwardsCursor: null,
         })),
       });
-      const reader = new CodexAppServerHistoryReader({ client: fake });
+      const reader = new CodexAppServerHistoryReader({
+        client: fake,
+        readInterAgentMessages: async (_session, _project, turnIds) =>
+          turnIds.map((turnId) => ({
+            updateOnly: true,
+            message: {
+              uuid: `wait-message-${turnId}`,
+              type: "system",
+              subtype: "codex_native_item",
+              codexTurnId: turnId,
+              codexThreadItemId: `wait-${turnId}`,
+              codexThreadItem: {
+                type: "agentWait",
+                id: `wait-${turnId}`,
+                status: "running",
+                startedAt: "2026-10-08T01:00:00.000Z",
+              },
+            },
+          })),
+      });
       const result = await reader.getSemanticTurnsPage(
         thread().id,
         "project" as UrlProjectId,
@@ -391,6 +543,18 @@ describe("CodexAppServerHistoryReader", () => {
       expect(result.summary.lastTurnStatus).toBe(
         expected === "running" ? undefined : expected,
       );
+      const waits = result.messages.filter(
+        (message) => message.codexThreadItem?.type === "agentWait",
+      );
+      expect(waits).toHaveLength(2);
+      for (const wait of waits) {
+        expect(wait.codexThreadItem).toMatchObject({
+          status: wait.codexTurnId === "turn-live" ? expected : "interrupted",
+          startedAt: "2026-10-08T01:00:00.000Z",
+        });
+        expect(wait.codexThreadItem).not.toHaveProperty("durationMs");
+        expect(wait.codexThreadItem).not.toHaveProperty("completedAt");
+      }
     },
   );
 

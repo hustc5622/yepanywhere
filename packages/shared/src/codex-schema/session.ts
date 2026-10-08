@@ -146,6 +146,28 @@ export const CodexMessagePayloadSchema = z.object({
 
 export type CodexMessagePayload = z.infer<typeof CodexMessagePayloadSchema>;
 
+/** Cross-agent mailbox input, distinct from the assistant's agent_message event. */
+export const CodexInterAgentMessagePayloadSchema = z.object({
+  type: z.literal("agent_message"),
+  ...CodexResponseItemIdentityFields,
+  id: z.string().nullish(),
+  author: z.string(),
+  recipient: z.string(),
+  content: z.array(
+    z.union([
+      CodexInputTextContentSchema,
+      z.object({
+        type: z.literal("encrypted_content"),
+        encrypted_content: z.string(),
+      }),
+    ]),
+  ),
+});
+
+export type CodexInterAgentMessagePayload = z.infer<
+  typeof CodexInterAgentMessagePayloadSchema
+>;
+
 /**
  * Reasoning summary block.
  */
@@ -327,6 +349,7 @@ export type CodexGhostSnapshotPayload = z.infer<
  */
 export const CodexResponseItemPayloadSchema = z.discriminatedUnion("type", [
   CodexMessagePayloadSchema,
+  CodexInterAgentMessagePayloadSchema,
   CodexReasoningPayloadSchema,
   CodexFunctionCallPayloadSchema,
   CodexFunctionCallOutputPayloadSchema,

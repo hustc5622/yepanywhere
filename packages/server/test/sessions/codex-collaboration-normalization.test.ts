@@ -59,6 +59,30 @@ function convert(entries: CodexSessionEntry[]) {
 }
 
 describe("Codex child transcript collaboration normalization", () => {
+  it.each(["followup_task", "send_message"])(
+    "retains the %s operation on an interacted event",
+    (operation) => {
+      const messages = convert([
+        {
+          type: "response_item",
+          timestamp: "2026-10-04T01:00:00Z",
+          payload: {
+            type: "function_call",
+            call_id: "interaction-1",
+            name: operation,
+            namespace: "collaboration",
+            arguments: '{"target":"/root/child","message":"Continue"}',
+          },
+        },
+        completedItem(activity("interacted", "interaction-1")),
+      ]);
+      expect(
+        messages.find((message) => message.subtype === "codex_native_item")
+          ?.codexThreadItem,
+      ).toMatchObject({ kind: "interacted", operation });
+    },
+  );
+
   it.each(["started", "interacted", "interrupted", "completed"])(
     "projects a persisted SubAgentActivity/%s into a typed native item",
     (kind) => {

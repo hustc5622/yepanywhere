@@ -20,6 +20,7 @@ import type { AgentSession, Message } from "../../types";
 import type { RenderItem } from "../../types/renderItems";
 import { SubagentDetailProvider } from "../SubagentDetailProvider";
 import { TranscriptRendererProvider } from "../TranscriptRendererProvider";
+import { CodexNativeItemBlock } from "../blocks/codex/CodexNativeItemBlock";
 import { CodexNativeSubAgentBlock } from "../blocks/codex/CodexNativeSubAgentBlock";
 
 const { getAgentSessionInTree } = vi.hoisted(() => ({
@@ -76,6 +77,8 @@ function session(...messages: Message[]): AgentSession {
 function StubRenderItem({ item }: { item: RenderItem }) {
   const metadata = useOptionalSessionMetadata();
   const detail = useSubagentDetail();
+  if (item.type === "codex_native_item")
+    return <CodexNativeItemBlock item={item} />;
   if (item.type !== "text") return <div>{item.type}</div>;
   return (
     <div>
@@ -304,7 +307,7 @@ describe("SubagentDetailProvider", () => {
       next: "running",
     },
   ] as const)(
-    "releases the $snapshot snapshot on $action so later $next events can update the card",
+    "keeps historical card state separate from the $snapshot detail and releases it on $action",
     async ({ action, snapshot, next }) => {
       getAgentSessionInTree
         .mockResolvedValueOnce({ messages: [], status: snapshot })
@@ -326,7 +329,7 @@ describe("SubagentDetailProvider", () => {
       expect(
         view.container.querySelector(".codex-native-subagent-state-status")
           ?.textContent,
-      ).toBe(snapshot);
+      ).toBe("running");
 
       fireEvent.click(screen.getByRole("button", { name: action }));
       expect(screen.getByLabelText("Verified child status").textContent).toBe(
@@ -336,7 +339,7 @@ describe("SubagentDetailProvider", () => {
       expect(
         view.container.querySelector(".codex-native-subagent-state-status")
           ?.textContent,
-      ).toBe(next);
+      ).toBe(next === "completed" ? "turn finished" : next);
     },
   );
 
@@ -364,7 +367,7 @@ describe("SubagentDetailProvider", () => {
       screen.getByRole("button", { name: "Close subagent details" }),
     );
     view.rerender(<TestApp>{card("completed")}</TestApp>);
-    expect(screen.getByText("Task completed")).toBeDefined();
+    expect(screen.getByText("Turn finished")).toBeDefined();
     expect(view.container.querySelector(".status-running")).toBeNull();
   });
 
@@ -382,8 +385,10 @@ describe("SubagentDetailProvider", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
     await screen.findByRole("alert");
-    expect(screen.getByLabelText("Verified child status").textContent).toBe(
-      "unopened",
+    await waitFor(() =>
+      expect(screen.getByLabelText("Verified child status").textContent).toBe(
+        "unopened",
+      ),
     );
     fireEvent.click(screen.getByRole("button", { name: "Retry" }));
     await waitFor(() =>
@@ -588,6 +593,165 @@ describe("SubagentDetailProvider", () => {
     ).toBeDefined();
   });
 
+  it("keeps outgoing delegation separate from this agent's task and folds repeated result text into a delivery receipt", async () => {
+    const communication = (
+      id: string,
+      kind: string,
+      sender: string,
+      recipient: string,
+      text: string,
+    ): Message => ({
+      id,
+      type: "system",
+      subtype: "codex_native_item",
+      codexThreadItem: {
+        type: "interAgentMessage",
+        id,
+        kind,
+        sender,
+        recipient,
+        text,
+        encrypted: false,
+      },
+    });
+    getAgentSessionInTree.mockResolvedValue(
+      session(
+        communication(
+          "task",
+          "task",
+          "/root",
+          "/root/child",
+          "Review the parser.",
+        ),
+        assistant("own-final", "Parser review complete."),
+        communication(
+          "outgoing-task",
+          "task",
+          "/root/child",
+          "/root/peer",
+          "Check the renderer too.",
+        ),
+        communication(
+          "outgoing-result",
+          "result",
+          "/root/child",
+          "/root",
+          "Parser review complete.",
+        ),
+      ),
+    );
+    render(<TestApp />);
+    fireEvent.click(screen.getByRole("button", { name: "Open child" }));
+    await screen.findByText("The result above was returned to the recipient.");
+    expect(screen.getAllByText("Parser review complete.")).toHaveLength(1);
+    expect(screen.getByText("Check the renderer too.")).toBeDefined();
+    fireEvent.click(screen.getByRole("tab", { name: "Latest result" }));
+    expect(screen.getByText("Parser review complete.")).toBeDefined();
+    expect(screen.queryByText("Check the renderer too.")).toBeNull();
+  });
+
+  it("starts a fresh result scope when the same agent receives a follow-up task", async () => {
+    const followup: Message = {
+      id: "followup-task",
+      type: "system",
+      subtype: "codex_native_item",
+      codexThreadItem: {
+        type: "interAgentMessage",
+        kind: "task",
+        sender: "/root",
+        recipient: "/root/child",
+        encrypted: true,
+      },
+    };
+    getAgentSessionInTree.mockResolvedValue({
+      messages: [
+        assistant("previous-result", "Only the previous task was checked"),
+        followup,
+        assistant("current-progress", "Checking the follow-up", "commentary"),
+      ],
+      status: "running",
+    });
+    render(<TestApp />);
+    fireEvent.click(screen.getByRole("button", { name: "Open child" }));
+    await screen.findByText("Checking the follow-up");
+    expect(screen.getByRole("region", { name: "Assigned task" })).toBeDefined();
+    fireEvent.click(screen.getByRole("tab", { name: "Latest result" }));
+    const result = screen.getByRole("tabpanel", { name: "Latest result" });
+    expect(
+      within(result).queryByText("Only the previous task was checked"),
+    ).toBeNull();
+    expect(
+      within(result).getByText(
+        "No final reply yet. Check the conversation for progress.",
+      ),
+    ).toBeDefined();
+
+    getAgentSessionInTree.mockResolvedValue(
+      session(
+        assistant("previous-result", "Only the previous task was checked"),
+        followup,
+        assistant("followup-result", "The follow-up has now been checked"),
+      ),
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await screen.findByText("The follow-up has now been checked");
+    expect(
+      within(result).queryByText("Only the previous task was checked"),
+    ).toBeNull();
+  });
+
+  it("places the assigned task before inherited background and preserves its disclosure across tabs", async () => {
+    const base: AgentSession = {
+      ...session(
+        {
+          id: "initial-task",
+          type: "system",
+          subtype: "codex_native_item",
+          codexThreadItem: {
+            type: "interAgentMessage",
+            kind: "task",
+            sender: "/root",
+            recipient: "/root/child",
+            text: "Check the documentation references.",
+            encrypted: false,
+          },
+        },
+        assistant("answer", "References checked"),
+      ),
+      hasInheritedContext: true,
+    };
+    getAgentSessionInTree.mockImplementation(
+      (_project, _root, _agent, options) =>
+        Promise.resolve({
+          ...base,
+          ...(options?.includeInheritedContext
+            ? {
+                inheritedMessages: [
+                  assistant("inherited", "Earlier parent answer"),
+                ],
+              }
+            : {}),
+        }),
+    );
+    render(<TestApp />);
+    fireEvent.click(screen.getByRole("button", { name: "Open child" }));
+    const task = await screen.findByRole("region", { name: "Assigned task" });
+    const context = screen.getByRole("button", { name: "Inherited context" });
+    expect(
+      task.compareDocumentPosition(context) & Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    fireEvent.click(context);
+    await screen.findByText("Earlier parent answer");
+    fireEvent.click(screen.getByRole("tab", { name: "Latest result" }));
+    fireEvent.click(screen.getByRole("tab", { name: "Conversation" }));
+    expect(screen.getByRole("button", { name: "Inherited context" })).toBe(
+      context,
+    );
+    expect(context.getAttribute("aria-expanded")).toBe("true");
+    expect(screen.getByText("Earlier parent answer")).toBeDefined();
+    expect(getAgentSessionInTree).toHaveBeenCalledTimes(2);
+  });
+
   it("loads inherited context only on expansion and caches it across collapse and reopen", async () => {
     const own = assistant("own-answer", "Own child answer");
     const base: AgentSession = { ...session(own), hasInheritedContext: true };
@@ -625,7 +789,9 @@ describe("SubagentDetailProvider", () => {
       { includeInheritedContext: true },
     );
     expect(
-      screen.getByText("Parent conversation provided as background."),
+      screen.getByText(
+        "Parent conversation provided as background, separate from the assigned task and the agent’s collaboration instructions.",
+      ),
     ).toBeDefined();
     expect(screen.getAllByText("Own child answer")).toHaveLength(1);
     expect(toggle.getAttribute("aria-expanded")).toBe("true");

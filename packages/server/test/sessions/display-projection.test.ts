@@ -1,5 +1,6 @@
 import type { CodexSessionEntry } from "@yep-anywhere/shared";
 import {
+  SESSION_DISPLAY_MAX_NOTICE_LENGTH,
   SESSION_DISPLAY_THINKING_PREVIEW_MAX_LENGTH,
   parseKimiWireJsonl,
   parsePiSessionJsonl,
@@ -425,6 +426,131 @@ describe("session display projection", () => {
 
     expect(projection.page.turns).toHaveLength(1);
     expect(projection.questions.questions).toHaveLength(1);
+  });
+
+  it("preserves bounded mailbox content through the live overlay and display projection", () => {
+    const compact = compactDisplayMessage({
+      uuid: "mail-1",
+      type: "system",
+      subtype: "codex_native_item",
+      codexTurnId: "turn-1",
+      codexThreadItemLifecycle: "completed",
+      codexThreadItem: {
+        type: "interAgentMessage",
+        id: "mail-1",
+        kind: "task",
+        sender: "/root",
+        recipient: "/root/review",
+        text: "x".repeat(SESSION_DISPLAY_MAX_NOTICE_LENGTH + 20),
+        encrypted: true,
+        encrypted_content: "must-not-survive",
+      },
+    });
+    expect(JSON.stringify(compact)).not.toContain("must-not-survive");
+    const projection = buildSessionDisplayProjection({
+      sessionId: "parent-thread",
+      revision: "revision-1",
+      questionCoverage: "complete",
+      messages: [compact as Message],
+    });
+    expect(projection.page.turns[0]?.segments).toEqual([
+      expect.objectContaining({
+        type: "notice",
+        kind: "inter_agent_message",
+        interAgentMessage: {
+          type: "interAgentMessage",
+          id: "mail-1",
+          kind: "task",
+          sender: "/root",
+          recipient: "/root/review",
+          text: "x".repeat(SESSION_DISPLAY_MAX_NOTICE_LENGTH),
+          encrypted: true,
+          truncated: true,
+        },
+      }),
+    ]);
+  });
+
+  it.each(["followup_task", "send_message"])(
+    "preserves %s semantics even when its tool call is collapsed into a history group",
+    (operation) => {
+      const projection = buildSessionDisplayProjection({
+        sessionId: "parent-thread",
+        revision: "revision-1",
+        questionCoverage: "complete",
+        messages: [
+          {
+            uuid: "call-message",
+            type: "assistant",
+            message: {
+              role: "assistant",
+              content: [
+                {
+                  type: "tool_use",
+                  id: "call-1",
+                  name: `collaboration:${operation}`,
+                  input: { target: "review", message: "Review this" },
+                },
+              ],
+            },
+          },
+          {
+            uuid: "activity-message",
+            type: "system",
+            subtype: "codex_native_item",
+            codexThreadItem: {
+              type: "subAgentActivity",
+              id: "call-1",
+              kind: "interacted",
+              agentThreadId: "child-thread",
+              agentPath: "/root/review",
+            },
+          },
+        ],
+      });
+      const segments = projection.page.turns[0]?.segments;
+      expect(segments?.[0]).toMatchObject({ type: "tool_group", count: 1 });
+      expect(segments?.[1]).toMatchObject({
+        type: "notice",
+        subagent: { eventId: "call-1", kind: "interacted", operation },
+      });
+    },
+  );
+
+  it("preserves subagent event identity through the live overlay", () => {
+    const compact = compactDisplayMessage({
+      uuid: "native-1",
+      type: "system",
+      subtype: "codex_native_item",
+      codexThreadItemLifecycle: "completed",
+      codexThreadItem: {
+        type: "subAgentActivity",
+        id: "subagent-completed-child-turn-1",
+        kind: "completed",
+        operation: "followup_task",
+        agentThreadId: "child-thread",
+        agentPath: "/root/review",
+        prompt: "must-not-survive",
+      },
+    });
+    expect(JSON.stringify(compact)).not.toContain("must-not-survive");
+    const projection = buildSessionDisplayProjection({
+      sessionId: "parent-thread",
+      revision: "revision-1",
+      questionCoverage: "complete",
+      messages: [compact as Message],
+    });
+    expect(projection.page.turns[0]?.segments[0]).toMatchObject({
+      type: "notice",
+      kind: "subagent",
+      subagent: {
+        eventId: "subagent-completed-child-turn-1",
+        kind: "completed",
+        operation: "followup_task",
+        agentThreadId: "child-thread",
+        agentPath: "/root/review",
+      },
+    });
   });
 
   it("keeps pending actions and visible provider notices out of success groups", () => {

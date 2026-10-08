@@ -705,7 +705,17 @@ export function createApp(options: AppOptions): AppResult {
         })
       : undefined;
   const codexAppServerHistoryReader = codexHistoryClient
-    ? new CodexAppServerHistoryReader({ client: codexHistoryClient })
+    ? new CodexAppServerHistoryReader({
+        client: codexHistoryClient,
+        readInterAgentMessages: (sessionId, projectPath, turnIds, itemIds) =>
+          codexReaderFactory(projectPath).getInterAgentMessages(
+            sessionId,
+            turnIds,
+            itemIds,
+          ),
+        readInterAgentRevision: (sessionId, projectPath) =>
+          codexReaderFactory(projectPath).getInterAgentRevision(sessionId),
+      })
     : undefined;
   const codexSessionCatalog = codexHistoryClient
     ? new CodexSessionCatalog({

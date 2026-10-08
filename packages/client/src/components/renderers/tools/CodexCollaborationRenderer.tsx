@@ -115,7 +115,13 @@ function SafeInput({ tool, input }: { tool: string; input: unknown }) {
       {tool === "spawn_agent" && (
         <DetailRow
           label={t("codexAgentContext")}
-          value={getString(record, "fork_turns") ?? "all"}
+          value={
+            !getString(record, "fork_turns") || record?.fork_turns === "all"
+              ? t("codexAgentContextAll")
+              : record?.fork_turns === "none"
+                ? t("codexAgentContextNone")
+                : getString(record, "fork_turns")
+          }
         />
       )}
       {tool === "wait_agent" && typeof record?.timeout_ms === "number" && (

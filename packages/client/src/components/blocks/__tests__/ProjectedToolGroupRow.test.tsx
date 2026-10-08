@@ -73,6 +73,32 @@ afterEach(() => {
 });
 
 describe("ProjectedToolGroupRow", () => {
+  it.each([false, true])(
+    "filters lazily loaded coordination steps only on the main timeline: %s",
+    async (mainTimeline) => {
+      api.getSessionDisplayGroup.mockResolvedValue({
+        steps: [
+          {
+            ...step,
+            id: "send",
+            name: "collaboration.send_message",
+            summary: "send a private message",
+          },
+          step,
+        ],
+      });
+      const group = {
+        ...item(`filter-${mainTimeline}`, "summary", false),
+        mainTimeline,
+      };
+      render(<ProjectedToolGroupRow item={group} sessionProvider="codex" />);
+      fireEvent.click(screen.getByRole("button", { expanded: false }));
+      await waitFor(() => expect(screen.getByText("pnpm test")).toBeDefined());
+      if (mainTimeline)
+        expect(screen.queryByText("send a private message")).toBeNull();
+      else expect(screen.getByText("send a private message")).toBeDefined();
+    },
+  );
   it("does not fetch dynamic content for a collapsed running tool", async () => {
     vi.useFakeTimers();
     render(
