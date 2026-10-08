@@ -2,6 +2,7 @@ import { type ReactNode, memo, useState } from "react";
 import { useFetchedImage } from "../../hooks/useRemoteImage";
 import { useOptionalI18n } from "../../i18n";
 import { apiPath as resolveApiPath } from "../../lib/apiPath";
+import { getAttachmentThumbnailSrc } from "../../lib/attachmentThumbnail";
 import {
   hasAttachmentToken,
   matchTokenToAttachment,
@@ -29,6 +30,7 @@ import type {
   ContextUsage,
   SessionBranchOption,
 } from "../../types";
+import { AttachmentThumbnail } from "../AttachmentThumbnail";
 import { MessageActions } from "../MessageActions";
 import { Modal } from "../ui/Modal";
 
@@ -393,7 +395,13 @@ function UploadedFileItem({
           }
           onClick={() => setShowModal(true)}
         >
-          <span aria-hidden="true">🖼️</span>
+          <AttachmentThumbnail
+            src={getAttachmentThumbnailSrc({
+              mimeType: file.mimeType,
+              previewUrl: directPreviewUrl ?? undefined,
+              apiPath: apiPath ?? undefined,
+            })}
+          />
           <span>{displayName}</span>
         </button>
         {showModal && (

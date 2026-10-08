@@ -1,5 +1,7 @@
 import { useI18n } from "../i18n";
+import { getAttachmentThumbnailSrc } from "../lib/attachmentThumbnail";
 import type { ComposerAttachment } from "./AttachmentComposer";
+import { AttachmentThumbnail } from "./AttachmentThumbnail";
 
 /** The same attachment actions for legacy drafts without inline references. */
 export function ComposerAttachmentCard({
@@ -32,7 +34,11 @@ export function ComposerAttachmentCard({
         title={attachment.name}
         onClick={() => onPreview?.(attachment.id)}
       >
-        <span className="attachment-composer-icon" aria-hidden="true" />
+        {isImage ? (
+          <AttachmentThumbnail src={getAttachmentThumbnailSrc(attachment)} />
+        ) : (
+          <span className="attachment-composer-icon" aria-hidden="true" />
+        )}
         <span className="attachment-composer-name">{attachment.name}</span>
         {attachment.pending && attachment.progress !== undefined && (
           <span className="attachment-composer-progress">

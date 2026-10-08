@@ -88,7 +88,11 @@ describe("AttachmentComposer", () => {
     expect(
       cards[0]?.querySelector(".attachment-composer-name")?.textContent,
     ).toBe("shot.png");
-    expect(editor.querySelector("img")).toBeNull();
+    expect(
+      Array.from(editor.querySelectorAll("img"), (image) =>
+        image.getAttribute("src"),
+      ),
+    ).toEqual(["blob:first", "blob:second"]);
     expect(handle.current?.value).toBe(
       "before @[shot.png] between @[shot.png] after",
     );
@@ -318,9 +322,33 @@ describe("AttachmentComposer", () => {
     expect(editor.querySelector("button")).toBe(button);
     expect(editor.querySelector("[data-attachment-id]")).toBe(card);
     expect(button?.disabled).toBe(false);
-    expect(editor.querySelector("img")).toBeNull();
+    expect(editor.querySelector("img")?.getAttribute("src")).toBe(
+      "blob:updated",
+    );
     expect(window.getSelection()?.anchorNode).toBe(caretNode);
     expect(handle.current?.selectionStart).toBe(22);
+  });
+
+  it("falls back to the icon after a thumbnail fails without changing the document or caret", () => {
+    const { editor, handle, onChange, onPreview } = setup();
+    act(() => {
+      handle.current?.focus();
+      handle.current?.setSelectionRange(0, 0);
+    });
+    const image = editor.querySelector("img");
+    const card = editor.querySelector("[data-attachment-id]");
+    if (!image || !card) throw new Error("Missing attachment thumbnail");
+    const before = handle.current?.value;
+    fireEvent.load(image);
+    expect(image.dataset.loaded).toBe("true");
+    fireEvent.error(image);
+    expect(card.querySelector("img")).toBeNull();
+    expect(card.querySelector(".attachment-thumbnail")).not.toBeNull();
+    expect(handle.current?.value).toBe(before);
+    expect(handle.current?.selectionStart).toBe(0);
+    expect(onChange).not.toHaveBeenCalled();
+    fireEvent.click(card.querySelector("button") as HTMLButtonElement);
+    expect(onPreview).toHaveBeenCalledWith("first");
   });
 
   it("keeps uploads removable and restricts preview to available images", () => {

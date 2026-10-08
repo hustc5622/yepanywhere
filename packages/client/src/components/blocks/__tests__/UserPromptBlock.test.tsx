@@ -377,6 +377,12 @@ User uploaded files:
     );
 
     const chip = screen.getByRole("button", { name: /shot\.png/i });
+    const thumbnail = chip.querySelector("img");
+    expect(thumbnail?.getAttribute("src")).toBe(
+      "/api/projects/project-id/sessions/session-id/upload/76285622-cb0a-47e3-a0d9-ffcdae95af9b_shot.png",
+    );
+    expect(thumbnail?.getAttribute("loading")).toBe("lazy");
+    expect(thumbnail?.getAttribute("alt")).toBe("");
     // The chip lives inside the prompt text block, not in the trailing list.
     expect(chip.closest(".text-block")).not.toBeNull();
     expect(chip.closest(".user-prompt-metadata")).toBeNull();
@@ -384,6 +390,53 @@ User uploaded files:
     expect(
       chip.closest(".text-block")?.textContent?.replace(/\s+/g, " "),
     ).toContain("before");
+  });
+
+  it("keeps image cards editable and previewable when the thumbnail fails", () => {
+    const onEdit = vi.fn();
+    const previewUrl = "data:image/png;base64,AAAA";
+    const content: ContentBlock[] = [
+      { type: "text", text: "Review @[pasted-image-1.png] please." },
+      { type: "input_image", image_url: previewUrl, mime_type: "image/png" },
+    ];
+
+    render(
+      <I18nProvider>
+        <UserPromptBlock content={content} onEdit={onEdit} />
+      </I18nProvider>,
+    );
+
+    const chip = screen.getByRole("button", {
+      name: "Open pasted-image-1.png",
+    });
+    const thumbnail = chip.querySelector("img");
+    expect(thumbnail?.getAttribute("src")).toBe(previewUrl);
+    fireEvent.error(thumbnail as HTMLImageElement);
+    expect(chip.querySelector("img")).toBeNull();
+    expect(chip.querySelector(".attachment-thumbnail")).not.toBeNull();
+    expect(chip.textContent).toBe("pasted-image-1.png");
+    expect(
+      screen.getByRole("button", { name: "Copy message and images" }),
+    ).toBeDefined();
+
+    fireEvent.click(screen.getByRole("button", { name: "Edit message" }));
+    expect(onEdit).toHaveBeenCalledWith({
+      text: "Review @[pasted-image-1.png] please.",
+      attachments: [
+        expect.objectContaining({
+          originalName: "pasted-image-1.png",
+          mimeType: "image/png",
+          previewUrl,
+        }),
+      ],
+    });
+
+    fireEvent.click(chip);
+    expect(
+      screen
+        .getByRole("img", { name: "pasted-image-1.png" })
+        .getAttribute("src"),
+    ).toBe(previewUrl);
   });
 
   it.each(["url", "posix", "windows"])(
@@ -457,6 +510,12 @@ User uploaded files:
       screen.getByRole("button", { name: /screenshot\.png/i }),
     ).toBeDefined();
     expect(screen.queryByText(/pasted-image-1\.png/i)).toBeNull();
+    expect(
+      screen
+        .getByRole("button", { name: /screenshot\.png/i })
+        .querySelector("img")
+        ?.getAttribute("src"),
+    ).toBe("data:image/png;base64,AAAA");
 
     fireEvent.click(screen.getByRole("button", { name: /screenshot\.png/i }));
     expect(screen.getByRole("img", { name: /screenshot\.png/i })).toBeDefined();

@@ -10,6 +10,7 @@ import {
   useState,
 } from "react";
 import { useI18n } from "../i18n";
+import { getAttachmentThumbnailSrc } from "../lib/attachmentThumbnail";
 import {
   matchTokenToAttachment,
   splitByAttachmentTokens,
@@ -403,8 +404,24 @@ export const AttachmentComposer = forwardRef<AttachmentComposerHandle, Props>(
         );
         preview.title = attachment.name;
         const icon = document.createElement("span");
-        icon.className = "attachment-composer-icon";
+        icon.className = attachment.mimeType?.startsWith("image/")
+          ? "attachment-thumbnail"
+          : "attachment-composer-icon";
         icon.setAttribute("aria-hidden", "true");
+        const thumbnailSrc = getAttachmentThumbnailSrc(attachment);
+        if (thumbnailSrc) {
+          const thumbnail = document.createElement("img");
+          thumbnail.src = thumbnailSrc;
+          thumbnail.alt = "";
+          thumbnail.loading = "lazy";
+          thumbnail.decoding = "async";
+          thumbnail.draggable = false;
+          thumbnail.onload = () => {
+            thumbnail.dataset.loaded = "true";
+          };
+          thumbnail.onerror = () => thumbnail.remove();
+          icon.append(thumbnail);
+        }
         preview.append(icon);
         const name = document.createElement("span");
         name.className = "attachment-composer-name";

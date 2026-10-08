@@ -6,7 +6,7 @@
 
 各页面已经共用 `AttachmentComposer` 原生编辑器，但此前仍分别实现附件插入、粘贴、删除、撤销、光标恢复和键盘规则。只共享外观并不能保证行为一致。历史编辑又只传正文，直接丢失了图片清单。
 
-本轮在现有组件上收敛为“共享编辑规则 + 按作用域保存草稿 + 页面提交适配”的流程。图片使用与正文基线对齐的高亮文件名卡片，预览时才加载原图，避免缩略图抬高整行。
+本轮在现有组件上收敛为“共享编辑规则 + 按作用域保存草稿 + 页面提交适配”的流程。图片使用与正文基线对齐的高亮文件名卡片，前置小缩略图限制在文字行高内；缩略图懒加载，失败回退图标，点击仍可预览原图。
 
 ## 入口与状态矩阵
 
@@ -43,7 +43,7 @@ flowchart TD
 
 1. **内容解析**：`lib/userPromptContent.ts` 是历史消息展示、复制和编辑的共同解析入口。编辑请求携带正文、附件和消息边界，不再只传字符串。原生媒体的延迟占位需要先读完整消息，不能当作空附件。
 2. **编辑行为**：`hooks/useComposerDocument.ts` 负责文件选择、普通／富剪贴板、选区替换、同名附件顺序、token 插入与删除、原生撤销回调、光标恢复，以及正文内／正文外附件分组。页面只提供附件元数据和文件增删适配。
-3. **原生编辑器**：`AttachmentComposer` 负责 contenteditable DOM、IME、选区和不可拆分的附件节点；`ComposerAttachmentCard` 负责正文外附件。两种位置共用文本卡片样式，图片预览由 `AttachmentPreviewModal` 按需获取。
+3. **原生编辑器**：`AttachmentComposer` 负责 contenteditable DOM、IME、选区和不可拆分的附件节点；`ComposerAttachmentCard` 负责正文外附件。两种位置与已发送消息共用小缩略图样式和 `getAttachmentThumbnailSrc` 来源解析；React 卡片使用 `AttachmentThumbnail`，原生编辑 DOM 使用相同的图片槽位与加载状态。原图预览由 `AttachmentPreviewModal` 按需获取。
 4. **键盘策略**：`lib/composerKeyboard.ts` 统一新建、续聊、FAB 的 Enter 和 IME 判定。桌面 Enter 提交，Shift/Ctrl+Enter 换行；支持队列时 Ctrl+Enter 排队；移动端 Enter 换行；语音录制时 Enter 可完成提交。命令补全先于普通提交处理。
 5. **草稿保存**：`useDraftPersistence` 在乐观清空前刷入最新输入，以 revision 区分已提交内容和后续输入；切换 key 前完成原草稿写入。`useDraftAttachments` 将 key 与文件元数据绑定保存。新建表单按 project key 挂载，避免未上传文件和表单状态混入另一个项目。
 6. **提交适配**：页面继续负责 provider 配置、上传、API、队列和历史分支。`MessageInput` 发送、打断和排队共用一次语音收尾与输入清理入口；历史编辑恢复过程中禁止提交，取消或过期结果不覆盖当前文档。
