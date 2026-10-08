@@ -1,0 +1,32 @@
+.harness-updates .settings-item-actions {
+  flex-wrap: wrap;
+}
+
+.harness-update-details {
+  min-width: 0;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+
+.harness-update-details summary {
+  cursor: pointer;
+  padding-block: var(--space-2);
+}
+
+.harness-update-details p,
+.harness-update-details pre {
+  overflow-wrap: anywhere;
+  white-space: pre-wrap;
+}
+
+.harness-update-details pre {
+  max-height: 16rem;
+  overflow-y: auto;
+  padding: var(--space-2);
+  background: var(--bg-primary);
+  border-radius: var(--radius-sm);
+}
+
+.harness-update-error {
+  margin-block: var(--space-3);
+}

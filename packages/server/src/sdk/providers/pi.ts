@@ -1,12 +1,7 @@
-import {
-  type ChildProcessWithoutNullStreams,
-  exec,
-  spawn,
-} from "node:child_process";
+import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { promisify } from "node:util";
 import type {
   ContextStatusSdkPayload,
   LlmGatewayRequestProtocol,
@@ -45,7 +40,7 @@ import {
   canonicalizePiToolName,
   normalizePiToolInput,
 } from "../../sessions/pi-tools.js";
-import { whichCommand } from "../cli-detection.js";
+import { findPiCliPath } from "../cli-detection.js";
 import {
   MessageQueue,
   buildUserPromptProjection,
@@ -70,7 +65,6 @@ import type {
   StartSessionOptions,
 } from "./types.js";
 
-const execAsync = promisify(exec);
 const PI_APPROVAL_TITLE_PREFIX = "__YEP_PI_TOOL_APPROVAL__:";
 // Live tool output relayed by the Yep extension through Pi's `ui.notify`
 // channel; see packages/server/resources/pi-yep-extension.mjs.
@@ -2009,27 +2003,7 @@ export class PiProvider implements AgentProvider {
   }
 
   private async findPiPath(): Promise<string | null> {
-    if (this.configuredPath && existsSync(this.configuredPath)) {
-      return this.configuredPath;
-    }
-    for (const path of [
-      process.env.YEP_PI_PATH,
-      "/opt/homebrew/bin/pi",
-      "/usr/local/bin/pi",
-      join(homedir(), ".local", "bin", "pi"),
-      join(homedir(), "bin", "pi"),
-    ]) {
-      if (path && existsSync(path)) return path;
-    }
-    try {
-      const { stdout } = await execAsync(whichCommand("pi"), {
-        encoding: "utf8",
-      });
-      const path = stdout.split("\n")[0]?.trim();
-      return path && existsSync(path) ? path : null;
-    } catch {
-      return null;
-    }
+    return findPiCliPath(this.configuredPath);
   }
 }
 

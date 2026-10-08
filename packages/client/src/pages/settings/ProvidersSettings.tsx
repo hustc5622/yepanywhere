@@ -3,6 +3,7 @@ import { type OhMyRouterThroughputStatus, api } from "../../api/client";
 import { useProviders } from "../../hooks/useProviders";
 import { useI18n } from "../../i18n";
 import { getAllProviders } from "../../providers/registry";
+import { HarnessUpdates } from "./HarnessUpdates";
 
 function formatMilliseconds(value: number | undefined): string {
   if (value === undefined) return "—";
@@ -178,6 +179,7 @@ export function ProvidersSettings() {
 
   return (
     <>
+      <HarnessUpdates />
       <section className="settings-section">
         <h2>{t("providersSectionTitle")}</h2>
         <p className="settings-section-description">

@@ -19,6 +19,9 @@ import type {
   EnrichedRecentEntry,
   FileContentResponse,
   GitStatusInfo,
+  HarnessId,
+  HarnessUpdateInfo,
+  HarnessUpdateJob,
   LlmGatewaySessionConfig,
   NewSessionDefaults,
   PendingInputType,
@@ -1123,6 +1126,21 @@ export const api = {
     ),
 
   // Provider API
+  getHarnessUpdates: () =>
+    fetchJSON<{ harnesses: HarnessUpdateInfo[] }>("/harness-updates"),
+
+  checkHarnessUpdate: (id: HarnessId) =>
+    fetchJSON<{ harness: HarnessUpdateInfo }>(
+      `/harness-updates/${encodeURIComponent(id)}/check`,
+      { method: "POST" },
+    ),
+
+  updateHarness: (id: HarnessId) =>
+    fetchJSON<{ job: HarnessUpdateJob }>(
+      `/harness-updates/${encodeURIComponent(id)}/update`,
+      { method: "POST" },
+    ),
+
   getProviders: () => fetchJSON<{ providers: ProviderInfo[] }>("/providers"),
 
   getProvider: (name: ProviderName, options?: { fresh?: boolean }) =>

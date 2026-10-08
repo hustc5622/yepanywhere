@@ -7,6 +7,9 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 
 ## [Unreleased]
 
+### Added
+- 设置中的 CLI 更新支持本机 Codex／Pi 检查新版、后台更新、状态恢复和失败重试；识别 npm 全局安装位置及 Codex Homebrew cask，更新后复查原路径版本，保留已有会话和 bridge 进程，拒绝 Yep 中同一 harness 有活动任务时更新。
+
 ### Changed
 - 输入框附件统一为与正文基线对齐的高亮文本卡片，显示图标、文件名、上传进度和删除入口，点击再加载原图；新建会话与续聊共用附件粘贴、选区替换、顺序、删除和撤销规则，新建／续聊／快速入口共用 Enter 与中文输入法策略。
 - Codex 子会话详情提供默认折叠的「继承的上下文」，展开时按需加载子线程创建时保存的父会话内容；与子任务自身对话、状态和最近结果分开展示。

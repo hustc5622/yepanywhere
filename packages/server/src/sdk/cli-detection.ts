@@ -1,11 +1,37 @@
 import { exec, execFile } from "node:child_process";
 import { existsSync, readdirSync } from "node:fs";
 import * as os from "node:os";
+import { join } from "node:path";
 import { promisify } from "node:util";
 
 const isWindows = os.platform() === "win32";
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
+
+/** Shared with PiProvider so updates target the same installation as sessions. */
+export async function findPiCliPath(
+  configuredPath?: string,
+): Promise<string | null> {
+  for (const path of [
+    configuredPath,
+    process.env.YEP_PI_PATH,
+    "/opt/homebrew/bin/pi",
+    "/usr/local/bin/pi",
+    join(os.homedir(), ".local", "bin", "pi"),
+    join(os.homedir(), "bin", "pi"),
+  ]) {
+    if (path && existsSync(path)) return path;
+  }
+  try {
+    const { stdout } = await execAsync(whichCommand("pi"), {
+      encoding: "utf8",
+    });
+    const path = stdout.split("\n")[0]?.trim();
+    return path && existsSync(path) ? path : null;
+  } catch {
+    return null;
+  }
+}
 
 /**
  * Returns the platform-appropriate command to locate an executable in PATH.

@@ -839,6 +839,12 @@ export type {
   SessionDisplayToolOutput,
 } from "./session-display.js";
 export * from "./feishu-user-auth.js";
+export type {
+  HarnessId,
+  HarnessUpdateBlockReason,
+  HarnessUpdateInfo,
+  HarnessUpdateJob,
+} from "./harness-updates.js";
 export {
   extractBashCommandFromInput,
   getShellLauncherPrefixLength,

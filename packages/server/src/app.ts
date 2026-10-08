@@ -95,6 +95,7 @@ import { createFeishuUserAuthRoutes } from "./routes/feishu-user-auth.js";
 import { createFilesRoutes } from "./routes/files.js";
 import { createGitStatusRoutes } from "./routes/git-status.js";
 import { createGlobalSessionsRoutes } from "./routes/global-sessions.js";
+import { createHarnessUpdateRoutes } from "./routes/harness-updates.js";
 import { health } from "./routes/health.js";
 import { createInboxRoutes } from "./routes/inbox.js";
 import { createLlmGatewayKeysRoutes } from "./routes/llm-gateway-keys.js";
@@ -129,6 +130,7 @@ import { isProviderEnabled } from "./sdk/providers/policy.js";
 import type { ClaudeSDK, PermissionMode } from "./sdk/types.js";
 import type { BrowserProfileService } from "./services/BrowserProfileService.js";
 import type { ConnectedBrowsersService } from "./services/ConnectedBrowsersService.js";
+import { HarnessUpdateService } from "./services/HarnessUpdateService.js";
 import type { ModelInfoService } from "./services/ModelInfoService.js";
 import type { NetworkBindingService } from "./services/NetworkBindingService.js";
 import type { OhMyRouterBenchmarkService } from "./services/OhMyRouterBenchmarkService.js";
@@ -1580,6 +1582,23 @@ export function createApp(options: AppOptions): AppResult {
   );
 
   // Provider routes (multi-provider detection)
+  app.route(
+    "/api/harness-updates",
+    createHarnessUpdateRoutes({
+      enabledProviders: options.enabledProviders,
+      service: new HarnessUpdateService({
+        isBusy: async (id) =>
+          (await runtimeController.listProcesses()).some(
+            (process) =>
+              !process.executor &&
+              (process.provider === id ||
+                (id === "codex" && process.provider === "codex-oss")) &&
+              (process.queueDepth > 0 ||
+                ["in-turn", "waiting-input", "hold"].includes(process.state)),
+          ),
+      }),
+    }),
+  );
   app.route(
     "/api/providers",
     createProvidersRoutes({
