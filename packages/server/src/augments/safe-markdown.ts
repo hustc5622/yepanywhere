@@ -258,6 +258,16 @@ function createRenderer(
   options: SafeMarkdownOptions = {},
 ): RendererObject<string, string> {
   return {
+    code({ text, lang, escaped }: Tokens.Code) {
+      // Marked's default renderer appends a newline that copy controls include.
+      // Preserve the parsed code verbatim, including intentional whitespace.
+      const language = lang?.match(/^\S*/)?.[0];
+      const langClass = language
+        ? ` class="language-${escapeHtml(language)}"`
+        : "";
+      const code = escaped ? text : escapeHtml(text);
+      return `<pre><code${langClass}>${code}</code></pre>\n`;
+    },
     table(this: RendererThis<string, string>, token: Tokens.Table) {
       // Preserve GFM cells/alignment and isolate wide tables from page scrolling.
       const renderer = new Renderer();

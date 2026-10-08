@@ -4,6 +4,44 @@ import {
   renderSafeMarkdown,
 } from "../../src/augments/safe-markdown.js";
 
+describe("copyable code block content", () => {
+  it.each(["", "text"])(
+    "renders callback URLs without adding a trailing newline (language: %s)",
+    (language) => {
+      const urls = [
+        "http://127.0.0.1:5181/api/auth/feishu/callback",
+        "https://qa-benchmark.xaminim.com/api/auth/feishu/callback",
+      ];
+      const markdown = urls
+        .map((url) => `\`\`\`${language}\n${url}\n\`\`\``)
+        .join("\n\n");
+      const html = renderSafeMarkdown(markdown);
+
+      for (const url of urls) {
+        expect(html).toContain(`>${url}</code>`);
+      }
+    },
+  );
+
+  it.each(["  first line  \n\tsecond line\t", "\n  indented\n\n", ""])(
+    "preserves code whitespace and empty blocks: %j",
+    (code) => {
+      expect(renderSafeMarkdown(`\`\`\`\n${code}\n\`\`\``)).toBe(
+        `<pre><code>${code}</code></pre>`,
+      );
+    },
+  );
+
+  it("keeps HTML and entity literals escaped inside code", () => {
+    const html = renderSafeMarkdown(
+      "```text\n<img src=x onerror=alert(1)>\n&amp;\n```",
+    );
+    expect(html).toBe(
+      '<pre><code class="language-text">&lt;img src=x onerror=alert(1)&gt;\n&amp;amp;</code></pre>',
+    );
+  });
+});
+
 describe("markdown content preservation", () => {
   it.each([
     "docs/reports/2026-09-22_v1.0.142_launch_online_acceptance.md",
