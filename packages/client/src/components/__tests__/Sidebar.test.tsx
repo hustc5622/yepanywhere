@@ -1,4 +1,5 @@
 import {
+  act,
   fireEvent,
   render,
   screen,
@@ -11,6 +12,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type { GlobalSessionItem } from "../../api/client";
 import { ToastProvider } from "../../contexts/ToastContext";
 import { I18nProvider } from "../../i18n";
+import type { SessionMetadataChangedEvent } from "../../lib/activityBus";
 import type { Project } from "../../types";
 import { Sidebar } from "../Sidebar";
 
@@ -18,11 +20,29 @@ const {
   mockUseGlobalSessions,
   mockUseRecentProjects,
   mockUpdateSessionMetadata,
+  mockRenderSessionItem,
+  mockActivityOn,
 } = vi.hoisted(() => ({
   mockUseGlobalSessions: vi.fn(),
   mockUseRecentProjects: vi.fn(),
   mockUpdateSessionMetadata: vi.fn(),
+  mockRenderSessionItem: vi.fn(),
+  mockActivityOn: vi.fn((_event: string, _handler: unknown) => vi.fn()),
 }));
+
+vi.mock("../../lib/activityBus", () => ({
+  activityBus: { on: mockActivityOn },
+}));
+vi.mock("../SessionListItem", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../SessionListItem")>();
+  return {
+    ...actual,
+    SessionListItem: (props: ComponentProps<typeof actual.SessionListItem>) => {
+      mockRenderSessionItem(props.sessionId);
+      return <actual.SessionListItem {...props} />;
+    },
+  };
+});
 
 vi.mock("../../hooks/useGlobalSessions", () => ({
   useGlobalSessions: mockUseGlobalSessions,
@@ -145,6 +165,71 @@ describe("Sidebar recent session browsing", () => {
         originalLocalStorageDescriptor,
       );
     }
+  });
+
+  it("renders only the changed session card during a live update", () => {
+    const first = createSession({ id: "session-a", title: "Session A" });
+    const second = createSession({ id: "session-b", title: "Session B" });
+    const onNavigate = vi.fn();
+    const { rerender } = renderSidebar([first, second], {
+      currentSessionId: first.id,
+      onNavigate,
+    });
+    expect(screen.getByText("Session B")).toBeTruthy();
+    mockRenderSessionItem.mockClear();
+    mockUseGlobalSessions.mockReturnValue({
+      sessions: [{ ...first, title: "Updated A", activity: "in-turn" }, second],
+      loading: false,
+      refetch: vi.fn(),
+    });
+    rerender(
+      <MemoryRouter>
+        <I18nProvider>
+          <ToastProvider>
+            <Sidebar
+              isOpen
+              isDesktop
+              currentSessionId={first.id}
+              onClose={vi.fn()}
+              onNavigate={onNavigate}
+            />
+          </ToastProvider>
+        </I18nProvider>
+      </MemoryRouter>,
+    );
+    expect(screen.getByText("Updated A")).toBeTruthy();
+    expect(screen.getByText("Session B")).toBeTruthy();
+    expect(mockRenderSessionItem.mock.calls.map(([id]) => id)).toEqual([
+      first.id,
+    ]);
+    expect(mockUseRecentProjects).toHaveBeenLastCalledWith({
+      enabled: true,
+      liveUpdates: false,
+    });
+  });
+
+  it("leaves metadata reconciliation to the session hook and avoids duplicate reconnect fetches", () => {
+    renderSidebar([createSession()]);
+    const refetchSessions =
+      mockUseGlobalSessions.mock.results.at(-1)?.value.refetch;
+    const refetchProjects =
+      mockUseRecentProjects.mock.results.at(-1)?.value.refetch;
+    expect(
+      mockActivityOn.mock.calls.some(
+        ([event]) => event === "session-metadata-changed",
+      ),
+    ).toBe(false);
+    for (const event of ["reconnect", "refresh"]) {
+      const handler = (
+        mockActivityOn.mock.calls as unknown as [
+          string,
+          (event?: SessionMetadataChangedEvent) => void,
+        ][]
+      ).find(([name]) => name === event)?.[1];
+      act(() => handler?.());
+    }
+    expect(refetchSessions).not.toHaveBeenCalled();
+    expect(refetchProjects).toHaveBeenCalledTimes(2);
   });
 
   it("renders the desktop collapse control inside the expanded sidebar", () => {

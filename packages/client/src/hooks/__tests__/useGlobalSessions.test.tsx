@@ -1,5 +1,8 @@
 import { act, cleanup, renderHook } from "@testing-library/react";
-import type { UrlProjectId } from "@yep-anywhere/shared";
+import {
+  SLASH_COMMAND_SESSION_KIND,
+  type UrlProjectId,
+} from "@yep-anywhere/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import type {
   GlobalSessionItem,
@@ -7,8 +10,11 @@ import type {
   ProjectOption,
 } from "../../api/client";
 import type {
+  ProcessStateEvent,
   SessionCreatedEvent,
   SessionMetadataChangedEvent,
+  SessionSeenEvent,
+  SessionStatusEvent,
   SessionUpdatedEvent,
 } from "../useFileActivity";
 import { useGlobalSessions } from "../useGlobalSessions";
@@ -89,6 +95,9 @@ async function flushPromises() {
 
 describe("useGlobalSessions", () => {
   let activityHandlers: {
+    onSessionStatusChange?: (event: SessionStatusEvent) => void;
+    onProcessStateChange?: (event: ProcessStateEvent) => void;
+    onSessionSeen?: (event: SessionSeenEvent) => void;
     onSessionCreated?: (event: SessionCreatedEvent) => void;
     onSessionMetadataChange?: (event: SessionMetadataChangedEvent) => void;
     onSessionUpdated?: (event: SessionUpdatedEvent) => void;
@@ -120,9 +129,11 @@ describe("useGlobalSessions", () => {
       title: "Resolved session title",
       messageCount: 1,
     };
-    mockGetGlobalSessions
-      .mockResolvedValueOnce(response([]))
-      .mockResolvedValueOnce(response([resolvedSession]));
+    mockGetGlobalSessions.mockResolvedValue(response([]));
+    mockGetSessionMetadata.mockResolvedValue({
+      session: resolvedSession,
+      ownership: resolvedSession.ownership,
+    });
 
     const { result } = renderHook(() => useGlobalSessions({ limit: 50 }));
     await flushPromises();
@@ -141,7 +152,12 @@ describe("useGlobalSessions", () => {
       await vi.advanceTimersByTimeAsync(1500);
     });
 
-    expect(mockGetGlobalSessions).toHaveBeenCalledTimes(2);
+    expect(mockGetGlobalSessions).toHaveBeenCalledTimes(1);
+    expect(mockGetSessionMetadata).toHaveBeenCalledTimes(1);
+    expect(mockGetSessionMetadata).toHaveBeenCalledWith(
+      projectId,
+      baseSession.id,
+    );
     expect(result.current.sessions[0]?.title).toBe("Resolved session title");
   });
 
@@ -236,6 +252,9 @@ describe("useGlobalSessions", () => {
     });
     await flushPromises();
 
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
     expect(mockGetSessionMetadata).toHaveBeenCalledWith(
       projectId,
       baseSession.id,
@@ -306,6 +325,438 @@ describe("useGlobalSessions", () => {
     expect(mockGetGlobalSessions).toHaveBeenCalledWith(
       expect.objectContaining({ includePinned: true }),
     );
+  });
+
+  it("applies repeated sidebar updates without fetching the whole list", async () => {
+    const first = { ...baseSession, title: "First", messageCount: 1 };
+    const second = { ...first, id: "session-2", title: "Second" };
+    mockGetGlobalSessions.mockResolvedValue(response([first, second]));
+    const { result } = renderHook(() =>
+      useGlobalSessions({
+        excludeSessionKind: SLASH_COMMAND_SESSION_KIND,
+        includePinned: true,
+        limit: 50,
+      }),
+    );
+    await flushPromises();
+    const untouched = result.current.sessions[1];
+
+    for (let i = 0; i < 10; i++) {
+      act(() =>
+        activityHandlers.onSessionUpdated?.({
+          type: "session-updated",
+          sessionId: first.id,
+          projectId,
+          messageCount: i + 2,
+          timestamp: "2026-06-22T08:00:01.000Z",
+        }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(600);
+      });
+    }
+
+    expect(mockGetGlobalSessions).toHaveBeenCalledTimes(1);
+    expect(mockGetSessionMetadata).not.toHaveBeenCalled();
+    expect(result.current.sessions[0]?.messageCount).toBe(11);
+    expect(result.current.sessions[1]).toBe(untouched);
+  });
+
+  it("updates ownership, running, approval, completion and read state in place", async () => {
+    const first = { ...baseSession, title: "First", hasUnread: true };
+    const second = { ...first, id: "session-2" };
+    mockGetGlobalSessions.mockResolvedValue(response([first, second]));
+    const { result } = renderHook(() =>
+      useGlobalSessions({ excludeSessionKind: SLASH_COMMAND_SESSION_KIND }),
+    );
+    await flushPromises();
+    const untouched = result.current.sessions[1];
+    act(() =>
+      activityHandlers.onSessionStatusChange?.({
+        type: "session-status-changed",
+        sessionId: first.id,
+        projectId,
+        ownership: { owner: "self", processId: "process-1" },
+        activity: "in-turn",
+        timestamp: "now",
+      }),
+    );
+    expect(result.current.sessions[0]?.runtime?.canArchive).toBe(false);
+    act(() =>
+      activityHandlers.onProcessStateChange?.({
+        type: "process-state-changed",
+        sessionId: first.id,
+        projectId,
+        activity: "waiting-input",
+        pendingInputType: "tool-approval",
+        timestamp: "now",
+      }),
+    );
+    expect(result.current.sessions[0]?.pendingInputType).toBe("tool-approval");
+    act(() =>
+      activityHandlers.onProcessStateChange?.({
+        type: "process-state-changed",
+        sessionId: first.id,
+        projectId,
+        activity: "idle",
+        lastTurnStatus: "failed",
+        lastErrorMessage: "Test error",
+        timestamp: "now",
+      }),
+    );
+    act(() =>
+      activityHandlers.onSessionSeen?.({
+        type: "session-seen",
+        sessionId: first.id,
+        timestamp: "now",
+      }),
+    );
+    expect(result.current.sessions[0]).toMatchObject({
+      activity: "idle",
+      hasUnread: false,
+      lastTurnStatus: "failed",
+      lastErrorMessage: "Test error",
+    });
+    expect(result.current.sessions[0]?.pendingInputType).toBeUndefined();
+    expect(result.current.sessions[0]?.runtime?.canArchive).toBe(true);
+    expect(result.current.sessions[1]).toBe(untouched);
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(8000);
+    });
+    expect(mockGetGlobalSessions).toHaveBeenCalledTimes(1);
+    expect(mockGetSessionMetadata).not.toHaveBeenCalled();
+  });
+
+  it("hydrates only an unknown session and coalesces its event burst", async () => {
+    mockGetGlobalSessions.mockResolvedValue(response([]));
+    mockGetSessionMetadata.mockResolvedValue({
+      session: {
+        ...baseSession,
+        title: "Resumed old session",
+        activity: "in-turn",
+        lastTurnStatus: "completed",
+      },
+      ownership: baseSession.ownership,
+    });
+    const { result } = renderHook(() =>
+      useGlobalSessions({ excludeSessionKind: SLASH_COMMAND_SESSION_KIND }),
+    );
+    await flushPromises();
+    act(() => {
+      for (let i = 0; i < 20; i++)
+        activityHandlers.onSessionUpdated?.({
+          type: "session-updated",
+          sessionId: baseSession.id,
+          projectId,
+          timestamp: "now",
+        });
+      activityHandlers.onSessionStatusChange?.({
+        type: "session-status-changed",
+        sessionId: baseSession.id,
+        projectId,
+        ownership: baseSession.ownership,
+        timestamp: "now",
+      });
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(mockGetSessionMetadata).toHaveBeenCalledTimes(1);
+    expect(mockGetSessionMetadata).toHaveBeenCalledWith(
+      projectId,
+      baseSession.id,
+    );
+    expect(mockGetGlobalSessions).toHaveBeenCalledTimes(1);
+    expect(result.current.sessions[0]).toMatchObject({
+      title: "Resumed old session",
+      projectName: "Project 1",
+      lastTurnStatus: "completed",
+    });
+  });
+
+  it("removes newly excluded sessions and can restore them with a targeted lookup", async () => {
+    const session = {
+      ...baseSession,
+      title: "Normal conversation",
+      messageCount: 1,
+    };
+    mockGetGlobalSessions.mockResolvedValue(response([session]));
+    mockGetSessionMetadata.mockResolvedValue({
+      session,
+      ownership: session.ownership,
+    });
+    const { result } = renderHook(() =>
+      useGlobalSessions({ excludeSessionKind: SLASH_COMMAND_SESSION_KIND }),
+    );
+    await flushPromises();
+    act(() =>
+      activityHandlers.onSessionUpdated?.({
+        type: "session-updated",
+        sessionId: session.id,
+        projectId,
+        title: "/help",
+        timestamp: "now",
+      }),
+    );
+    expect(result.current.sessions).toHaveLength(0);
+    act(() =>
+      activityHandlers.onSessionUpdated?.({
+        type: "session-updated",
+        sessionId: session.id,
+        projectId,
+        title: session.title,
+        timestamp: "now",
+      }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(result.current.sessions[0]?.title).toBe(session.title);
+    expect(mockGetGlobalSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it("applies pin/archive changes and restores an unarchived card without a list fetch", async () => {
+    const session = {
+      ...baseSession,
+      title: "Normal conversation",
+      messageCount: 1,
+    };
+    mockGetGlobalSessions.mockResolvedValue(response([session]));
+    mockGetSessionMetadata.mockResolvedValue({
+      session,
+      ownership: session.ownership,
+    });
+    const { result } = renderHook(() =>
+      useGlobalSessions({ includePinned: true }),
+    );
+    await flushPromises();
+    act(() =>
+      activityHandlers.onSessionMetadataChange?.({
+        type: "session-metadata-changed",
+        sessionId: session.id,
+        projectId,
+        pinned: true,
+        timestamp: "now",
+      }),
+    );
+    expect(result.current.sessions[0]?.isStarred).toBe(true);
+    act(() =>
+      activityHandlers.onSessionMetadataChange?.({
+        type: "session-metadata-changed",
+        sessionId: session.id,
+        projectId,
+        archived: true,
+        timestamp: "now",
+      }),
+    );
+    expect(result.current.sessions).toHaveLength(0);
+    act(() =>
+      activityHandlers.onSessionMetadataChange?.({
+        type: "session-metadata-changed",
+        sessionId: session.id,
+        projectId,
+        archived: false,
+        timestamp: "now",
+      }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(result.current.sessions[0]?.id).toBe(session.id);
+    expect(mockGetGlobalSessions).toHaveBeenCalledTimes(1);
+    expect(mockGetSessionMetadata).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps archived and excluded sessions out of targeted results", async () => {
+    const { result } = renderHook(() =>
+      useGlobalSessions({ excludeSessionKind: SLASH_COMMAND_SESSION_KIND }),
+    );
+    await flushPromises();
+    for (const session of [
+      { ...baseSession, isArchived: true },
+      { ...baseSession, title: "/help" },
+    ]) {
+      mockGetSessionMetadata.mockResolvedValue({
+        session,
+        ownership: session.ownership,
+      });
+      act(() =>
+        activityHandlers.onSessionUpdated?.({
+          type: "session-updated",
+          sessionId: session.id,
+          projectId,
+          timestamp: "now",
+        }),
+      );
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500);
+      });
+      expect(result.current.sessions).toHaveLength(0);
+    }
+    expect(mockGetGlobalSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not roll live state back when a metadata response arrives late", async () => {
+    const session = {
+      ...baseSession,
+      title: "Existing",
+      messageCount: 1,
+      hasUnread: true,
+    };
+    let resolveMetadata!: (value: unknown) => void;
+    mockGetGlobalSessions.mockResolvedValue(response([session]));
+    mockGetSessionMetadata.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveMetadata = resolve;
+        }),
+    );
+    const { result } = renderHook(() => useGlobalSessions());
+    await flushPromises();
+    act(() =>
+      activityHandlers.onSessionMetadataChange?.({
+        type: "session-metadata-changed",
+        sessionId: session.id,
+        projectId,
+        aiTitle: "Fresh title",
+        timestamp: "now",
+      }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    act(() => {
+      activityHandlers.onProcessStateChange?.({
+        type: "process-state-changed",
+        sessionId: session.id,
+        projectId,
+        activity: "in-turn",
+        timestamp: "now",
+      });
+      activityHandlers.onSessionSeen?.({
+        type: "session-seen",
+        sessionId: session.id,
+        timestamp: "now",
+      });
+    });
+    await act(async () => {
+      resolveMetadata({ session, ownership: session.ownership });
+    });
+    expect(result.current.sessions[0]).toMatchObject({
+      aiTitle: "Fresh title",
+      activity: "in-turn",
+      hasUnread: false,
+    });
+    mockGetSessionMetadata.mockResolvedValue({
+      session: {
+        ...session,
+        aiTitle: "Fresh title",
+        activity: "in-turn",
+        hasUnread: false,
+      },
+      ownership: session.ownership,
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(mockGetSessionMetadata).toHaveBeenCalledTimes(2);
+    expect(mockGetGlobalSessions).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps a failed single lookup local and retries on a later event", async () => {
+    mockGetSessionMetadata.mockRejectedValueOnce(new Error("Unavailable"));
+    const { result } = renderHook(() => useGlobalSessions());
+    await flushPromises();
+    const event: SessionUpdatedEvent = {
+      type: "session-updated",
+      sessionId: baseSession.id,
+      projectId,
+      timestamp: "now",
+    };
+    act(() => activityHandlers.onSessionUpdated?.(event));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(mockGetGlobalSessions).toHaveBeenCalledTimes(1);
+    mockGetSessionMetadata.mockResolvedValue({
+      session: { ...baseSession, title: "Recovered" },
+      ownership: baseSession.ownership,
+    });
+    act(() => activityHandlers.onSessionUpdated?.(event));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(result.current.sessions[0]?.title).toBe("Recovered");
+    expect(mockGetSessionMetadata).toHaveBeenCalledTimes(2);
+  });
+
+  it("cancels queued and in-flight metadata refreshes when hidden", async () => {
+    let resolveMetadata!: (value: unknown) => void;
+    mockGetSessionMetadata.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          resolveMetadata = resolve;
+        }),
+    );
+    const { result, rerender } = renderHook(
+      ({ enabled }) => useGlobalSessions({ enabled }),
+      { initialProps: { enabled: true } },
+    );
+    await flushPromises();
+    act(() =>
+      activityHandlers.onSessionUpdated?.({
+        type: "session-updated",
+        sessionId: baseSession.id,
+        projectId,
+        timestamp: "now",
+      }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    act(() =>
+      activityHandlers.onSessionUpdated?.({
+        type: "session-updated",
+        sessionId: "session-2",
+        projectId,
+        timestamp: "now",
+      }),
+    );
+    rerender({ enabled: false });
+    await act(async () => {
+      resolveMetadata({
+        session: baseSession,
+        ownership: baseSession.ownership,
+      });
+      await vi.advanceTimersByTimeAsync(8000);
+    });
+    expect(mockGetSessionMetadata).toHaveBeenCalledTimes(1);
+    expect(result.current.sessions).toHaveLength(0);
+  });
+
+  it("keeps server-side search filtering when a session changes", async () => {
+    const { result } = renderHook(() =>
+      useGlobalSessions({ searchQuery: "needle" }),
+    );
+    await flushPromises();
+    act(() =>
+      activityHandlers.onSessionUpdated?.({
+        type: "session-updated",
+        sessionId: baseSession.id,
+        projectId,
+        title: "Other title",
+        timestamp: "now",
+      }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(mockGetGlobalSessions).toHaveBeenCalledTimes(2);
+    expect(mockGetGlobalSessions).toHaveBeenLastCalledWith(
+      expect.objectContaining({ q: "needle" }),
+    );
+    expect(mockGetSessionMetadata).not.toHaveBeenCalled();
+    expect(result.current.sessions).toHaveLength(0);
   });
 
   it("paginates from the ordinary page boundary before appended pins", async () => {
@@ -438,6 +889,9 @@ describe("useGlobalSessions", () => {
     });
     await flushPromises();
 
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
     expect(mockGetSessionMetadata).toHaveBeenCalledWith(
       projectId,
       baseSession.id,
@@ -449,7 +903,7 @@ describe("useGlobalSessions", () => {
     );
   });
 
-  it("uses the latest filters when a pending title refetch fires", async () => {
+  it("cancels pending title refreshes when the project filter changes", async () => {
     const project2Session: GlobalSessionItem = {
       ...baseSession,
       id: "session-2",
@@ -485,6 +939,8 @@ describe("useGlobalSessions", () => {
       await vi.advanceTimersByTimeAsync(1500);
     });
 
+    expect(mockGetGlobalSessions).toHaveBeenCalledTimes(2);
+    expect(mockGetSessionMetadata).not.toHaveBeenCalled();
     expect(mockGetGlobalSessions).toHaveBeenLastCalledWith(
       expect.objectContaining({ project: projectId2 }),
     );

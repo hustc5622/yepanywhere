@@ -85,10 +85,12 @@ function fetchProjectsShared(): Promise<{ projects: Project[] }> {
 export interface UseProjectsOptions {
   /** Skip project fetches while the consuming UI is hidden. */
   enabled?: boolean;
+  /** Refresh project-wide activity counts on session ownership changes. */
+  liveUpdates?: boolean;
 }
 
 export function useProjects(options: UseProjectsOptions = {}) {
-  const { enabled = true } = options;
+  const { enabled = true, liveUpdates = true } = options;
   const [projects, setProjects] = useState<Project[]>([]);
   const [loading, setLoading] = useState(enabled);
   const [error, setError] = useState<Error | null>(null);
@@ -151,11 +153,11 @@ export function useProjects(options: UseProjectsOptions = {}) {
 
   // Subscribe to session status changes
   useFileActivity(
-    enabled
+    enabled && liveUpdates
       ? {
           onSessionStatusChange: handleSessionStatusChange,
         }
-      : {},
+      : { enabled: false },
   );
 
   // Cleanup debounce timer

@@ -169,6 +169,13 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
     Map<string, Set<ReturnType<typeof setTimeout>>>
   >(new Map());
   const latestFetchRef = useRef<(() => Promise<void>) | null>(null);
+  const latestRefreshSessionRef = useRef<
+    ((sessionId: string, projectId: string) => Promise<void>) | null
+  >(null);
+  const sessionRefreshTimersRef = useRef(
+    new Map<string, ReturnType<typeof setTimeout>>(),
+  );
+  const sessionRefreshesRef = useRef(new Map<string, { dirty: boolean }>());
   const latestRefreshStatsRef = useRef<(() => Promise<void>) | null>(null);
   const hasInitialLoadRef = useRef(false);
   const sessionsRef = useRef<GlobalSessionItem[]>([]);
@@ -332,109 +339,146 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
   ]);
   latestFetchRef.current = fetch;
 
-  const schedulePendingTitleRefetch = useCallback((sessionId: string) => {
-    if (pendingTitleRefetchTimersRef.current.has(sessionId)) return;
-
-    const timers = new Set<ReturnType<typeof setTimeout>>();
-    pendingTitleRefetchTimersRef.current.set(sessionId, timers);
-
-    for (const delayMs of PENDING_TITLE_REFETCH_DELAYS_MS) {
+  // Fixed windows coalesce bursts without postponing updates indefinitely.
+  // An in-flight request gets at most one follow-up when newer events arrive.
+  const queueSessionRefresh = useCallback(
+    (sessionId: string, refreshProjectId: string) => {
+      const pending = sessionRefreshesRef.current.get(sessionId);
+      if (pending) {
+        pending.dirty = true;
+        return;
+      }
+      if (sessionRefreshTimersRef.current.has(sessionId)) return;
       const timer = setTimeout(() => {
-        timers.delete(timer);
-        if (timers.size === 0) {
-          pendingTitleRefetchTimersRef.current.delete(sessionId);
-        }
-        void latestFetchRef.current?.();
-      }, delayMs);
-      timers.add(timer);
-    }
+        sessionRefreshTimersRef.current.delete(sessionId);
+        void latestRefreshSessionRef.current?.(sessionId, refreshProjectId);
+      }, REFETCH_DEBOUNCE_MS);
+      sessionRefreshTimersRef.current.set(sessionId, timer);
+    },
+    [],
+  );
+
+  const invalidateSessionRefresh = useCallback((sessionId: string) => {
+    const pending = sessionRefreshesRef.current.get(sessionId);
+    if (pending) pending.dirty = true;
   }, []);
+
+  const schedulePendingTitleRefetch = useCallback(
+    (sessionId: string, refreshProjectId: string) => {
+      if (pendingTitleRefetchTimersRef.current.has(sessionId)) return;
+
+      const timers = new Set<ReturnType<typeof setTimeout>>();
+      pendingTitleRefetchTimersRef.current.set(sessionId, timers);
+
+      for (const delayMs of PENDING_TITLE_REFETCH_DELAYS_MS) {
+        const timer = setTimeout(() => {
+          timers.delete(timer);
+          if (timers.size === 0) {
+            pendingTitleRefetchTimersRef.current.delete(sessionId);
+          }
+          void latestRefreshSessionRef.current?.(sessionId, refreshProjectId);
+        }, delayMs);
+        timers.add(timer);
+      }
+    },
+    [],
+  );
 
   const refreshSessionMetadata = useCallback(
     async (sessionId: string, refreshProjectId: string) => {
-      if (!enabled) return;
+      if (!enabled || (projectId && projectId !== refreshProjectId)) return;
+      if (searchQuery) {
+        await latestFetchRef.current?.();
+        return;
+      }
+      const pending = sessionRefreshesRef.current.get(sessionId);
+      if (pending) {
+        pending.dirty = true;
+        return;
+      }
+      const request = { dirty: false };
+      sessionRefreshesRef.current.set(sessionId, request);
 
       try {
         const data = await api.getSessionMetadata(refreshProjectId, sessionId);
+        // Hidden/unmounted lists and changed filters invalidate outstanding work.
+        // Never let a snapshot requested before a live event undo that event.
+        if (
+          sessionRefreshesRef.current.get(sessionId) !== request ||
+          request.dirty
+        )
+          return;
 
         if (hasResolvedTitle(data.session)) {
           clearPendingTitleRefetch(sessionId);
         }
 
         setSessions((prev) => {
-          let didUpdate = false;
-
-          const updated = prev.map((existing) => {
-            if (existing.id !== sessionId) return existing;
-            didUpdate = true;
-
-            const project = projectsRef.current.find(
-              (p) => p.id === data.session.projectId,
-            );
-            const refreshed: GlobalSessionItem = {
-              id: data.session.id,
-              title: data.session.title,
-              createdAt: data.session.createdAt,
-              updatedAt: data.session.updatedAt,
-              messageCount: data.session.messageCount,
-              userQuestions: data.session.userQuestions,
-              provider: data.session.provider,
-              projectId: data.session.projectId,
-              projectName:
-                existing.projectName ?? project?.name ?? data.session.projectId,
-              ownership: data.ownership,
-              runtime: data.runtime ?? data.session.runtime ?? existing.runtime,
-              pendingInputType:
-                data.session.pendingInputType ??
-                (data.ownership.owner === "none"
-                  ? undefined
-                  : existing.pendingInputType),
-              activity:
-                data.session.runtime?.activity ??
-                data.runtime?.activity ??
-                data.session.activity ??
-                (data.ownership.owner === "none"
-                  ? undefined
-                  : existing.activity),
-              hasUnread: data.session.hasUnread ?? existing.hasUnread,
-              customTitle: data.session.customTitle,
-              aiTitle: data.session.aiTitle,
-              isArchived: data.session.isArchived ?? false,
-              isStarred: data.session.isStarred ?? false,
-              executor: data.session.executor ?? existing.executor,
-              createdBy: data.session.createdBy ?? existing.createdBy,
-              originator: data.session.originator ?? existing.originator,
-              source: data.session.source ?? existing.source,
-              contextUsage: data.session.contextUsage ?? existing.contextUsage,
-              cumulativeUsage:
-                data.session.cumulativeUsage ?? existing.cumulativeUsage,
-              compactCount: data.session.compactCount ?? existing.compactCount,
-              compactEvents:
-                data.session.compactEvents ?? existing.compactEvents,
-              model: data.session.model ?? existing.model,
-              reasoningEffort:
-                data.session.reasoningEffort ?? existing.reasoningEffort,
-              serviceTier: data.session.serviceTier ?? existing.serviceTier,
-            };
-
-            return mergeFetchedSession(existing, refreshed);
-          });
-
-          if (!didUpdate) return prev;
-
-          return updated.filter((session) =>
-            matchesSessionKindFilters(session, {
+          const existing = prev.find((session) => session.id === sessionId);
+          const project = projectsRef.current.find(
+            (p) => p.id === data.session.projectId,
+          );
+          const refreshed: GlobalSessionItem = {
+            ...existing,
+            ...data.session,
+            projectName:
+              existing?.projectName ?? project?.name ?? data.session.projectId,
+            ownership: data.ownership,
+            customTitle: data.session.customTitle,
+            aiTitle: data.session.aiTitle,
+            runtime: data.runtime ?? data.session.runtime,
+            activity:
+              data.runtime?.activity ??
+              data.session.runtime?.activity ??
+              data.session.activity,
+            pendingInputType: data.session.pendingInputType,
+            hasUnread: data.session.hasUnread ?? existing?.hasUnread,
+            isArchived: data.session.isArchived ?? false,
+            isStarred: data.session.isStarred ?? false,
+            lastTurnStatus: data.session.lastTurnStatus,
+            lastErrorMessage: data.session.lastErrorMessage,
+            retryStatus: data.session.retryStatus,
+          };
+          const next = existing
+            ? mergeFetchedSession(existing, refreshed)
+            : refreshed;
+          const matches =
+            (includeArchived || !next.isArchived) &&
+            matchesSessionKindFilters(next, {
               sessionKind,
               excludeSessionKind,
-            }),
+            });
+          if (!matches)
+            return existing
+              ? prev.filter((session) => session.id !== sessionId)
+              : prev;
+          if (!existing) return [next, ...prev];
+          return prev.map((session) =>
+            session.id === sessionId ? next : session,
           );
         });
       } catch {
-        void latestFetchRef.current?.();
+        // Keep the last usable card. A later event/title retry or explicit
+        // refresh can recover; a failed single lookup must not fan out globally.
+      } finally {
+        if (sessionRefreshesRef.current.get(sessionId) === request) {
+          sessionRefreshesRef.current.delete(sessionId);
+          if (request.dirty) queueSessionRefresh(sessionId, refreshProjectId);
+        }
       }
     },
-    [clearPendingTitleRefetch, enabled, excludeSessionKind, sessionKind],
+    [
+      clearPendingTitleRefetch,
+      enabled,
+      projectId,
+      searchQuery,
+      includeArchived,
+      excludeSessionKind,
+      sessionKind,
+      queueSessionRefresh,
+    ],
   );
+  latestRefreshSessionRef.current = refreshSessionMetadata;
 
   // Load more sessions (pagination)
   const loadMore = useCallback(async () => {
@@ -497,53 +541,91 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
   }, [fetch]);
 
   // Handle session ownership changes
-  const handleSessionStatusChange = useCallback((event: SessionStatusEvent) => {
-    setSessions((prev) =>
-      prev.map((session) => {
-        if (session.id !== event.sessionId) return session;
-        const activity =
-          event.ownership.owner === "none"
-            ? undefined
-            : (event.activity ?? session.activity);
-        return {
-          ...session,
-          ownership: event.ownership,
-          pendingInputType:
+  const handleSessionStatusChange = useCallback(
+    (event: SessionStatusEvent) => {
+      if (!enabled || (projectId && event.projectId !== projectId)) return;
+      invalidateSessionRefresh(event.sessionId);
+      if (
+        !sessionsRef.current.some((session) => session.id === event.sessionId)
+      ) {
+        if (searchQuery) debouncedRefetch();
+        else queueSessionRefresh(event.sessionId, event.projectId);
+        return;
+      }
+      setSessions((prev) =>
+        prev.map((session) => {
+          if (session.id !== event.sessionId) return session;
+          const activity =
             event.ownership.owner === "none"
               ? undefined
-              : session.pendingInputType,
-          activity,
-          runtime: updateRuntimeSnapshot(session, event.ownership, activity),
-        };
-      }),
-    );
-  }, []);
+              : (event.activity ?? session.activity);
+          return {
+            ...session,
+            ownership: event.ownership,
+            pendingInputType:
+              event.ownership.owner === "none"
+                ? undefined
+                : session.pendingInputType,
+            activity,
+            runtime: updateRuntimeSnapshot(session, event.ownership, activity),
+          };
+        }),
+      );
+    },
+    [
+      enabled,
+      projectId,
+      searchQuery,
+      debouncedRefetch,
+      invalidateSessionRefresh,
+      queueSessionRefresh,
+    ],
+  );
 
   // Handle process state changes
-  const handleProcessStateChange = useCallback((event: ProcessStateEvent) => {
-    setSessions((prev) =>
-      prev.map((session) => {
-        if (session.id !== event.sessionId) return session;
-        const pendingInputType =
-          event.activity === "waiting-input"
-            ? (event.pendingInputType ?? session.pendingInputType)
-            : undefined;
-        return {
-          ...session,
-          activity: event.activity,
-          pendingInputType,
-          lastTurnStatus: event.lastTurnStatus,
-          lastErrorMessage: event.lastErrorMessage,
-          retryStatus: event.retryStatus,
-          runtime: updateRuntimeSnapshot(
-            session,
-            session.ownership,
-            event.activity,
-          ),
-        };
-      }),
-    );
-  }, []);
+  const handleProcessStateChange = useCallback(
+    (event: ProcessStateEvent) => {
+      if (!enabled || (projectId && event.projectId !== projectId)) return;
+      invalidateSessionRefresh(event.sessionId);
+      if (
+        !sessionsRef.current.some((session) => session.id === event.sessionId)
+      ) {
+        if (searchQuery) debouncedRefetch();
+        else queueSessionRefresh(event.sessionId, event.projectId);
+        return;
+      }
+      setSessions((prev) =>
+        prev.map((session) => {
+          if (session.id !== event.sessionId) return session;
+          const pendingInputType =
+            event.activity === "waiting-input"
+              ? (event.pendingInputType ?? session.pendingInputType)
+              : undefined;
+          return {
+            ...session,
+            activity: event.activity,
+            pendingInputType,
+            lastTurnStatus: event.lastTurnStatus,
+            lastErrorMessage: event.lastErrorMessage,
+            retryStatus: event.retryStatus,
+            runtime: updateRuntimeSnapshot(
+              session,
+              session.ownership,
+              event.activity,
+            ),
+          };
+        }),
+      );
+    },
+    [
+      enabled,
+      projectId,
+      searchQuery,
+      debouncedRefetch,
+      invalidateSessionRefresh,
+      queueSessionRefresh,
+    ],
+  );
 
   // Handle new session created
   const handleSessionCreated = useCallback(
@@ -568,8 +650,10 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
         return;
       }
 
+      invalidateSessionRefresh(event.session.id);
+      if (!includeArchived && event.session.isArchived) return;
       if (needsPendingTitleRefetch(event.session)) {
-        schedulePendingTitleRefetch(event.session.id);
+        schedulePendingTitleRefetch(event.session.id, event.session.projectId);
       }
 
       setSessions((prev) => {
@@ -625,16 +709,23 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
       searchQuery,
       sessionKind,
       excludeSessionKind,
+      includeArchived,
       enabled,
       debouncedRefetch,
       schedulePendingTitleRefetch,
+      invalidateSessionRefresh,
     ],
   );
 
   // Handle session metadata changes
   const handleSessionMetadataChange = useCallback(
     (event: SessionMetadataChangedEvent) => {
-      if (!enabled) return;
+      if (
+        !enabled ||
+        (projectId && event.projectId && event.projectId !== projectId)
+      )
+        return;
+      invalidateSessionRefresh(event.sessionId);
       const pinned = event.pinned ?? event.starred;
 
       if (event.title?.trim() || event.aiTitle?.trim()) {
@@ -661,11 +752,13 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
           };
         });
 
-        const filtered = updated.filter((session) =>
-          matchesSessionKindFilters(session, {
-            sessionKind,
-            excludeSessionKind,
-          }),
+        const filtered = updated.filter(
+          (session) =>
+            (includeArchived || !session.isArchived) &&
+            matchesSessionKindFilters(session, {
+              sessionKind,
+              excludeSessionKind,
+            }),
         );
 
         return filtered;
@@ -673,8 +766,8 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
 
       if (searchQuery) {
         debouncedRefetch();
-      } else if (existingSession && refreshProjectId) {
-        void refreshSessionMetadata(event.sessionId, refreshProjectId);
+      } else if (refreshProjectId) {
+        queueSessionRefresh(event.sessionId, refreshProjectId);
       } else if (
         (includePinned && pinned !== undefined) ||
         sessionKind ||
@@ -685,39 +778,61 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
     },
     [
       includePinned,
+      includeArchived,
+      projectId,
       sessionKind,
       excludeSessionKind,
       searchQuery,
       enabled,
       debouncedRefetch,
       clearPendingTitleRefetch,
-      refreshSessionMetadata,
+      invalidateSessionRefresh,
+      queueSessionRefresh,
     ],
   );
 
   // Handle session seen events
-  const handleSessionSeen = useCallback((event: SessionSeenEvent) => {
-    setSessions((prev) =>
-      prev.map((session) => {
-        if (session.id !== event.sessionId) return session;
+  const handleSessionSeen = useCallback(
+    (event: SessionSeenEvent) => {
+      invalidateSessionRefresh(event.sessionId);
+      setSessions((prev) =>
+        prev.map((session) => {
+          if (session.id !== event.sessionId) return session;
 
-        return {
-          ...session,
-          hasUnread: event.timestamp === "",
-        };
-      }),
-    );
-  }, []);
+          return {
+            ...session,
+            hasUnread: event.timestamp === "",
+          };
+        }),
+      );
+    },
+    [invalidateSessionRefresh],
+  );
 
   // Handle session content updates (auto-generated title, messageCount, contextUsage)
   const handleSessionUpdated = useCallback(
     (event: SessionUpdatedEvent) => {
-      if (!enabled) return;
+      if (!enabled || (projectId && event.projectId !== projectId)) return;
+      invalidateSessionRefresh(event.sessionId);
+      if (searchQuery) {
+        debouncedRefetch();
+      } else if (
+        !sessionsRef.current.some(
+          (session) => session.id === event.sessionId,
+        ) ||
+        Object.keys(event).every((key) =>
+          ["type", "sessionId", "projectId", "timestamp", "trigger"].includes(
+            key,
+          ),
+        )
+      ) {
+        queueSessionRefresh(event.sessionId, event.projectId);
+      }
 
       if (event.title?.trim()) {
         clearPendingTitleRefetch(event.sessionId);
       } else if (event.title === null || event.messageCount === 0) {
-        schedulePendingTitleRefetch(event.sessionId);
+        schedulePendingTitleRefetch(event.sessionId, event.projectId);
       }
 
       setSessions((prev) => {
@@ -773,14 +888,14 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
           }),
         );
       });
-
-      if (sessionKind || excludeSessionKind) {
-        debouncedRefetch();
-      }
     },
     [
       clearPendingTitleRefetch,
       schedulePendingTitleRefetch,
+      invalidateSessionRefresh,
+      queueSessionRefresh,
+      projectId,
+      searchQuery,
       sessionKind,
       excludeSessionKind,
       enabled,
@@ -799,8 +914,8 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
       : undefined,
     // Seen/unread is a metadata-level change (like title/pinned), not a
     // high-frequency process activity. Bind it to metadataLiveUpdates so the
-    // sidebar (liveUpdates=false, metadataLiveUpdates=true) still clears the
-    // unread dot via a single-item update instead of waiting for a full refetch.
+    // metadata-only consumers still clear the unread dot via a single-item
+    // update instead of waiting for a full refetch.
     onSessionSeen: metadataLiveUpdates ? handleSessionSeen : undefined,
     onSessionUpdated: liveUpdates ? handleSessionUpdated : undefined,
     onReconnect: liveUpdates ? handleReconnect : undefined,
@@ -821,9 +936,14 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
     void refreshStats();
   }, [refreshStats]);
 
-  // Cleanup debounce timer
+  // Cancel work belonging to the old visible list, including late responses.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: these options define the lifetime of queued requests.
   useEffect(() => {
     return () => {
+      for (const timer of sessionRefreshTimersRef.current.values())
+        clearTimeout(timer);
+      sessionRefreshTimersRef.current.clear();
+      sessionRefreshesRef.current.clear();
       if (refetchTimerRef.current) {
         clearTimeout(refetchTimerRef.current);
       }
@@ -834,7 +954,14 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
       }
       pendingTitleRefetchTimersRef.current.clear();
     };
-  }, []);
+  }, [
+    enabled,
+    projectId,
+    searchQuery,
+    sessionKind,
+    excludeSessionKind,
+    includeArchived,
+  ]);
 
   return {
     sessions,

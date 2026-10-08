@@ -1,5 +1,5 @@
 import { useMemo } from "react";
-import { useProjects } from "./useProjects";
+import { type UseProjectsOptions, useProjects } from "./useProjects";
 
 const MAX_RECENT_PROJECTS = 12;
 
@@ -9,7 +9,7 @@ const MAX_RECENT_PROJECTS = 12;
  * Uses the `lastActivity` field from the projects API to sort by recency.
  * Returns up to 12 most recently active projects.
  */
-export function useRecentProjects(options: { enabled?: boolean } = {}) {
+export function useRecentProjects(options: UseProjectsOptions = {}) {
   const { projects, loading, refetch } = useProjects(options);
 
   const recentProjects = useMemo(() => {
