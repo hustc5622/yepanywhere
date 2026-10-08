@@ -117,6 +117,16 @@ describe("CodexBridgeService × Feishu integration", () => {
       if (message.type === "user") {
         emitRuntime?.("status", { state: "in-turn" });
       }
+      if (message.type === "stream_event") {
+        // Wait for the real projection/output queue before replacing the delta
+        // with the final answer. Wall-clock delays race under CI contention.
+        await eventually(() =>
+          expect(JSON.stringify(api.updateStreamingReply.mock.calls)).toContain(
+            "Hello from bridge delta at /Users/developer/project/app.ts",
+          ),
+        );
+        harness.completeStreamedTurn();
+      }
       if (message.type === "result") break;
     }
     emitRuntime?.("status", { state: "idle" });
@@ -311,6 +321,7 @@ interface BridgeHarness {
   ownerClient: WebSocket;
   ownerUpstream: WebSocket;
   upstreamMessages: JsonRpcMessage[];
+  completeStreamedTurn: () => void;
   cleanup: () => Promise<void>;
 }
 
@@ -321,6 +332,7 @@ async function createBridgeHarness(options: {
   const upstreamWss = new WebSocketServer({ server: upstreamServer });
   const upstreamSockets: WebSocket[] = [];
   const upstreamMessages: JsonRpcMessage[] = [];
+  let completeStreamedTurn: (() => void) | undefined;
   upstreamWss.on("connection", (socket) => {
     upstreamSockets.push(socket);
     socket.on("message", (raw) => {
@@ -368,7 +380,9 @@ async function createBridgeHarness(options: {
           JSON.stringify({ id: message.id, result: { turnId: TURN_ID } }),
         );
         if (options.streamTurnOnSteer) {
-          setTimeout(() => streamCompletedTurn(socket), 0);
+          setTimeout(() => {
+            completeStreamedTurn = startStreamingTurn(socket);
+          }, 0);
         }
       }
     });
@@ -401,6 +415,13 @@ async function createBridgeHarness(options: {
     ownerClient,
     ownerUpstream,
     upstreamMessages,
+    completeStreamedTurn: () => {
+      if (!completeStreamedTurn)
+        throw new Error("No streamed turn to complete");
+      const complete = completeStreamedTurn;
+      completeStreamedTurn = undefined;
+      complete();
+    },
     cleanup: async () => {
       ownerClient.close();
       await bridge.shutdown();
@@ -450,7 +471,7 @@ function resumeResponse(params: unknown) {
   };
 }
 
-function streamCompletedTurn(socket: WebSocket): void {
+function startStreamingTurn(socket: WebSocket): () => void {
   const send = (method: string, params: unknown) =>
     socket.send(JSON.stringify({ method, params }));
   send("turn/started", {
@@ -473,7 +494,7 @@ function streamCompletedTurn(socket: WebSocket): void {
     itemId: "agent-bridge",
     delta: "Hello from bridge delta at /Users/developer/project/app.ts",
   });
-  setTimeout(() => {
+  return () => {
     send("item/completed", {
       threadId: THREAD_ID,
       turnId: TURN_ID,
@@ -493,7 +514,7 @@ function streamCompletedTurn(socket: WebSocket): void {
         error: null,
       },
     });
-  }, 20);
+  };
 }
 
 async function createDispatchedInboxRecord(dataDir: string) {
