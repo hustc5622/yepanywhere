@@ -85,6 +85,10 @@ describe("AttachmentComposer", () => {
       "second",
     ]);
     expect(cards[0]?.contentEditable).toBe("false");
+    expect(
+      cards[0]?.querySelector(".attachment-composer-name")?.textContent,
+    ).toBe("shot.png");
+    expect(editor.querySelector("img")).toBeNull();
     expect(handle.current?.value).toBe(
       "before @[shot.png] between @[shot.png] after",
     );
@@ -207,7 +211,13 @@ describe("AttachmentComposer", () => {
       </I18nProvider>
     );
     const { rerender } = render(
-      renderEditor([attachments[0] as ComposerAttachment]),
+      renderEditor([
+        {
+          ...(attachments[0] as ComposerAttachment),
+          pending: true,
+          progress: 10,
+        },
+      ]),
     );
     const editor = screen.getByRole("textbox");
     const originalTextNode = editor.lastChild;
@@ -216,16 +226,19 @@ describe("AttachmentComposer", () => {
       renderEditor([
         {
           ...(attachments[0] as ComposerAttachment),
-          previewUrl: "blob:updated",
+          pending: true,
+          progress: 42,
         },
       ]),
     );
     expect(editor.lastChild).toBe(originalTextNode);
-    expect(editor.querySelector("img")?.getAttribute("src")).toBe("blob:first");
+    expect(
+      editor.querySelector(".attachment-composer-progress")?.textContent,
+    ).toBe("10%");
     fireEvent.compositionEnd(editor);
-    expect(editor.querySelector("img")?.getAttribute("src")).toBe(
-      "blob:updated",
-    );
+    expect(
+      editor.querySelector(".attachment-composer-progress")?.textContent,
+    ).toBe("42%");
     expect(handle.current?.value).toBe("@[shot.png] 中文");
   });
 
@@ -274,7 +287,7 @@ describe("AttachmentComposer", () => {
     expect(handle.current?.value).toBe("draft 中文");
   });
 
-  it("updates loaded thumbnails in place without replacing text, card buttons or the caret", () => {
+  it("enables image preview in place without replacing text, card buttons or the caret", () => {
     const handle = createRef<AttachmentComposerHandle>();
     const renderEditor = (previewUrl: string) => (
       <I18nProvider>
@@ -289,11 +302,12 @@ describe("AttachmentComposer", () => {
         />
       </I18nProvider>
     );
-    const { rerender } = render(renderEditor("blob:first"));
+    const { rerender } = render(renderEditor(""));
     const editor = screen.getByRole("textbox");
     const text = editor.lastChild;
     const button = editor.querySelector("button");
     const card = editor.querySelector("[data-attachment-id]");
+    expect(button?.disabled).toBe(true);
     act(() => {
       handle.current?.focus();
       handle.current?.setSelectionRange(22, 22);
@@ -303,9 +317,8 @@ describe("AttachmentComposer", () => {
     expect(editor.lastChild).toBe(text);
     expect(editor.querySelector("button")).toBe(button);
     expect(editor.querySelector("[data-attachment-id]")).toBe(card);
-    expect(editor.querySelector("img")?.getAttribute("src")).toBe(
-      "blob:updated",
-    );
+    expect(button?.disabled).toBe(false);
+    expect(editor.querySelector("img")).toBeNull();
     expect(window.getSelection()?.anchorNode).toBe(caretNode);
     expect(handle.current?.selectionStart).toBe(22);
   });

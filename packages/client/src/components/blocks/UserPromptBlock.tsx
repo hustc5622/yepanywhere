@@ -1,4 +1,3 @@
-import { isManagedUploadDownloadUrl } from "@yep-anywhere/shared";
 import { type ReactNode, memo, useState } from "react";
 import { useFetchedImage } from "../../hooks/useRemoteImage";
 import { useOptionalI18n } from "../../i18n";
@@ -18,8 +17,12 @@ import {
   type SkillInfo,
   type UploadedFileInfo,
   getFilename,
-  parseUserPrompt,
 } from "../../lib/parseUserPrompt";
+import {
+  type EditableUserPrompt,
+  getUploadUrl,
+  parseUserPromptContent,
+} from "../../lib/userPromptContent";
 import type {
   CodexBranchOption,
   ContentBlock,
@@ -28,6 +31,8 @@ import type {
 } from "../../types";
 import { MessageActions } from "../MessageActions";
 import { Modal } from "../ui/Modal";
+
+export { formatFileSize } from "../../lib/userPromptContent";
 
 const MAX_LINES = 12;
 const MAX_CHARS = MAX_LINES * 100;
@@ -68,16 +73,9 @@ interface Props {
   onSelectCodexBranch?: (branchId: string) => void;
   /**
    * When provided, show an edit button on the prompt. Called with the parsed
-   * prompt text so the parent can prefill the input and rewind from here.
+   * text and attachments so the parent can restore the whole input document.
    */
-  onEdit?: (text: string) => void;
-}
-
-interface InputImageBlock extends ContentBlock {
-  type: "input_image";
-  file_path?: string;
-  image_url?: string;
-  mime_type?: string;
+  onEdit?: (prompt: EditableUserPrompt) => void;
 }
 
 /**
@@ -275,30 +273,6 @@ function FeishuPromptSource({ info }: { info?: FeishuPromptInfo }) {
   );
 }
 
-/**
- * Extract URL components from an uploaded file path.
- * Path format: /.../.yep-anywhere/uploads/{projectId}/{sessionId}/{filename}
- */
-function getUploadUrl(filePath: string): string | null {
-  const publicLocation: unknown = filePath;
-  if (isManagedUploadDownloadUrl(publicLocation)) return publicLocation;
-
-  // Split path and get last 3 components: projectId, sessionId, filename
-  const parts = filePath.replaceAll("\\", "/").split("/");
-  if (parts.length < 3) return null;
-
-  const filename = parts[parts.length - 1];
-  const sessionId = parts[parts.length - 2];
-  const projectId = parts[parts.length - 3];
-
-  if (!filename || !sessionId || !projectId) return null;
-
-  // Validate filename has UUID prefix
-  if (!/^[0-9a-f-]{36}_/.test(filename)) return null;
-
-  return `/api/projects/${projectId}/sessions/${sessionId}/upload/${encodeURIComponent(filename)}`;
-}
-
 function getClipboardImageSourceUrl(
   file: UploadedFileInfo,
 ): string | undefined {
@@ -336,199 +310,6 @@ function getClipboardImageSources(
       mimeType: file.mimeType,
       sourceUrl: getClipboardImageSourceUrl(file),
     }));
-}
-
-function isInputImageBlock(block: ContentBlock): block is InputImageBlock {
-  return block.type === "input_image";
-}
-
-function stripCodexImageMarkers(text: string): string {
-  return text
-    .replace(/<image\b[^>]*>\s*<\/image>/gi, "\n")
-    .split("\n")
-    .filter((line) => {
-      const trimmed = line.trim();
-      return !/^<image\b[^>]*>$/i.test(trimmed) && trimmed !== "</image>";
-    })
-    .join("\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function parseInlineImageData(imageUrl: string): {
-  mimeType?: string;
-  bytes?: number;
-} {
-  const match = /^data:([^;,]+)?(;base64)?,(.*)$/i.exec(imageUrl);
-  if (!match) return {};
-
-  const rawMime = match[1]?.trim();
-  const mimeType = rawMime || undefined;
-  const isBase64 = Boolean(match[2]);
-  const payload = (match[3] ?? "").trim();
-  if (!payload) return { mimeType };
-
-  if (!isBase64) {
-    const decoded = decodeURIComponent(payload);
-    return { mimeType, bytes: decoded.length };
-  }
-
-  const sanitized = payload.replace(/\s+/g, "");
-  const padding = sanitized.endsWith("==")
-    ? 2
-    : sanitized.endsWith("=")
-      ? 1
-      : 0;
-  const bytes = Math.max(0, Math.floor((sanitized.length * 3) / 4) - padding);
-  return { mimeType, bytes };
-}
-
-export function formatFileSize(bytes?: number): string {
-  if (!bytes || bytes < 0) return "unknown size";
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-function getMimeTypeFromPath(path: string): string | undefined {
-  const lowerPath = path.toLowerCase();
-  if (lowerPath.endsWith(".png")) return "image/png";
-  if (lowerPath.endsWith(".jpg") || lowerPath.endsWith(".jpeg"))
-    return "image/jpeg";
-  if (lowerPath.endsWith(".gif")) return "image/gif";
-  if (lowerPath.endsWith(".webp")) return "image/webp";
-  if (lowerPath.endsWith(".bmp")) return "image/bmp";
-  if (lowerPath.endsWith(".svg")) return "image/svg+xml";
-  return undefined;
-}
-
-function extensionForMimeType(mimeType: string): string {
-  const normalized = mimeType.toLowerCase();
-  if (normalized === "image/jpeg") return "jpg";
-  if (normalized === "image/svg+xml") return "svg";
-  const slashIndex = normalized.indexOf("/");
-  if (slashIndex === -1) return "png";
-  const ext = normalized.slice(slashIndex + 1);
-  return ext || "png";
-}
-
-function filenameFromUrl(imageUrl: string): string | null {
-  if (imageUrl.startsWith("data:")) return null;
-
-  try {
-    const parsed = new URL(imageUrl, "https://codex.local");
-    const pathname = parsed.pathname || "";
-    const segment = pathname.split("/").filter(Boolean).pop();
-    return segment ? decodeURIComponent(segment) : null;
-  } catch {
-    return null;
-  }
-}
-
-const CODEX_INLINE_IMAGE_PATH_PREFIX = "codex-inline://image/";
-
-/**
- * A Codex `input_image` block that carries no identity of its own (no
- * file_path, no URL-derived filename). This includes deferred blocks whose
- * inline payload was stripped server-side, so we can only show a placeholder.
- */
-function isAnonymousCodexInlineImage(file: UploadedFileInfo): boolean {
-  return file.path.startsWith(CODEX_INLINE_IMAGE_PATH_PREFIX);
-}
-
-function extractCodexImageFiles(content: ContentBlock[]): UploadedFileInfo[] {
-  const files: UploadedFileInfo[] = [];
-  let imageIndex = 0;
-
-  for (const block of content) {
-    if (!isInputImageBlock(block)) continue;
-    imageIndex += 1;
-
-    const filePath =
-      typeof block.file_path === "string" ? block.file_path.trim() : "";
-    const imageUrl =
-      typeof block.image_url === "string" ? block.image_url.trim() : "";
-    const inlineData = imageUrl ? parseInlineImageData(imageUrl) : {};
-
-    const mimeType =
-      (typeof block.mime_type === "string" && block.mime_type.trim()) ||
-      inlineData.mimeType ||
-      (filePath ? getMimeTypeFromPath(filePath) : undefined) ||
-      (imageUrl ? getMimeTypeFromPath(imageUrl) : undefined) ||
-      "image/*";
-
-    const fileName =
-      (filePath && getFilename(filePath)) ||
-      (imageUrl && filenameFromUrl(imageUrl)) ||
-      `pasted-image-${imageIndex}.${extensionForMimeType(mimeType)}`;
-
-    const path =
-      filePath ||
-      (imageUrl && !imageUrl.startsWith("data:") ? imageUrl : "") ||
-      `${CODEX_INLINE_IMAGE_PATH_PREFIX}${imageIndex}`;
-
-    files.push({
-      originalName: fileName,
-      size: formatFileSize(inlineData.bytes),
-      mimeType,
-      path,
-      previewUrl: imageUrl || undefined,
-    });
-  }
-
-  return files;
-}
-
-function mergeUploadedFiles(
-  primary: UploadedFileInfo[],
-  secondary: UploadedFileInfo[],
-): UploadedFileInfo[] {
-  const seen = new Set<string>();
-  const merged: UploadedFileInfo[] = [];
-  const remainingSecondary = [...secondary];
-
-  for (const file of primary) {
-    if (seen.has(file.path)) continue;
-    seen.add(file.path);
-
-    // A managed upload listed in the prompt text and a Codex input_image
-    // block usually describe the same image. Fold the Codex block into the
-    // named attachment when it either carries inline preview data or is an
-    // anonymous placeholder (e.g. deferred media with image_url stripped),
-    // so the same image is not rendered twice.
-    const companionIndex = remainingSecondary.findIndex(
-      (candidate) =>
-        candidate.path === file.path ||
-        (!file.previewUrl &&
-          isImageMimeType(file.mimeType) &&
-          isImageMimeType(candidate.mimeType) &&
-          (Boolean(candidate.previewUrl) ||
-            isAnonymousCodexInlineImage(candidate))),
-    );
-    if (companionIndex === -1) {
-      merged.push(file);
-      continue;
-    }
-
-    const [companion] = remainingSecondary.splice(companionIndex, 1);
-    if (!companion) {
-      merged.push(file);
-      continue;
-    }
-    seen.add(companion.path);
-    merged.push({
-      ...file,
-      ...(companion.previewUrl ? { previewUrl: companion.previewUrl } : {}),
-    });
-  }
-
-  for (const file of remainingSecondary) {
-    if (seen.has(file.path)) continue;
-    seen.add(file.path);
-    merged.push(file);
-  }
-
-  return merged;
 }
 
 function UploadedImageError({ message }: { message: string }) {
@@ -901,107 +682,17 @@ export const UserPromptBlock = memo(function UserPromptBlock({
   const branchMetadata = branch ?? codexBranch;
   const handleSelectBranch = onSelectBranch ?? onSelectCodexBranch;
 
-  if (typeof content === "string") {
-    const { text, openedFiles, uploadedFiles, skills, feishu } =
-      parseUserPrompt(content);
-    const copyImages = getClipboardImageSources(uploadedFiles);
-
-    // Don't render if there's no actual text content
-    if (!text && skills.length === 0) {
-      const hasMetadata = openedFiles.length > 0 || uploadedFiles.length > 0;
-      if (copyImages.length > 0) {
-        return (
-          <UserPromptContainer isPending={isPending}>
-            <div className="message message-user-prompt message-user-prompt-copyable">
-              <MessageActions
-                copyText=""
-                copyImages={copyImages}
-                placement="bubble"
-              />
-              <div className="message-content">
-                <FeishuPromptSource info={feishu} />
-                <UploadedFilesMetadata files={uploadedFiles} feishu={feishu} />
-              </div>
-            </div>
-            <OpenedFilesMetadata files={openedFiles} />
-          </UserPromptContainer>
-        );
-      }
-      if (hasMetadata && (feishu || isPending)) {
-        return (
-          <UserPromptContainer isPending={isPending}>
-            <div className="message message-user-prompt">
-              <div className="message-content">
-                <FeishuPromptSource info={feishu} />
-                <UploadedFilesMetadata files={uploadedFiles} feishu={feishu} />
-              </div>
-            </div>
-            <OpenedFilesMetadata files={openedFiles} />
-          </UserPromptContainer>
-        );
-      }
-      return hasMetadata ? (
-        <>
-          <UploadedFilesMetadata files={uploadedFiles} feishu={feishu} />
-          <OpenedFilesMetadata files={openedFiles} />
-        </>
-      ) : null;
-    }
-
-    const copyText = text || getSkillCopyText(skills);
-    const inlineFiles = uploadedFiles.filter((file) =>
-      hasAttachmentToken(text, file.originalName),
-    );
-    const trailingFiles = uploadedFiles.filter(
-      (file) => !inlineFiles.includes(file),
-    );
-
-    return (
-      <UserPromptContainer isPending={isPending}>
-        <MessageActions
-          timestamp={timestamp}
-          contextBefore={contextBefore}
-          onEdit={!isPending && onEdit && text ? () => onEdit(text) : undefined}
-        />
-        <div className="message message-user-prompt message-user-prompt-copyable">
-          <MessageActions
-            copyText={copyText}
-            copyImages={copyImages}
-            placement="bubble"
-          />
-          <div className="message-content">
-            <FeishuPromptSource info={feishu} />
-            {text && <CollapsibleText text={text} inlineFiles={inlineFiles} />}
-            <SkillReferences skills={skills} />
-            <UploadedFilesMetadata files={trailingFiles} feishu={feishu} />
-          </div>
-        </div>
-        {branchMetadata && (
-          <BranchControls
-            branch={branchMetadata}
-            onSelect={handleSelectBranch}
-          />
-        )}
-        <OpenedFilesMetadata files={openedFiles} />
-      </UserPromptContainer>
-    );
-  }
-
-  // Array content - extract text blocks for display
-  const textContent = content
-    .filter((block) => block.type === "text" && block.text)
-    .map((block) => block.text)
-    .join("\n");
-  const codexImageFiles = extractCodexImageFiles(content);
-  const textForParsing =
-    codexImageFiles.length > 0
-      ? stripCodexImageMarkers(textContent)
-      : textContent;
-
-  // Parse the combined text content for metadata
-  const { text, openedFiles, uploadedFiles, skills, feishu } =
-    parseUserPrompt(textForParsing);
-  const allUploadedFiles = mergeUploadedFiles(uploadedFiles, codexImageFiles);
+  const {
+    text,
+    openedFiles,
+    uploadedFiles: allUploadedFiles,
+    skills,
+    feishu,
+  } = parseUserPromptContent(content);
+  const editAction =
+    !isPending && onEdit && (text || allUploadedFiles.length > 0)
+      ? () => onEdit({ text, attachments: allUploadedFiles })
+      : undefined;
   const copyImages = getClipboardImageSources(allUploadedFiles);
 
   if (!text && skills.length === 0) {
@@ -1009,6 +700,11 @@ export const UserPromptBlock = memo(function UserPromptBlock({
     if (copyImages.length > 0) {
       return (
         <UserPromptContainer isPending={isPending}>
+          <MessageActions
+            timestamp={timestamp}
+            contextBefore={contextBefore}
+            onEdit={editAction}
+          />
           <div className="message message-user-prompt message-user-prompt-copyable">
             <MessageActions
               copyText=""
@@ -1024,9 +720,14 @@ export const UserPromptBlock = memo(function UserPromptBlock({
         </UserPromptContainer>
       );
     }
-    if (hasMetadata && (feishu || isPending)) {
+    if (hasMetadata && (feishu || isPending || editAction)) {
       return (
         <UserPromptContainer isPending={isPending}>
+          <MessageActions
+            timestamp={timestamp}
+            contextBefore={contextBefore}
+            onEdit={editAction}
+          />
           <div className="message message-user-prompt">
             <div className="message-content">
               <FeishuPromptSource info={feishu} />
@@ -1042,7 +743,7 @@ export const UserPromptBlock = memo(function UserPromptBlock({
         <UploadedFilesMetadata files={allUploadedFiles} feishu={feishu} />
         <OpenedFilesMetadata files={openedFiles} />
       </>
-    ) : (
+    ) : typeof content === "string" ? null : (
       <div className="message message-user-prompt">
         <div className="message-content">
           <div className="text-block">[Complex content]</div>
@@ -1064,7 +765,7 @@ export const UserPromptBlock = memo(function UserPromptBlock({
       <MessageActions
         timestamp={timestamp}
         contextBefore={contextBefore}
-        onEdit={!isPending && onEdit && text ? () => onEdit(text) : undefined}
+        onEdit={editAction}
       />
       <div className="message message-user-prompt message-user-prompt-copyable">
         <MessageActions

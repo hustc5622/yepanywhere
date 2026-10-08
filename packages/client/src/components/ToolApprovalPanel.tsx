@@ -249,6 +249,16 @@ export function ToolApprovalPanel({
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
       if (submitting || !armed) return;
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      const editableTarget =
+        e.target instanceof HTMLElement
+          ? e.target.closest(
+              'input, textarea, select, [contenteditable]:not([contenteditable="false"])',
+            )
+          : null;
+      // Historical editing can coexist with an approval. Typing there must
+      // never make a permission decision for the waiting tool.
+      if (editableTarget && editableTarget !== feedbackInputRef.current) return;
 
       // Don't handle shortcuts when typing in feedback
       if (showFeedback) {

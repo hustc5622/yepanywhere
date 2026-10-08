@@ -32,14 +32,13 @@ export function ComposerAttachmentCard({
         title={attachment.name}
         onClick={() => onPreview?.(attachment.id)}
       >
-        {attachment.previewUrl ? (
-          <img src={attachment.previewUrl} alt="" draggable={false} />
-        ) : (
-          <span className="attachment-composer-icon" aria-hidden="true">
-            {isImage ? "▧" : "▤"}
+        <span className="attachment-composer-icon" aria-hidden="true" />
+        <span className="attachment-composer-name">{attachment.name}</span>
+        {attachment.pending && attachment.progress !== undefined && (
+          <span className="attachment-composer-progress">
+            {Math.round(attachment.progress)}%
           </span>
         )}
-        <span className="attachment-composer-name">{attachment.name}</span>
         {detail && <span className="attachment-size">{detail}</span>}
       </button>
       {onRemove && (
@@ -50,9 +49,7 @@ export function ComposerAttachmentCard({
           aria-label={t("composerAttachmentRemove", { name: attachment.name })}
           title={t("composerAttachmentRemove", { name: attachment.name })}
           onClick={() => onRemove(attachment.id)}
-        >
-          ×
-        </button>
+        />
       )}
     </div>
   );

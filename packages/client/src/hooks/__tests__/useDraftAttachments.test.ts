@@ -1,5 +1,6 @@
 import { act, renderHook } from "@testing-library/react";
 import type { UploadedFile } from "@yep-anywhere/shared";
+import { useState } from "react";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useDraftAttachments } from "../useDraftAttachments";
 
@@ -47,5 +48,41 @@ describe("useDraftAttachments", () => {
     localStorage.setItem("draft-a", '[{"id":1}]');
     const { result } = renderHook(() => useDraftAttachments("draft-a"));
     expect(result.current[0]).toEqual([]);
+  });
+
+  it("keeps a final attachment update with its source draft when navigation is batched", () => {
+    const otherFile = { ...file, id: "file-b", originalName: "other.png" };
+    localStorage.setItem("draft-b", JSON.stringify([otherFile]));
+    const { result } = renderHook(() => {
+      const [key, setKey] = useState("draft-a");
+      const [files, setFiles] = useDraftAttachments(key);
+      return { files, setFiles, setKey };
+    });
+
+    act(() => {
+      result.current.setFiles([file]);
+      result.current.setKey("draft-b");
+    });
+
+    expect(result.current.files).toEqual([otherFile]);
+    expect(JSON.parse(localStorage.getItem("draft-a") ?? "null")).toEqual([
+      file,
+    ]);
+    expect(JSON.parse(localStorage.getItem("draft-b") ?? "null")).toEqual([
+      otherFile,
+    ]);
+  });
+
+  it("ignores a completed upload callback captured for another session", () => {
+    const { result, rerender } = renderHook(
+      ({ key }) => useDraftAttachments(key),
+      { initialProps: { key: "draft-a" } },
+    );
+    const completeOldUpload = result.current[1];
+    rerender({ key: "draft-b" });
+    act(() => completeOldUpload((files) => [...files, file]));
+
+    expect(result.current[0]).toEqual([]);
+    expect(localStorage.getItem("draft-b")).toBeNull();
   });
 });

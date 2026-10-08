@@ -46,23 +46,15 @@ export function useDraftPersistence(
 
   const timeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const keyRef = useRef(key);
+  const valueRef = useRef(value);
+  const revisionRef = useRef(0);
+  const submittedRef = useRef<{
+    key: string;
+    value: string;
+    revision: number;
+  } | null>(null);
   // Track pending value so we can flush on unmount/beforeunload
-  const pendingValueRef = useRef<string | null>(null);
-
-  // Update keyRef when key changes
-  useEffect(() => {
-    keyRef.current = key;
-  }, [key]);
-
-  // Restore from localStorage when key changes
-  useEffect(() => {
-    try {
-      const stored = localStorage.getItem(key);
-      setValueInternal(stored ?? "");
-    } catch {
-      setValueInternal("");
-    }
-  }, [key]);
+  const pendingValueRef = useRef<{ key: string; value: string } | null>(null);
 
   // Flush pending value to localStorage
   const flushPending = useCallback(() => {
@@ -71,10 +63,26 @@ export function useDraftPersistence(
       timeoutRef.current = null;
     }
     if (pendingValueRef.current !== null) {
-      saveToStorage(keyRef.current, pendingValueRef.current);
+      saveToStorage(pendingValueRef.current.key, pendingValueRef.current.value);
       pendingValueRef.current = null;
     }
   }, []);
+
+  // Finish the previous draft's pending write before selecting another one.
+  // The pending write also carries its own key so it can never leak between
+  // sessions when React reuses the mounted composer.
+  useEffect(() => {
+    if (keyRef.current === key) return;
+    flushPending();
+    keyRef.current = key;
+    revisionRef.current += 1;
+    try {
+      valueRef.current = localStorage.getItem(key) ?? "";
+    } catch {
+      valueRef.current = "";
+    }
+    setValueInternal(valueRef.current);
+  }, [key, flushPending]);
 
   // Handle beforeunload to save draft before page unload (including HMR)
   useEffect(() => {
@@ -89,32 +97,50 @@ export function useDraftPersistence(
 
   // Debounced save to localStorage
   const setValue = useCallback((newValue: string) => {
+    valueRef.current = newValue;
+    revisionRef.current += 1;
     setValueInternal(newValue);
-    pendingValueRef.current = newValue;
+    const pending = { key: keyRef.current, value: newValue };
+    pendingValueRef.current = pending;
 
     if (timeoutRef.current) {
       clearTimeout(timeoutRef.current);
     }
 
     timeoutRef.current = setTimeout(() => {
-      saveToStorage(keyRef.current, newValue);
+      saveToStorage(pending.key, pending.value);
       pendingValueRef.current = null;
+      timeoutRef.current = null;
     }, DEBOUNCE_MS);
   }, []);
 
   // Clear input state only (for optimistic UI on submit)
   const clearInput = useCallback(() => {
+    flushPending();
+    submittedRef.current = {
+      key: keyRef.current,
+      value: valueRef.current,
+      revision: revisionRef.current,
+    };
+    valueRef.current = "";
     setValueInternal("");
-    pendingValueRef.current = null;
-    // Cancel pending debounce so we don't overwrite localStorage with ""
-    if (timeoutRef.current) {
-      clearTimeout(timeoutRef.current);
-      timeoutRef.current = null;
-    }
-  }, []);
+  }, [flushPending]);
 
   // Clear both state and localStorage (for confirmed successful send)
   const clearDraft = useCallback(() => {
+    const submitted = submittedRef.current;
+    submittedRef.current = null;
+    if (
+      submitted &&
+      (submitted.key !== keyRef.current ||
+        submitted.revision !== revisionRef.current)
+    ) {
+      // The user started another draft while the request was in flight.
+      // Only the submitted revision was consumed by the successful send.
+      flushPending();
+      return;
+    }
+    valueRef.current = "";
     setValueInternal("");
     pendingValueRef.current = null;
     if (timeoutRef.current) {
@@ -126,32 +152,41 @@ export function useDraftPersistence(
     } catch {
       // Ignore errors
     }
-  }, []);
+  }, [flushPending]);
 
   // Restore from localStorage (for failure recovery)
   const restoreFromStorage = useCallback(() => {
+    const submitted = submittedRef.current;
+    submittedRef.current = null;
+    if (submitted) {
+      if (
+        submitted.key !== keyRef.current ||
+        submitted.revision !== revisionRef.current
+      ) {
+        return;
+      }
+      // Keep the submission snapshot even if localStorage is unavailable.
+      valueRef.current = submitted.value;
+      setValueInternal(submitted.value);
+      return;
+    }
+    flushPending();
     try {
       const stored = localStorage.getItem(keyRef.current);
-      if (stored) {
-        setValueInternal(stored);
-      }
+      valueRef.current = stored ?? "";
+      setValueInternal(valueRef.current);
     } catch {
       // Ignore errors
     }
-  }, []);
+  }, [flushPending]);
 
   // Flush pending and cleanup on unmount
   useEffect(() => {
     return () => {
       // Flush any pending value before unmount (handles HMR and navigation)
-      if (pendingValueRef.current !== null) {
-        saveToStorage(keyRef.current, pendingValueRef.current);
-      }
-      if (timeoutRef.current) {
-        clearTimeout(timeoutRef.current);
-      }
+      flushPending();
     };
-  }, []);
+  }, [flushPending]);
 
   const controls = useMemo(
     () => ({ clearInput, clearDraft, restoreFromStorage, setText: setValue }),

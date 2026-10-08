@@ -1,5 +1,6 @@
 import {
   cleanup,
+  createEvent,
   fireEvent,
   render,
   screen,
@@ -37,8 +38,104 @@ function renderPanel(actionUrl: string) {
   );
 }
 
+async function renderKeyboardPanel(feedback?: string) {
+  localStorage.removeItem(
+    "draft-tool-prompt-session-shortcuts-toolApprovalFeedback",
+  );
+  if (feedback) {
+    localStorage.setItem(
+      "draft-tool-prompt-session-shortcuts-toolApprovalFeedback",
+      feedback,
+    );
+  }
+  const onApprove = vi.fn(async () => undefined);
+  const onDeny = vi.fn(async () => undefined);
+  const onDenyWithFeedback = vi.fn(async (_feedback: string) => undefined);
+  render(
+    <I18nProvider>
+      <ToolApprovalPanel
+        request={{
+          id: "approval-shortcuts",
+          sessionId: "session-shortcuts",
+          type: "tool-approval",
+          prompt: "Run command?",
+          toolName: "Bash",
+          toolInput: { command: "pwd" },
+          timestamp: "2026-10-08T00:00:00.000Z",
+        }}
+        sessionId="session-shortcuts"
+        onApprove={onApprove}
+        onDeny={onDeny}
+        onDenyWithFeedback={onDenyWithFeedback}
+      />
+      <input aria-label="Other input" />
+      <textarea aria-label="Other draft" />
+      <div contentEditable suppressContentEditableWarning>
+        <span data-testid="historical-editor">Editing a historical prompt</span>
+      </div>
+    </I18nProvider>,
+  );
+  await waitFor(() =>
+    expect(
+      (screen.getByRole("button", { name: /^1.*Yes/ }) as HTMLButtonElement)
+        .disabled,
+    ).toBe(false),
+  );
+  return { onApprove, onDeny, onDenyWithFeedback };
+}
+
 describe("ToolApprovalPanel", () => {
   afterEach(() => cleanup());
+
+  it("does not approve or deny while typing in another editor", async () => {
+    const { onApprove, onDeny } = await renderKeyboardPanel();
+    for (const target of [
+      screen.getByRole("textbox", { name: "Other input" }),
+      screen.getByRole("textbox", { name: "Other draft" }),
+      screen.getByTestId("historical-editor"),
+    ]) {
+      for (const key of ["1", "2", "3", "Enter", "Escape"]) {
+        const event = createEvent.keyDown(target, { key });
+        fireEvent(target, event);
+        expect(event.defaultPrevented).toBe(false);
+      }
+    }
+    expect(onApprove).not.toHaveBeenCalled();
+    expect(onDeny).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(window, { key: "1" });
+    await waitFor(() => expect(onApprove).toHaveBeenCalledTimes(1));
+  });
+
+  it("ignores handled keys and IME confirmation before applying approval shortcuts", async () => {
+    const { onApprove, onDeny } = await renderKeyboardPanel();
+    const handled = createEvent.keyDown(window, { key: "Enter" });
+    handled.preventDefault();
+    fireEvent(window, handled);
+    fireEvent.keyDown(window, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(window, { key: "Enter", keyCode: 229 });
+    fireEvent.keyDown(window, { key: "Escape", isComposing: true });
+    expect(onApprove).not.toHaveBeenCalled();
+    expect(onDeny).not.toHaveBeenCalled();
+  });
+
+  it("keeps feedback Enter local to the panel and waits for IME to finish", async () => {
+    const { onApprove, onDenyWithFeedback } =
+      await renderKeyboardPanel("请调整命令");
+    const feedback = screen.getByDisplayValue("请调整命令");
+    fireEvent.keyDown(screen.getByTestId("historical-editor"), {
+      key: "Enter",
+    });
+    fireEvent.keyDown(feedback, { key: "Enter", isComposing: true });
+    fireEvent.keyDown(feedback, { key: "Enter", keyCode: 229 });
+    expect(onDenyWithFeedback).not.toHaveBeenCalled();
+    expect(onApprove).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(feedback, { key: "Enter" });
+    await waitFor(() =>
+      expect(onDenyWithFeedback).toHaveBeenCalledWith("请调整命令"),
+    );
+  });
 
   it("renders safe MCP URL actions as external links", () => {
     renderPanel("https://example.com/sign-in");

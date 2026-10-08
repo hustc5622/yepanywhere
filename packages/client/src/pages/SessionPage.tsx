@@ -82,6 +82,7 @@ import {
   preprocessMessagesCached,
 } from "../lib/preprocessMessagesCache";
 import { getProviderPermissionModes } from "../lib/providerPermissionModes";
+import { restorePromptAttachments } from "../lib/restorePromptAttachments";
 import {
   requireStartedHistoricalEdit,
   resolveBranchNavigationFocus,
@@ -94,6 +95,11 @@ import {
   buildSessionDisplayRenderItems,
   mergeSessionInspectorMessages,
 } from "../lib/sessionDisplay";
+import {
+  type EditUserPromptRequest,
+  needsPromptAttachmentHydration,
+  parseUserPromptContent,
+} from "../lib/userPromptContent";
 import { generateUUID } from "../lib/uuid";
 import type { Message, Session, SessionNavigationState } from "../types";
 import { getSessionDisplayTitle } from "../utils";
@@ -399,6 +405,14 @@ function SessionPageContent({
     /** Entry timestamp used to resolve the authoritative Codex fork boundary. */
     timestamp?: string;
   } | null>(null);
+  const [isRestoringEdit, setIsRestoringEdit] = useState(false);
+  const editRestoreGenerationRef = useRef(0);
+  useEffect(
+    () => () => {
+      editRestoreGenerationRef.current += 1;
+    },
+    [],
+  );
   const [pendingBranchFocusId, setPendingBranchFocusId] = useState<
     string | null
   >(initialBranchFocus.branchId);
@@ -476,40 +490,6 @@ function SessionPageContent({
     );
     return selectedBranch ? !selectedBranch.isActive : false;
   }, [selectedBranchId, sessionBranchState]);
-
-  const handleEditUserPrompt = useCallback(
-    ({
-      text,
-      uuid,
-      parentUuid,
-    }: { text: string; uuid: string; parentUuid: string | null }) => {
-      if (isViewingHistoricalBranch) return;
-      const rollbackNumTurns = isCodexAppServerProvider(effectiveProvider)
-        ? (calculateDisplayForkExcludedTurns(displayPage, uuid) ??
-          calculateCodexForkExcludedTurns(messagesRef.current, uuid))
-        : null;
-      const editedMessage = messagesRef.current.find(
-        (message) => getMessageId(message) === uuid,
-      );
-      const displayQuestion = displayPage?.turns
-        .flatMap((turn) => (turn.question ? [turn.question] : []))
-        .find((question) => question.messageId === uuid);
-      const timestamp =
-        typeof editedMessage?.timestamp === "string"
-          ? editedMessage.timestamp
-          : displayQuestion?.timestamp;
-      setEditRewind({
-        parentUuid,
-        uuid,
-        preview: text,
-        rollbackNumTurns,
-        timestamp,
-      });
-      draftControlsRef.current?.setText(text);
-      setScrollTrigger((prev) => prev + 1);
-    },
-    [displayPage, effectiveProvider, isViewingHistoricalBranch],
-  );
 
   const handleSelectBranch = useCallback(
     (branchId: string) => {
@@ -650,11 +630,6 @@ function SessionPageContent({
     pendingEditBranchRefresh,
     refreshSessionMessages,
   ]);
-
-  const handleCancelEdit = useCallback(() => {
-    setEditRewind(null);
-    draftControlsRef.current?.clearInput();
-  }, []);
 
   // Sharing: check if configured (hidden unless sharing.json exists on server)
   const [sharingConfigured, setSharingConfigured] = useState(false);
@@ -837,6 +812,125 @@ function SessionPageContent({
       attachmentOrderRef.current.push(file.id);
   }
 
+  const handleEditUserPrompt = useCallback(
+    async ({
+      text,
+      attachments: promptAttachments,
+      uuid,
+      parentUuid,
+    }: EditUserPromptRequest) => {
+      if (isViewingHistoricalBranch) return;
+      const rollbackNumTurns = isCodexAppServerProvider(effectiveProvider)
+        ? (calculateDisplayForkExcludedTurns(displayPage, uuid) ??
+          calculateCodexForkExcludedTurns(messagesRef.current, uuid))
+        : null;
+      const editedMessage = messagesRef.current.find(
+        (message) => getMessageId(message) === uuid,
+      );
+      const displayQuestion = displayPage?.turns
+        .flatMap((turn) => (turn.question ? [turn.question] : []))
+        .find((question) => question.messageId === uuid);
+      const timestamp =
+        typeof editedMessage?.timestamp === "string"
+          ? editedMessage.timestamp
+          : displayQuestion?.timestamp;
+      const generation = ++editRestoreGenerationRef.current;
+      setIsRestoringEdit(true);
+      try {
+        let files = promptAttachments;
+        if (needsPromptAttachmentHydration(files)) {
+          const fullMessage = await api.getSession(
+            projectId,
+            actualSessionId,
+            undefined,
+            {
+              aroundMessageId: uuid,
+              maxMessages: 1,
+              deferMedia: false,
+              ...(selectedBranchId ? { branchId: selectedBranchId } : {}),
+            },
+          );
+          if (generation !== editRestoreGenerationRef.current) return;
+          const source = fullMessage.messages.find(
+            (message) => getMessageId(message) === uuid,
+          );
+          const content = source?.message?.content ?? source?.content;
+          if (content === undefined)
+            throw new Error("Original message unavailable");
+          files = parseUserPromptContent(content).uploadedFiles;
+          if (files.length < promptAttachments.length) {
+            throw new Error("Original message attachments unavailable");
+          }
+        }
+        const restored = await restorePromptAttachments(
+          { text, attachments: files },
+          connection,
+          projectId,
+          sessionId,
+        );
+        if (generation !== editRestoreGenerationRef.current) return;
+        // Existing uploads belong to the draft being replaced. Ignore their
+        // eventual completions so they cannot enter this historical edit.
+        for (const id of pendingUploadsRef.current.keys())
+          cancelledUploadIdsRef.current.add(id);
+        pendingUploadsRef.current.clear();
+        setUploadProgress([]);
+        attachmentOrderRef.current = restored.attachments.map(
+          (file) => file.id,
+        );
+        setAttachments(restored.attachments);
+        setEditRewind({
+          parentUuid,
+          uuid,
+          preview: text,
+          rollbackNumTurns,
+          timestamp,
+        });
+        draftControlsRef.current?.setText(restored.text);
+        setScrollTrigger((prev) => prev + 1);
+      } catch (error) {
+        if (generation !== editRestoreGenerationRef.current) return;
+        showToast(
+          t("sessionEditAttachmentsRestoreFailed", {
+            message: error instanceof Error ? error.message : String(error),
+          }),
+          "error",
+        );
+      } finally {
+        if (generation === editRestoreGenerationRef.current)
+          setIsRestoringEdit(false);
+      }
+    },
+    [
+      actualSessionId,
+      connection,
+      displayPage,
+      effectiveProvider,
+      isViewingHistoricalBranch,
+      projectId,
+      sessionId,
+      selectedBranchId,
+      setAttachments,
+      showToast,
+      t,
+    ],
+  );
+
+  const handleCancelEdit = useCallback(() => {
+    editRestoreGenerationRef.current += 1;
+    if (isRestoringEdit) {
+      setIsRestoringEdit(false);
+      return;
+    }
+    setEditRewind(null);
+    draftControlsRef.current?.clearDraft();
+    for (const id of pendingUploadsRef.current.keys())
+      cancelledUploadIdsRef.current.add(id);
+    pendingUploadsRef.current.clear();
+    setUploadProgress([]);
+    setAttachments([]);
+  }, [isRestoringEdit, setAttachments]);
+
   // Approval panel collapsed state (separate from message input collapse)
   const [approvalCollapsed, setApprovalCollapsed] = useState(false);
 
@@ -935,6 +1029,7 @@ function SessionPageContent({
   };
 
   const handleSend = async (text: string, interruptBeforeSend = false) => {
+    if (isRestoringEdit) return;
     if (effectiveProvider === "codex") {
       const command = parseCodexSlashCommand(text);
       if (command.kind === "invalid-compact-args") {
@@ -1329,6 +1424,7 @@ function SessionPageContent({
   };
 
   const handleQueue = async (text: string) => {
+    if (isRestoringEdit) return;
     const tempId = addPendingMessage(text);
     setScrollTrigger((prev) => prev + 1);
 
@@ -2587,13 +2683,15 @@ function SessionPageContent({
               )}
 
             {/* Edit/rewind banner: shown while editing a past message */}
-            {editRewind && (
+            {(editRewind || isRestoringEdit) && (
               <div
                 className="edit-rewind-banner"
                 data-testid="edit-rewind-banner"
               >
                 <span className="edit-rewind-banner-text">
-                  {t("sessionEditingFromHere")}
+                  {isRestoringEdit
+                    ? t("sessionRestoringEditAttachments")
+                    : t("sessionEditingFromHere")}
                 </span>
                 <button
                   type="button"
@@ -2623,13 +2721,20 @@ function SessionPageContent({
               </div>
             )}
 
-            {/* No pending approval: show full message input */}
-            {!(
-              pendingInputRequest &&
-              pendingInputRequest.sessionId === actualSessionId &&
-              !isAskUserQuestion
-            ) && (
+            {/* Keep the draft mounted while approval temporarily hides it. */}
+            <div
+              hidden={
+                !!(
+                  pendingInputRequest &&
+                  pendingInputRequest.sessionId === actualSessionId &&
+                  !isAskUserQuestion
+                ) &&
+                !editRewind &&
+                !isRestoringEdit
+              }
+            >
               <MessageInput
+                disabled={isRestoringEdit}
                 onSend={handleSend}
                 onInterruptSend={
                   effectiveProvider === "codex" &&
@@ -2640,7 +2745,9 @@ function SessionPageContent({
                     : undefined
                 }
                 onQueue={
-                  status.owner !== "none" && processState !== "idle"
+                  !editRewind &&
+                  status.owner !== "none" &&
+                  processState !== "idle"
                     ? handleQueue
                     : undefined
                 }
@@ -2665,6 +2772,8 @@ function SessionPageContent({
                 draftKey={`draft-message-${sessionId}`}
                 onDraftControlsReady={handleDraftControlsReady}
                 collapsed={
+                  !editRewind &&
+                  !isRestoringEdit &&
                   !!(
                     pendingInputRequest &&
                     pendingInputRequest.sessionId === actualSessionId
@@ -2694,7 +2803,7 @@ function SessionPageContent({
                 commandButtons={commandButtons}
                 onCustomCommand={handleCustomCommand}
               />
-            )}
+            </div>
           </div>
         </footer>
       </div>

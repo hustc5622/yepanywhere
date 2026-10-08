@@ -41,7 +41,7 @@ function renderPanel(
     </I18nProvider>,
   );
 
-  return { onSubmit, ...view };
+  return { onSubmit, onDeny, ...view };
 }
 
 function replaceScrollIntoView(
@@ -73,6 +73,72 @@ describe("QuestionAnswerPanel", () => {
 
   afterEach(() => {
     cleanup();
+  });
+
+  it("leaves keys in another editor alone while an answer is ready", () => {
+    const { onSubmit, onDeny } = renderPanel([
+      {
+        id: "ready-answer",
+        question: "Continue?",
+        header: "Choice",
+        options: [{ label: "Proceed", description: "Continue" }],
+        defaultValue: "Proceed",
+        multiSelect: false,
+        custom: false,
+      },
+    ]);
+    render(
+      <>
+        <input aria-label="Other input" />
+        <textarea aria-label="Other draft" />
+        <div contentEditable suppressContentEditableWarning>
+          <span data-testid="historical-editor">
+            Editing a historical prompt
+          </span>
+        </div>
+      </>,
+    );
+    for (const target of [
+      screen.getByRole("textbox", { name: "Other input" }),
+      screen.getByRole("textbox", { name: "Other draft" }),
+      screen.getByTestId("historical-editor"),
+    ]) {
+      for (const key of ["Enter", "Escape", "Tab"]) {
+        const event = createEvent.keyDown(target, { key });
+        fireEvent(target, event);
+        expect(event.defaultPrevented).toBe(false);
+      }
+    }
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onDeny).not.toHaveBeenCalled();
+  });
+
+  it("respects handled keys while retaining Enter submission in its own direct input", async () => {
+    const { onSubmit, onDeny } = renderPanel([
+      {
+        id: "direct-answer",
+        question: "Name the branch",
+        header: "Branch",
+        options: [],
+        multiSelect: false,
+      },
+    ]);
+    const input = screen.getByRole("textbox");
+    fireEvent.change(input, { target: { value: "feature/editor" } });
+    const handled = createEvent.keyDown(input, { key: "Enter" });
+    handled.preventDefault();
+    fireEvent(input, handled);
+    fireEvent.keyDown(input, { key: "Escape", isComposing: true });
+    fireEvent.keyDown(input, { key: "Enter", keyCode: 229 });
+    expect(onSubmit).not.toHaveBeenCalled();
+    expect(onDeny).not.toHaveBeenCalled();
+
+    fireEvent.keyDown(input, { key: "Enter" });
+    await waitFor(() =>
+      expect(onSubmit).toHaveBeenCalledWith({
+        "direct-answer": "feature/editor",
+      }),
+    );
   });
 
   it("submits every toggled option for a multi-select question", async () => {

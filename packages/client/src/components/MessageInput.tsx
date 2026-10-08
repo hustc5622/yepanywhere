@@ -1,6 +1,5 @@
 import type { ProviderName, UploadedFile } from "@yep-anywhere/shared";
 import {
-  type ClipboardEvent,
   type KeyboardEvent,
   useCallback,
   useEffect,
@@ -8,8 +7,7 @@ import {
   useRef,
   useState,
 } from "react";
-import { ENTER_SENDS_MESSAGE } from "../constants";
-import { useComposerAttachmentPreviews } from "../hooks/useComposerAttachmentPreviews";
+import { useComposerDocument } from "../hooks/useComposerDocument";
 import {
   type DraftControls,
   useDraftPersistence,
@@ -17,14 +15,9 @@ import {
 import { useI18n } from "../i18n";
 import type { AgentCommandConfig } from "../lib/agentCommands";
 import {
-  countAttachmentTokens,
-  findAttachmentAfterPosition,
-  insertAttachmentToken,
-  removeAttachmentTokenOccurrence,
-  sanitizeAttachmentTokenName,
-} from "../lib/attachmentTokens";
-import { readClipboardUserInput } from "../lib/clipboard";
-import { hasCoarsePointer } from "../lib/deviceDetection";
+  handleComposerSubmitKey,
+  isComposerComposing,
+} from "../lib/composerKeyboard";
 import type { ContextUsage, PermissionMode } from "../types";
 import {
   AttachmentComposer,
@@ -352,71 +345,6 @@ export function MessageInput({
     [cursorPosition, onCustomCommand, setText, text],
   );
 
-  /** Restores the caret after React has flushed the new textarea value. */
-  const setCaretSoon = useCallback((position: number) => {
-    const apply = () => {
-      const el = textareaRef.current;
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(position, position);
-    };
-    if (typeof requestAnimationFrame === "function") {
-      requestAnimationFrame(apply);
-    } else {
-      setTimeout(apply, 0);
-    }
-  }, []);
-
-  /**
-   * Starts uploads and drops an inline token at the caret so the prompt keeps
-   * the ordering between typed text and attached files.
-   */
-  const attachFiles = (
-    files: File[],
-    baseText?: string,
-    baseCursor?: number,
-    copiedText = "",
-  ) => {
-    if (!onAttach || files.length === 0) return;
-    const textarea = textareaRef.current;
-    const anchor = findAttachmentAfterPosition(
-      textarea?.value ?? text,
-      textarea?.selectionStart ?? text.length,
-      composerAttachments,
-      (file) => file.name,
-    );
-    if (anchor) onAttach(files, anchor.id);
-    else onAttach(files);
-    let nextText = baseText ?? textarea?.value ?? text;
-    let nextCursor = baseCursor ?? textarea?.selectionStart ?? nextText.length;
-    // Pasted Yep clipboard payloads already carry `@[name]` inside the copied
-    // text; reuse those tokens instead of appending duplicates.
-    const consumed = new Map<string, number>();
-    for (const file of files) {
-      const name = sanitizeAttachmentTokenName(file.name);
-      const used = consumed.get(name) ?? 0;
-      consumed.set(name, used + 1);
-      if (countAttachmentTokens(copiedText, name) > used) continue;
-      const inserted = insertAttachmentToken(nextText, nextCursor, file.name);
-      nextText = inserted.text;
-      nextCursor = inserted.cursor;
-    }
-
-    setInterimTranscript("");
-    setDismissedCompletionKey(null);
-    setText(nextText);
-    setCursorPosition(nextCursor);
-    setCaretSoon(nextCursor);
-  };
-
-  const handleFileSelect = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (files?.length && onAttach) {
-      attachFiles(Array.from(files));
-      e.target.value = ""; // Reset for re-selection
-    }
-  };
-
   // Provide controls to parent via callback
   useEffect(() => {
     onDraftControlsReady?.(controls);
@@ -453,27 +381,12 @@ export function MessageInput({
   );
 
   const handleQueue = useCallback(() => {
-    // Stop voice recording and get any pending interim text
-    const pendingVoice = voiceButtonRef.current?.stopAndFinalize() ?? "";
-
-    let finalText = text.trimEnd();
-    if (pendingVoice) {
-      finalText = finalText ? `${finalText} ${pendingVoice}` : pendingVoice;
-    }
-
-    const hasContent = finalText.trim() || attachments.length > 0;
-    if (hasContent && !disabled && onQueue) {
-      const message = finalText.trim();
-      controls.clearInput();
-      setInterimTranscript("");
-      onQueue(message);
-      textareaRef.current?.focus();
-    }
-  }, [text, disabled, controls, onQueue, attachments.length]);
+    if (onQueue) submitMessage(onQueue);
+  }, [submitMessage, onQueue]);
 
   const handleKeyDown = (e: KeyboardEvent) => {
     // IME confirmation and deletion belong to the native editor.
-    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
+    if (isComposerComposing(e)) return;
     // Ctrl+Space toggles voice input
     if (e.key === " " && e.ctrlKey && !e.shiftKey && !e.altKey) {
       e.preventDefault();
@@ -536,96 +449,11 @@ export function MessageInput({
       }
     }
 
-    if (e.key === "Enter") {
-      // Skip Enter during IME composition (e.g. Chinese/Japanese/Korean input)
-      if (e.nativeEvent.isComposing) return;
-
-      // Ctrl+Enter queues a deferred message when agent is running
-      if (onQueue && e.ctrlKey && !e.shiftKey) {
-        e.preventDefault();
-        handleQueue();
-        return;
-      }
-
-      // On mobile (touch devices), Enter adds newline - must use send button
-      // On desktop, Enter sends message, Shift/Ctrl+Enter adds newline
-      const isMobile = hasCoarsePointer();
-
-      // If voice recording is active, Enter submits (on any device)
-      if (voiceButtonRef.current?.isListening) {
-        e.preventDefault();
-        handleSubmit();
-        return;
-      }
-
-      if (isMobile) {
-        // Mobile: Enter always adds newline, send button required
-        // Allow default behavior (newline)
-        return;
-      }
-
-      if (ENTER_SENDS_MESSAGE) {
-        // Desktop: Enter sends, Ctrl+Enter adds newline
-        if (e.ctrlKey || e.shiftKey) {
-          // Allow default behavior (newline)
-          return;
-        }
-        e.preventDefault();
-        handleSubmit();
-      } else {
-        // Ctrl+Enter sends, Enter adds newline
-        if (e.ctrlKey || e.shiftKey) {
-          e.preventDefault();
-          handleSubmit();
-        }
-      }
-    }
-  };
-
-  const handlePaste = (e: ClipboardEvent) => {
-    if (!canAttach || !onAttach) return;
-
-    const copiedInput = readClipboardUserInput(e.clipboardData);
-    if (copiedInput && copiedInput.images.length > 0) {
-      e.preventDefault();
-
-      const textarea = textareaRef.current;
-      const currentValue = textarea?.value ?? text;
-      const start = textarea?.selectionStart ?? currentValue.length;
-      const end = textarea?.selectionEnd ?? start;
-
-      let baseText = currentValue;
-      let baseCursor = start;
-      if (copiedInput.text) {
-        for (const id of textarea?.getSelectedAttachmentIds() ?? [])
-          removeDraftAttachment(id);
-        baseText = `${currentValue.slice(0, start)}${copiedInput.text}${currentValue.slice(end)}`;
-        baseCursor = start + copiedInput.text.length;
-      }
-
-      attachFiles(copiedInput.images, baseText, baseCursor, copiedInput.text);
-      return;
-    }
-
-    const items = e.clipboardData?.items;
-    if (!items) return;
-
-    const files: File[] = [];
-    for (const item of items) {
-      if (item.kind === "file") {
-        const file = item.getAsFile();
-        if (file) {
-          files.push(file);
-        }
-      }
-    }
-
-    if (files.length > 0) {
-      // Prevent default only if we have files to handle
-      // This allows text paste to still work normally
-      e.preventDefault();
-      attachFiles(files);
-    }
+    handleComposerSubmitKey(e, {
+      onSubmit: handleSubmit,
+      onQueue: onQueue ? handleQueue : undefined,
+      isListening: voiceButtonRef.current?.isListening,
+    });
   };
 
   const uploadedComposerAttachments = attachments.map((file) => ({
@@ -638,14 +466,8 @@ export function MessageInput({
         : undefined,
   }));
 
-  const previewUrls = useComposerAttachmentPreviews(
-    uploadedComposerAttachments,
-  );
-  const composerAttachments = [
-    ...uploadedComposerAttachments.map((file) => ({
-      ...file,
-      previewUrl: previewUrls[file.id],
-    })),
+  const orderedAttachments = [
+    ...uploadedComposerAttachments,
     ...uploadProgress.map((progress) => ({
       id: progress.fileId,
       name: progress.fileName,
@@ -659,12 +481,38 @@ export function MessageInput({
       : 0,
   );
 
-  const occurrences = new Map<string, number>();
-  const detachedAttachments = composerAttachments.filter((file) => {
-    const name = sanitizeAttachmentTokenName(file.name);
-    const occurrence = occurrences.get(name) ?? 0;
-    occurrences.set(name, occurrence + 1);
-    return occurrence >= countAttachmentTokens(text, name);
+  const {
+    composerAttachments,
+    detachedAttachments,
+    handleChange,
+    handleFileSelect,
+    handlePaste,
+    removeAttachment: handleRemoveAttachment,
+  } = useComposerDocument({
+    value: displayText,
+    editorRef: textareaRef,
+    attachments: orderedAttachments,
+    describeAttachment: (file) => file,
+    disabled,
+    canAttach,
+    onAttach,
+    onRemove: onRemoveAttachment
+      ? (ids) => {
+          for (const id of ids) removeDraftAttachment(id);
+        }
+      : undefined,
+    onRestore: (ids) => {
+      for (const id of ids) {
+        const file = removedAttachmentsRef.current.files.get(id);
+        if (file) onRestoreAttachment?.(file);
+      }
+    },
+    onTextChange: (value, cursor) => {
+      setInterimTranscript("");
+      setDismissedCompletionKey(null);
+      setCursorPosition(cursor);
+      setText(value);
+    },
   });
 
   const [previewAttachmentId, setPreviewAttachmentId] = useState<string | null>(
@@ -673,27 +521,6 @@ export function MessageInput({
   const previewAttachment = uploadedComposerAttachments.find(
     (file) => file.id === previewAttachmentId,
   );
-
-  const handleRemoveAttachment = (id: string) => {
-    const file = composerAttachments.find((candidate) => candidate.id === id);
-    if (!file || !onRemoveAttachment) return;
-    const matchingFiles = composerAttachments.filter(
-      (candidate) =>
-        sanitizeAttachmentTokenName(candidate.name) ===
-        sanitizeAttachmentTokenName(file.name),
-    );
-    const deletion = removeAttachmentTokenOccurrence(
-      textareaRef.current?.value ?? text,
-      file.name,
-      matchingFiles.findIndex((candidate) => candidate.id === id),
-    );
-    if (deletion) {
-      setText(deletion.text);
-      setCursorPosition(deletion.cursor);
-      setCaretSoon(deletion.cursor);
-    }
-    removeDraftAttachment(id);
-  };
 
   // Voice input handlers
   const handleVoiceTranscript = useCallback(
@@ -802,21 +629,7 @@ export function MessageInput({
             attachments={composerAttachments}
             onPreview={setPreviewAttachmentId}
             onRemove={onRemoveAttachment ? handleRemoveAttachment : undefined}
-            onChange={(e) => {
-              // If user edits while recording, only update committed text
-              // This clears interim since they're now typing
-              setInterimTranscript("");
-              setDismissedCompletionKey(null);
-              setCursorPosition(e.target.selectionStart);
-              for (const id of e.target.removedAttachmentIds ?? []) {
-                removeDraftAttachment(id);
-              }
-              for (const id of e.target.restoredAttachmentIds ?? []) {
-                const file = removedAttachmentsRef.current.files.get(id);
-                if (file) onRestoreAttachment?.(file);
-              }
-              setText(e.target.value);
-            }}
+            onChange={handleChange}
             onKeyDown={handleKeyDown}
             onKeyUp={updateCursorPosition}
             onClick={updateCursorPosition}

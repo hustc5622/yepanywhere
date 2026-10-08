@@ -402,22 +402,10 @@ export const AttachmentComposer = forwardRef<AttachmentComposerHandle, Props>(
           t("composerAttachmentPreview", { name: attachment.name }),
         );
         preview.title = attachment.name;
-        if (attachment.previewUrl) {
-          const image = document.createElement("img");
-          image.src = attachment.previewUrl;
-          image.alt = "";
-          image.draggable = false;
-          image.className = "attachment-composer-thumbnail";
-          preview.append(image);
-        } else {
-          const icon = document.createElement("span");
-          icon.className = "attachment-composer-icon";
-          icon.textContent = attachment.mimeType?.startsWith("image/")
-            ? "▧"
-            : "▤";
-          icon.setAttribute("aria-hidden", "true");
-          preview.append(icon);
-        }
+        const icon = document.createElement("span");
+        icon.className = "attachment-composer-icon";
+        icon.setAttribute("aria-hidden", "true");
+        preview.append(icon);
         const name = document.createElement("span");
         name.className = "attachment-composer-name";
         name.textContent = attachment.name;
@@ -435,7 +423,6 @@ export const AttachmentComposer = forwardRef<AttachmentComposerHandle, Props>(
           remove.className = "attachment-composer-remove";
           remove.dataset.attachmentAction = "remove";
           remove.disabled = disabled;
-          remove.textContent = "×";
           const label = t("composerAttachmentRemove", {
             name: attachment.name,
           });
@@ -459,7 +446,7 @@ export const AttachmentComposer = forwardRef<AttachmentComposerHandle, Props>(
         fragment.append(document.createElement("br"));
       }
       if (canUpdateCards) {
-        // Upload progress and fetched thumbnails are metadata. Leave native
+        // Upload progress and preview availability are metadata. Leave native
         // editable text nodes and their undo/selection history in place.
         const newCards = fragment.querySelectorAll<HTMLElement>(
           "[data-attachment-id]",

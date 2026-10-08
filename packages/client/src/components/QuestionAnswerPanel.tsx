@@ -116,6 +116,7 @@ export function QuestionAnswerPanel({
 
   const otherTextareaRef = useRef<HTMLTextAreaElement>(null);
   const otherPasswordInputRef = useRef<HTMLInputElement>(null);
+  const directInputRef = useRef<HTMLInputElement>(null);
 
   const currentQuestion = questions[currentTab];
   const isLastQuestion = currentTab === questions.length - 1;
@@ -299,6 +300,21 @@ export function QuestionAnswerPanel({
     const handleKeyDown = (e: KeyboardEvent) => {
       if (submitting) return;
       if (readOnly) return;
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
+      const editableTarget =
+        e.target instanceof HTMLElement
+          ? e.target.closest(
+              'input, textarea, select, [contenteditable]:not([contenteditable="false"])',
+            )
+          : null;
+      if (
+        editableTarget &&
+        editableTarget !== otherTextareaRef.current &&
+        editableTarget !== otherPasswordInputRef.current &&
+        editableTarget !== directInputRef.current
+      ) {
+        return;
+      }
 
       // Escape to deny
       if (e.key === "Escape") {
@@ -309,9 +325,6 @@ export function QuestionAnswerPanel({
 
       // Enter behavior depends on context
       if (e.key === "Enter" && !e.shiftKey) {
-        // Confirming a CJK IME candidate also emits Enter. Android/WebKit may
-        // expose that only as legacy keyCode 229, so guard both signals.
-        if (e.isComposing || e.keyCode === 229) return;
         // The "Other" free-text area is a multiline textarea: Enter there only
         // inserts a newline and never submits. Free answers are submitted by
         // clicking the submit button, so IME word-picking can never trigger
@@ -430,6 +443,7 @@ export function QuestionAnswerPanel({
                 {isDirectInput ? (
                   <div className="question-other-input question-direct-input">
                     <input
+                      ref={directInputRef}
                       type={
                         currentQuestion.inputType === "password"
                           ? "text"

@@ -19,6 +19,7 @@ import {
   preprocessMessages,
 } from "../lib/preprocessMessages";
 import { getTurnPhase } from "../lib/turnPhase";
+import type { EditUserPromptRequest } from "../lib/userPromptContent";
 import type { Message } from "../types";
 import type { RenderItem } from "../types/renderItems";
 import { getMessageId } from "../utils";
@@ -190,11 +191,7 @@ interface Props {
   /** Reports whether user scrolling is following the live transcript tail. */
   onFollowingBottomChange?: (followingBottom: boolean) => void;
   /** Edit/rewind a past user prompt (forks the session from that point) */
-  onEditUserPrompt?: (args: {
-    text: string;
-    uuid: string;
-    parentUuid: string | null;
-  }) => void;
+  onEditUserPrompt?: (args: EditUserPromptRequest) => void;
   /** Switch the rendered derived branch. */
   onSelectBranch?: (branchId: string) => void;
   /** Branch prompt to bring back into view after switching. */

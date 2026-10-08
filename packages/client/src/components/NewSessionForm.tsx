@@ -17,8 +17,6 @@ import {
 } from "@yep-anywhere/shared";
 import {
   type CSSProperties,
-  type ChangeEvent,
-  type ClipboardEvent,
   type KeyboardEvent,
   useCallback,
   useEffect,
@@ -28,8 +26,8 @@ import {
 } from "react";
 import { useNavigate } from "react-router-dom";
 import { type UploadedFile, api } from "../api/client";
-import { ENTER_SENDS_MESSAGE } from "../constants";
 import { useToastContext } from "../contexts/ToastContext";
+import { useComposerDocument } from "../hooks/useComposerDocument";
 import { useConnection } from "../hooks/useConnection";
 import { useDraftPersistence } from "../hooks/useDraftPersistence";
 import { useLlmGatewayKeys } from "../hooks/useLlmGatewayKeys";
@@ -52,18 +50,10 @@ import { useServerSettings } from "../hooks/useServerSettings";
 import { useI18n } from "../i18n";
 import { getAgentCommandConfigs } from "../lib/agentCommands";
 import {
-  countAttachmentTokens,
-  findAttachmentAfterPosition,
-  insertAttachmentToken,
-  removeAttachmentTokenOccurrence,
-  sanitizeAttachmentTokenName,
-} from "../lib/attachmentTokens";
-import { readClipboardUserInput } from "../lib/clipboard";
-import {
   getModelReasoningEfforts,
   resolveModelReasoningEffort,
 } from "../lib/codexReasoning";
-import { hasCoarsePointer } from "../lib/deviceDetection";
+import { handleComposerSubmitKey } from "../lib/composerKeyboard";
 import {
   getProviderPermissionModes,
   normalizeProviderPermissionMode,
@@ -1129,29 +1119,7 @@ export function NewSessionForm({
     }
   }, [setMessage]);
 
-  /** Restores the caret after React has flushed the new textarea value. */
-  const setCaretSoon = (position: number) => {
-    const apply = () => {
-      const el = textareaRef.current;
-      if (!el) return;
-      el.focus();
-      el.setSelectionRange(position, position);
-    };
-    if (typeof requestAnimationFrame === "function") {
-      requestAnimationFrame(apply);
-    } else {
-      setTimeout(apply, 0);
-    }
-  };
-
-  const addPendingFiles = (
-    files: File[],
-    baseMessage?: string,
-    baseCursor?: number,
-    copiedText = "",
-  ) => {
-    if (files.length === 0) return;
-
+  const addPendingFiles = (files: File[], beforeAttachmentId?: string) => {
     const newPendingFiles: PendingFile[] = files.map((file) => ({
       id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
       file,
@@ -1159,15 +1127,10 @@ export function NewSessionForm({
         ? URL.createObjectURL(file)
         : undefined,
     }));
-    const editor = textareaRef.current;
-    const anchor = findAttachmentAfterPosition(
-      editor?.value ?? message,
-      editor?.selectionStart ?? message.length,
-      pendingFiles,
-      (pending) => pending.file.name,
-    );
     const order = pendingFileOrderRef.current;
-    const anchorIndex = anchor ? order.indexOf(anchor.id) : -1;
+    const anchorIndex = beforeAttachmentId
+      ? order.indexOf(beforeAttachmentId)
+      : -1;
     order.splice(
       anchorIndex < 0 ? order.length : anchorIndex,
       0,
@@ -1178,41 +1141,6 @@ export function NewSessionForm({
         (left, right) => order.indexOf(left.id) - order.indexOf(right.id),
       ),
     );
-
-    // Drop an inline token at the caret so the prompt records where each file
-    // belongs relative to the typed text.
-    const textarea = textareaRef.current;
-    let nextMessage = baseMessage ?? textarea?.value ?? message;
-    let nextCursor =
-      baseCursor ?? textarea?.selectionStart ?? nextMessage.length;
-    // Pasted Yep clipboard payloads already carry `@[name]` inside the copied
-    // text; reuse those tokens instead of appending duplicates.
-    const consumed = new Map<string, number>();
-    for (const pendingFile of newPendingFiles) {
-      const name = sanitizeAttachmentTokenName(pendingFile.file.name);
-      const used = consumed.get(name) ?? 0;
-      consumed.set(name, used + 1);
-      if (countAttachmentTokens(copiedText, name) > used) continue;
-      const inserted = insertAttachmentToken(
-        nextMessage,
-        nextCursor,
-        pendingFile.file.name,
-      );
-      nextMessage = inserted.text;
-      nextCursor = inserted.cursor;
-    }
-
-    setInterimTranscript("");
-    setMessage(nextMessage);
-    setCaretSoon(nextCursor);
-  };
-
-  const handleFileSelect = (e: ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files?.length) return;
-
-    addPendingFiles(Array.from(files));
-    e.target.value = ""; // Reset for re-selection
   };
 
   const removePendingFiles = (ids: string[]) => {
@@ -1224,27 +1152,56 @@ export function NewSessionForm({
     setPendingFiles((prev) => prev.filter((file) => !ids.includes(file.id)));
   };
 
-  const handleRemoveFile = (id: string) => {
-    const file = pendingFilesRef.current.find(
-      (candidate) => candidate.id === id,
-    );
-    if (!file) return;
-    const matchingFiles = pendingFilesRef.current.filter(
-      (candidate) =>
-        sanitizeAttachmentTokenName(candidate.file.name) ===
-        sanitizeAttachmentTokenName(file.file.name),
-    );
-    const deletion = removeAttachmentTokenOccurrence(
-      textareaRef.current?.value ?? message,
-      file.file.name,
-      matchingFiles.findIndex((candidate) => candidate.id === id),
-    );
-    if (deletion) {
-      setMessage(deletion.text);
-      setCaretSoon(deletion.cursor);
-    }
-    removePendingFiles([id]);
-  };
+  const {
+    composerAttachments,
+    detachedAttachments: detachedPendingFiles,
+    handleChange,
+    handleFileSelect,
+    handlePaste,
+    removeAttachment: handleRemoveFile,
+  } = useComposerDocument({
+    value: displayText,
+    editorRef: textareaRef,
+    attachments: pendingFiles,
+    describeAttachment: (pending) => {
+      const progress = isStarting ? uploadProgress[pending.id] : undefined;
+      return {
+        id: pending.id,
+        name: pending.file.name,
+        mimeType: pending.file.type,
+        previewUrl: pending.previewUrl,
+        pending: !!progress,
+        progress: progress
+          ? progress.total > 0
+            ? (progress.uploaded / progress.total) * 100
+            : 0
+          : undefined,
+      };
+    },
+    disabled: isStarting,
+    onAttach: addPendingFiles,
+    onRemove: removePendingFiles,
+    onRestore: (ids) => {
+      const restored = ids.flatMap((id) => {
+        const file = removedPendingFilesRef.current.get(id);
+        if (!file) return [];
+        removedPendingFilesRef.current.delete(id);
+        return [file];
+      });
+      if (restored.length > 0)
+        setPendingFiles((prev) =>
+          [...prev, ...restored].sort(
+            (left, right) =>
+              pendingFileOrderRef.current.indexOf(left.id) -
+              pendingFileOrderRef.current.indexOf(right.id),
+          ),
+        );
+    },
+    onTextChange: (value) => {
+      setInterimTranscript("");
+      setMessage(value);
+    },
+  });
 
   const handleModeSelect = (selectedMode: PermissionMode) => {
     setMode(selectedMode);
@@ -1604,85 +1561,13 @@ export function NewSessionForm({
     }
   };
 
-  const handleKeyDown = (e: KeyboardEvent) => {
-    if (e.nativeEvent.isComposing || e.keyCode === 229) return;
-    if (e.key === "Enter") {
-      // Skip Enter during IME composition (e.g. Chinese/Japanese/Korean input)
-      if (e.nativeEvent.isComposing) return;
-
-      // On mobile (touch devices), Enter adds newline - must use send button
-      // On desktop, Enter sends message, Shift/Ctrl+Enter adds newline
-      const isMobile = hasCoarsePointer();
-
-      // If voice recording is active, Enter submits (on any device)
-      if (voiceButtonRef.current?.isListening) {
-        e.preventDefault();
-        handleStartSession();
-        return;
-      }
-
-      if (isMobile) {
-        // Mobile: Enter always adds newline, send button required
-        return;
-      }
-
-      if (ENTER_SENDS_MESSAGE) {
-        if (e.ctrlKey || e.shiftKey) return;
-        e.preventDefault();
-        handleStartSession();
-      } else {
-        if (e.ctrlKey || e.shiftKey) {
-          e.preventDefault();
-          handleStartSession();
-        }
-      }
-    }
-  };
-
-  const handlePaste = (e: ClipboardEvent) => {
-    const copiedInput = readClipboardUserInput(e.clipboardData);
-    if (copiedInput && copiedInput.images.length > 0) {
-      e.preventDefault();
-
-      const textarea = textareaRef.current;
-      const currentValue = textarea?.value ?? message;
-      const start = textarea?.selectionStart ?? currentValue.length;
-      const end = textarea?.selectionEnd ?? start;
-
-      let baseMessage = currentValue;
-      let baseCursor = start;
-      if (copiedInput.text) {
-        removePendingFiles(textarea?.getSelectedAttachmentIds() ?? []);
-        baseMessage = `${currentValue.slice(0, start)}${copiedInput.text}${currentValue.slice(end)}`;
-        baseCursor = start + copiedInput.text.length;
-      }
-
-      addPendingFiles(
-        copiedInput.images,
-        baseMessage,
-        baseCursor,
-        copiedInput.text,
-      );
-      return;
-    }
-
-    const items = e.clipboardData?.items;
-    if (!items) return;
-
-    const files: File[] = [];
-    for (const item of items) {
-      if (item.kind === "file") {
-        const file = item.getAsFile();
-        if (file) {
-          files.push(file);
-        }
-      }
-    }
-
-    if (files.length > 0) {
-      e.preventDefault();
-      addPendingFiles(files);
-    }
+  const handleKeyDown = (event: KeyboardEvent) => {
+    handleComposerSubmitKey(event, {
+      onSubmit: () => {
+        void handleStartSession();
+      },
+      isListening: voiceButtonRef.current?.isListening,
+    });
   };
 
   // Voice input handlers
@@ -1749,22 +1634,6 @@ export function NewSessionForm({
   );
 
   const hasContent = message.trim() || pendingFiles.length > 0;
-  // Files referenced inline in the prompt are rendered as tokens; only the
-  // remaining ones still need a chip below the composer.
-  const pendingOccurrences = new Map<string, number>();
-  const detachedPendingFiles = pendingFiles.filter((pending) => {
-    const name = sanitizeAttachmentTokenName(pending.file.name);
-    const occurrence = pendingOccurrences.get(name) ?? 0;
-    pendingOccurrences.set(name, occurrence + 1);
-    return occurrence >= countAttachmentTokens(displayText, name);
-  });
-  const composerAttachments = pendingFiles.map((pending) => ({
-    id: pending.id,
-    name: pending.file.name,
-    mimeType: pending.file.type,
-    previewUrl: pending.previewUrl,
-  }));
-
   const previewFile = previewFileId
     ? pendingFiles.find((pf) => pf.id === previewFileId)
     : undefined;
@@ -1882,27 +1751,7 @@ export function NewSessionForm({
           attachments={composerAttachments}
           onPreview={setPreviewFileId}
           onRemove={handleRemoveFile}
-          onChange={(e) => {
-            setInterimTranscript("");
-            removePendingFiles(e.target.removedAttachmentIds ?? []);
-            const restored = (e.target.restoredAttachmentIds ?? []).flatMap(
-              (id) => {
-                const file = removedPendingFilesRef.current.get(id);
-                if (!file) return [];
-                removedPendingFilesRef.current.delete(id);
-                return [file];
-              },
-            );
-            if (restored.length > 0)
-              setPendingFiles((prev) =>
-                [...prev, ...restored].sort(
-                  (left, right) =>
-                    pendingFileOrderRef.current.indexOf(left.id) -
-                    pendingFileOrderRef.current.indexOf(right.id),
-                ),
-              );
-            setMessage(e.target.value);
-          }}
+          onChange={handleChange}
           onKeyDown={handleKeyDown}
           onPaste={handlePaste}
           placeholder={resolvedPlaceholder}
@@ -2100,7 +1949,7 @@ export function NewSessionForm({
       {detachedPendingFiles.length > 0 && (
         <div className="attachment-list">
           {detachedPendingFiles.map((pf) => {
-            const progress = uploadProgress[pf.id];
+            const progress = isStarting ? uploadProgress[pf.id] : undefined;
             return (
               <ComposerAttachmentCard
                 key={pf.id}

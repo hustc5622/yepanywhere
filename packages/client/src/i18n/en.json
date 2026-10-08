@@ -1460,6 +1460,8 @@
   "userPromptQueuedPosition": "Queued (#{position})",
   "userPromptCancelQueued": "Cancel queued message",
   "messageContinuedAfterAnswer": "Continued after your answer",
+  "sessionRestoringEditAttachments": "Restoring message attachments…",
+  "sessionEditAttachmentsRestoreFailed": "Could not restore message attachments. Your current draft was kept: {message}",
   "sessionEditingFromHere": "Editing this message — sending will branch the conversation from here",
   "sessionSyncingBranch": "Syncing edited branch…",
   "sessionInspectorOpen": "Open session outline",

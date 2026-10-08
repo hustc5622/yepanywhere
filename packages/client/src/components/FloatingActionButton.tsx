@@ -15,6 +15,10 @@ import {
 } from "../hooks/useRecentProject";
 import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
 import { useI18n } from "../i18n";
+import {
+  handleComposerSubmitKey,
+  isComposerComposing,
+} from "../lib/composerKeyboard";
 import { VoiceInputButton } from "./VoiceInputButton";
 
 const FAB_DRAFT_KEY = "fab-draft";
@@ -117,16 +121,12 @@ export function FloatingActionButton() {
 
   const handleKeyDown = useCallback(
     (e: KeyboardEvent<HTMLTextAreaElement>) => {
-      // Skip Enter during IME composition (e.g. Chinese/Japanese/Korean input)
-      if (e.key === "Enter" && e.nativeEvent.isComposing) return;
-
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        handleSubmit();
-      } else if (e.key === "Escape") {
+      if (isComposerComposing(e)) return;
+      if (e.key === "Escape") {
         setIsExpanded(false);
+        return;
       }
-      // Shift+Enter naturally adds newline (default behavior)
+      handleComposerSubmitKey(e, { onSubmit: handleSubmit });
     },
     [handleSubmit],
   );

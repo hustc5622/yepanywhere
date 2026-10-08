@@ -2,6 +2,7 @@ import { memo, useCallback } from "react";
 import { useOptionalI18n } from "../i18n";
 import { getMessageId } from "../lib/mergeMessages";
 import { canEditPersistedUserPrompt } from "../lib/sessionBranching";
+import type { EditUserPromptRequest } from "../lib/userPromptContent";
 import type { RenderItem } from "../types/renderItems";
 import { DisplayToolGroupRow } from "./blocks/DisplayToolGroupRow";
 import { GoalInlineBlock } from "./blocks/GoalInlineRenderer";
@@ -20,13 +21,9 @@ interface Props {
   sessionProvider?: string;
   /**
    * When provided, user prompts show an edit button. Called with the prompt's
-   * parsed text plus its DAG identity so the parent can rewind/fork from here.
+   * parsed document plus its DAG identity so the parent can rewind/fork here.
    */
-  onEditUserPrompt?: (args: {
-    text: string;
-    uuid: string;
-    parentUuid: string | null;
-  }) => void;
+  onEditUserPrompt?: (args: EditUserPromptRequest) => void;
   /** Switch the rendered derived branch. */
   onSelectBranch?: (branchId: string) => void;
 }
@@ -232,9 +229,9 @@ export const RenderItemComponent = memo(function RenderItemComponent({
             onSelectBranch={onSelectBranch}
             onEdit={
               onEditUserPrompt && uuid && canEdit
-                ? (text) =>
+                ? (prompt) =>
                     onEditUserPrompt({
-                      text,
+                      ...prompt,
                       uuid,
                       parentUuid: src?.parentUuid ?? null,
                     })

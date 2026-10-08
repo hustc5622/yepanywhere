@@ -30,10 +30,6 @@ vi.mock("../../hooks/useRemoteImage", () => ({
   }),
 }));
 
-vi.mock("../../hooks/useComposerAttachmentPreviews", () => ({
-  useComposerAttachmentPreviews: () => ({}),
-}));
-
 function imageAttachment(id: string, originalName = "image.png"): UploadedFile {
   return {
     id,

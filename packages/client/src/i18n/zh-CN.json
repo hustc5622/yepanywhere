@@ -1460,6 +1460,8 @@
   "userPromptQueuedPosition": "排队中（第 {position} 条）",
   "userPromptCancelQueued": "取消排队消息",
   "messageContinuedAfterAnswer": "根据你的回答继续",
+  "sessionRestoringEditAttachments": "正在恢复消息附件…",
+  "sessionEditAttachmentsRestoreFailed": "无法恢复消息附件，已保留当前草稿：{message}",
   "sessionEditingFromHere": "正在编辑此消息 — 发送将从这里新建分支",
   "sessionSyncingBranch": "正在同步编辑分支…",
   "sessionInspectorOpen": "打开会话索引",

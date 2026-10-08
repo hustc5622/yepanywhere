@@ -2,8 +2,8 @@ import type { UploadedFile } from "@yep-anywhere/shared";
 import {
   type Dispatch,
   type SetStateAction,
+  useCallback,
   useEffect,
-  useRef,
   useState,
 } from "react";
 
@@ -54,18 +54,33 @@ function writeStored(key: string, files: UploadedFile[]): void {
 export function useDraftAttachments(
   key: string,
 ): [UploadedFile[], Dispatch<SetStateAction<UploadedFile[]>>] {
-  const [files, setFiles] = useState<UploadedFile[]>(() => readStored(key));
-  const keyRef = useRef(key);
+  const [draft, setDraft] = useState(() => ({ key, files: readStored(key) }));
 
   // Reload when the draft (session) changes.
   useEffect(() => {
-    keyRef.current = key;
-    setFiles(readStored(key));
+    setDraft((current) =>
+      current.key === key ? current : { key, files: readStored(key) },
+    );
   }, [key]);
 
   useEffect(() => {
-    writeStored(keyRef.current, files);
-  }, [files]);
+    // Persist the key that owns these files, including a final state update
+    // batched with navigation to another draft.
+    writeStored(draft.key, draft.files);
+  }, [draft]);
 
-  return [files, setFiles];
+  const setFiles = useCallback<Dispatch<SetStateAction<UploadedFile[]>>>(
+    (next) => {
+      setDraft((current) => {
+        if (current.key !== key) return current;
+        return {
+          key,
+          files: typeof next === "function" ? next(current.files) : next,
+        };
+      });
+    },
+    [key],
+  );
+
+  return [draft.files, setFiles];
 }

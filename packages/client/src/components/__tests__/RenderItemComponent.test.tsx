@@ -57,6 +57,60 @@ describe("RenderItemComponent edit availability", () => {
     window.localStorage.clear();
   });
 
+  it("passes original attachment metadata together with the editable prompt and identity", () => {
+    const path =
+      "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_shot.png";
+    const onEdit = renderPrompt(
+      {
+        uuid: "image-message",
+        parentUuid: "previous-message",
+        type: "user",
+        _source: "jsonl",
+        message: {
+          role: "user",
+          content: `before @[shot.png] after\n\nUser uploaded files:\n- shot.png (1 KB, image/png): ${path}`,
+        },
+      },
+      "codex",
+    );
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    expect(onEdit).toHaveBeenCalledWith({
+      uuid: "image-message",
+      parentUuid: "previous-message",
+      text: "before @[shot.png] after",
+      attachments: [
+        { originalName: "shot.png", size: "1 KB", mimeType: "image/png", path },
+      ],
+    });
+  });
+
+  it("allows editing a persisted image-only prompt", () => {
+    const onEdit = renderPrompt(
+      {
+        uuid: "image-only",
+        type: "user",
+        _source: "jsonl",
+        message: {
+          role: "user",
+          content: [
+            { type: "input_image", image_url: "data:image/png;base64,AAAA" },
+          ],
+        },
+      },
+      "codex",
+    );
+    fireEvent.click(screen.getByRole("button", { name: /edit/i }));
+    expect(onEdit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        text: "",
+        uuid: "image-only",
+        attachments: [
+          expect.objectContaining({ previewUrl: "data:image/png;base64,AAAA" }),
+        ],
+      }),
+    );
+  });
+
   it("does not accidentally expose edit for unsupported providers", () => {
     renderPrompt(
       {
