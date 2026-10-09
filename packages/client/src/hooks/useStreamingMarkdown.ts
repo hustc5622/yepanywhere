@@ -42,12 +42,14 @@ export interface StreamingMarkdownState {
 }
 
 export interface AugmentEvent {
+  messageId?: string;
   blockIndex: number;
   html: string;
   type: string;
 }
 
 export interface PendingEvent {
+  messageId?: string;
   html: string;
 }
 

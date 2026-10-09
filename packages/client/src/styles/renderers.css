@@ -91,8 +91,8 @@
   user-select: none;
 }
 
-/* Streaming cursor animation - uses ::after on last child to stay inline */
-.text-block.streaming > :last-child::after {
+/* The tail is the last visible text element, never the Markdown/modal host. */
+.text-block.streaming .text-streaming-tail::after {
   content: "";
   display: inline-block;
   width: 2px;
@@ -101,6 +101,12 @@
   margin-left: 2px;
   animation: blink 0.8s ease-in-out infinite;
   vertical-align: text-bottom;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .text-block.streaming .text-streaming-tail::after {
+    animation: none;
+  }
 }
 
 @keyframes blink {

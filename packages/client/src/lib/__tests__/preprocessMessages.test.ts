@@ -28,6 +28,48 @@ function codexWaitPair(
 }
 
 describe("preprocessMessages", () => {
+  it("moves the active indicator from prose to thinking and clears it at block stop", () => {
+    const message: Message = {
+      id: "stream",
+      type: "assistant",
+      _isStreaming: true,
+      _isStreamingPlaceholder: true,
+      _streamingBlockIndex: 1,
+      message: {
+        role: "assistant",
+        content: [
+          { type: "text", text: "Progress" },
+          { type: "thinking", thinking: "Considering" },
+        ],
+      },
+    };
+    expect(preprocessMessages([message])).toMatchObject([
+      { type: "text", isStreaming: false },
+      { type: "thinking", status: "streaming" },
+    ]);
+    expect(
+      preprocessMessages([{ ...message, _isStreaming: false }]),
+    ).toMatchObject([
+      { type: "text", isStreaming: false },
+      { type: "thinking", status: "complete" },
+    ]);
+  });
+
+  it("does not leave a prose cursor when a tool is the last streaming block", () => {
+    const items = preprocessMessages([
+      {
+        id: "stream",
+        type: "assistant",
+        _isStreaming: true,
+        content: [
+          { type: "text", text: "Running command" },
+          { type: "tool_use", id: "call", name: "Bash", input: {} },
+        ],
+      },
+    ]);
+    expect(items[0]).toMatchObject({ type: "text", isStreaming: false });
+  });
+
   it("pairs tool_use with tool_result", () => {
     const messages: Message[] = [
       {

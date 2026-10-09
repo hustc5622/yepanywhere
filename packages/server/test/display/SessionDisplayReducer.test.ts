@@ -66,6 +66,37 @@ function facts(snapshot: SessionDisplaySnapshot) {
   );
 }
 describe("SessionDisplayReducer", () => {
+  it("allows providers without native turn ids to stream again after a result", () => {
+    const model = new SessionDisplayReducer(view, "claude");
+    const text = (id: string) =>
+      model.message({
+        uuid: id,
+        type: "assistant",
+        _isStreaming: true,
+        _isStreamingPlaceholder: true,
+        message: { role: "assistant", content: id },
+      });
+    text("first");
+    model.message({ type: "result", uuid: "result" });
+    model.message({
+      type: "user",
+      uuid: "next-question",
+      message: { role: "user", content: "Next" },
+    });
+    text("second");
+    const texts = model
+      .snapshot()
+      .nodes.flatMap((n) =>
+        n.type === "segment" && n.segment.type === "assistant_text"
+          ? [n.segment]
+          : [],
+      );
+    expect(texts).toMatchObject([
+      { content: "first", streaming: false },
+      { content: "second", streaming: true },
+    ]);
+  });
+
   it.each(["followup_task", "send_message"])(
     "retains %s identity through compact live messages and a cold restore",
     (operation) => {
@@ -257,8 +288,8 @@ describe("SessionDisplayReducer", () => {
     ).toMatchObject([{ name: "Edit", status: "failed" }]);
   });
 
-  it("retires a stranded tool call once a later batch settles, on any provider", () => {
-    // Generic safety net for the case no provider can close on its own: a
+  it("retires a stranded tool call once a later sequential batch settles", () => {
+    // Safety net for a sequential provider that cannot close on its own: a
     // stream that dies mid tool call leaves a step nothing will ever answer.
     const call = (uuid: string, ids: string[]) => ({
       uuid,
@@ -310,6 +341,42 @@ describe("SessionDisplayReducer", () => {
       ["next", "completed"],
     ]);
   });
+
+  it.each(["codex", "codex-oss"])(
+    "keeps %s background commands running across later completed batches and history reads",
+    (provider) => {
+      const events = [prompt, tool("slow"), tool("fast"), result("fast")];
+      for (const replay of [false, true]) {
+        const model = new SessionDisplayReducer(view, provider);
+        if (replay) model.restore(events as Message[]);
+        else for (const event of events) model.message(event);
+        expect(model.snapshot().activity.runningCount).toBe(1);
+        expect(
+          model.tools.get(displayToolId("turn", "slow"))?.step,
+        ).toMatchObject({ name: "Bash", status: "running" });
+        model.message(result("slow"));
+        expect(model.snapshot().activity.runningCount).toBe(0);
+        expect(
+          model.tools.get(displayToolId("turn", "slow"))?.step.status,
+        ).toBe("completed");
+      }
+    },
+  );
+
+  it.each(["completed", "failed", "interrupted"])(
+    "settles an unfinished Codex background command when its turn is %s",
+    (turnStatus) => {
+      const model = new SessionDisplayReducer(view, "codex");
+      for (const event of [prompt, tool("slow"), tool("fast"), result("fast")])
+        model.message(event);
+      expect(model.snapshot().activity.runningCount).toBe(1);
+      model.message({ ...terminal, turnStatus });
+      expect(model.snapshot().activity.runningCount).toBe(0);
+      expect(model.tools.get(displayToolId("turn", "slow"))?.step.status).toBe(
+        turnStatus === "interrupted" ? "interrupted" : "unknown",
+      );
+    },
+  );
 
   it("leaves a parallel batch alone while only part of it has answered", () => {
     // Calls issued together may answer in any order, so a settled sibling says

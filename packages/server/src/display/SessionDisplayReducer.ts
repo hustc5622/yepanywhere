@@ -36,9 +36,9 @@ export interface DisplayToolRecord {
   position: number;
   /**
    * Identity of the assistant message that requested the call. Calls sharing a
-   * batch were issued together and may finish in any order; calls in different
-   * batches are strictly sequential, because a model only emits the next batch
-   * after it has seen the results of the previous one.
+   * batch were issued together and may finish in any order. Sequential
+   * providers use this to detect abandoned calls; Codex command lifecycles
+   * can outlive the model's tool response and span multiple batches.
    */
   batch: string;
 }
@@ -96,6 +96,7 @@ function toolSummary(input: unknown): string {
   for (const key of [
     "command",
     "cmd",
+    "script",
     "file_path",
     "path",
     "url",
@@ -130,6 +131,8 @@ export class SessionDisplayReducer {
   private currentSection = "preamble";
   private currentGroup: string | undefined;
   private streamingId: string | undefined;
+  private streamingTexts = new Map<string, string>();
+  private endedRuns = new Set<string>();
   private runtime: SessionDisplayActivity["state"] = "unknown";
   private compactionRun: string | undefined;
   private seq = 0;
@@ -141,6 +144,13 @@ export class SessionDisplayReducer {
 
   get currentRunId(): string {
     return this.currentRun;
+  }
+  isRunEnded(runId: string): boolean {
+    return this.endedRuns.has(runId);
+  }
+  isMessageCommitted(messageId: string): boolean {
+    const id = this.aliases.get(`${messageId}:0`);
+    return id !== undefined && this.committed.has(id);
   }
   get currentQuestionId(): string | undefined {
     for (let i = this.nodes.length - 1; i >= 0; i--) {
@@ -169,6 +179,7 @@ export class SessionDisplayReducer {
   }
 
   setRuntime(state: SessionDisplayActivity["state"]): void {
+    if (state !== "running" && state !== "unknown") this.stopStreaming();
     if (["completed", "interrupted", "failed"].includes(state))
       this.compactionRun = undefined;
     const last = this.nodes.at(-1);
@@ -181,6 +192,18 @@ export class SessionDisplayReducer {
       ![...this.tools.values()].some((t) => t.step.status === "running")
         ? "finishing"
         : state;
+  }
+
+  /** Closing presentation never discards partial text or commits it as an answer. */
+  stopStreaming(runId?: string, exceptId?: string): void {
+    for (const [id, run] of this.streamingTexts) {
+      if (id === exceptId || (runId && run !== runId)) continue;
+      const index = this.nodeIndices.get(id);
+      const node = index === undefined ? undefined : this.nodes[index];
+      if (node?.type === "segment" && node.segment.type === "assistant_text")
+        this.put({ ...node, segment: { ...node.segment, streaming: false } });
+      this.streamingTexts.delete(id);
+    }
   }
 
   private closeBefore(id: string): void {
@@ -200,6 +223,10 @@ export class SessionDisplayReducer {
   }
 
   private closeRun(runId: string, status: SessionDisplayTurnStatus): void {
+    if (status !== "running") {
+      this.endedRuns.add(runId);
+      this.stopStreaming(runId);
+    }
     if (this.compactionRun === runId && status !== "running")
       this.compactionRun = undefined;
     for (const group of this.groups.values())
@@ -228,10 +255,15 @@ export class SessionDisplayReducer {
     thinking = false,
     deferred = false,
     asyncMessage?: CodexAsyncMessage,
+    provisional = false,
   ): void {
     if (!text.trim()) return;
     if (streaming && this.committed.has(id)) return;
     const old = this.nodeIndices.get(id);
+    if (old === undefined) this.stopStreaming(this.currentRun, id);
+    const active = streaming && !this.endedRuns.has(this.currentRun);
+    if (active && !thinking) this.streamingTexts.set(id, this.currentRun);
+    else this.streamingTexts.delete(id);
     if (old === undefined) this.currentGroup = undefined;
     this.put({
       type: "segment",
@@ -253,7 +285,7 @@ export class SessionDisplayReducer {
             type: "assistant_text",
             id,
             content: text,
-            streaming,
+            streaming: active,
             ...(asyncMessage ? { asyncMessage } : {}),
             phase: asyncMessage
               ? "text"
@@ -265,7 +297,7 @@ export class SessionDisplayReducer {
             ...(timestamp ? { timestamp } : {}),
           },
     });
-    if (!streaming && !this.committed.has(id)) {
+    if (!streaming && !provisional && !this.committed.has(id)) {
       this.committed.add(id);
       this.closeBefore(id);
       if (
@@ -288,6 +320,7 @@ export class SessionDisplayReducer {
     if (!rawId) return;
     const id = displayToolId(runId, rawId);
     let tool = this.tools.get(id);
+    if (!tool) this.stopStreaming(runId);
     if (!replay && !tool && this.runtime !== "hold") this.runtime = "running";
     const originalName = string(block.name) ?? tool?.step.name ?? "Tool";
     // Codex projects mailbox waits as agentWait notices with the same call id.
@@ -535,11 +568,23 @@ export class SessionDisplayReducer {
     }
     if (message.type === "stream_event") {
       if (replay) return; // Completed snapshots/replayed message bodies are authoritative.
+      if (runId && this.endedRuns.has(runId)) return;
       const event = record(message.event);
       if (event?.type === "message_start") {
+        if (!runId) this.endedRuns.delete(this.currentRun);
+        this.stopStreaming();
         this.streamingId = string(record(event.message)?.id) ?? rawId;
         if (runId) this.currentRun = runId;
       }
+      if (
+        event?.type === "content_block_stop" ||
+        event?.type === "message_stop"
+      ) {
+        this.stopStreaming(runId);
+        if (event.type === "message_stop") this.streamingId = undefined;
+        return;
+      }
+      if (event?.type === "content_block_start") this.stopStreaming(runId);
       const delta = record(event?.delta);
       if (
         event?.type === "content_block_delta" &&
@@ -547,7 +592,9 @@ export class SessionDisplayReducer {
         typeof delta.text === "string"
       ) {
         if (runId) this.currentRun = runId;
-        const streamId = this.streamingId ?? rawId;
+        const streamId = message.codexTurnId
+          ? rawId
+          : (this.streamingId ?? rawId);
         if (!streamId) return;
         const blockIndex =
           typeof event.index === "number" &&
@@ -612,6 +659,8 @@ export class SessionDisplayReducer {
         return;
       }
       const startsNewRun = !replay && runId && runId !== this.currentRun;
+      if (!runId) this.endedRuns.delete("session");
+      this.stopStreaming();
       this.currentRun = runId ?? "session";
       this.currentSection = `turn:${runId ?? rawId}`;
       this.currentGroup = undefined;
@@ -675,15 +724,21 @@ export class SessionDisplayReducer {
               (rawId && this.aliases.get(`${rawId}:${index}`)) ||
               textIdentity(rawId ?? identity, index);
             if (rawId) this.aliases.set(`${rawId}:${index}`, id);
+            if (typeof nested?.id === "string")
+              this.aliases.set(`${nested.id}:${index}`, id);
             this.text(
               id,
               block.text,
-              message._isStreaming === true,
+              message._isStreaming === true &&
+                index ===
+                  (message._streamingBlockIndex ?? textBlocks.length - 1),
               message.codexMessagePhase,
               timestamp,
               false,
               false,
               message.codexAsyncMessage as CodexAsyncMessage | undefined,
+              message._isStreaming === true ||
+                message._isStreamingPlaceholder === true,
             );
           } else if (
             block.type === "thinking" &&
@@ -790,20 +845,23 @@ export class SessionDisplayReducer {
    *
    * A step normally ends on its `tool_result`, or on a terminal turn status via
    * `closeRun`. Neither arrives when a provider stream dies mid tool call: Pi
-   * persists the half-built call from a broken upstream stream, and Codex loses
-   * a turn outright when its app-server or bridge restarts before
-   * `turn_complete`. Providers without native turn ids (Pi, Kimi) make this
+   * persists the half-built call from a broken upstream stream.
+   * Providers without native turn ids (Pi, Kimi) make this
    * worse, because every run collapses onto `session` and `closeRun` can only
    * fire once the whole session goes idle. The orphan then spins as a bogus
    * "still running" row for the rest of the session.
    *
-   * Tool batches are strictly sequential: a model only requests the next batch
+   * On sequential providers a model only requests the next batch
    * after it has seen the results of the previous one. So any running step from
    * a batch older than the newest settled step is dead, not pending. Steps
    * inside one batch are never judged against each other, which leaves a
    * genuinely in-flight parallel batch (some done, some still working) alone.
    */
   private reapStrandedTools(): void {
+    // Codex exec_command can yield a process id while the command keeps
+    // running. Later calls completing says nothing about that process; only
+    // its own result or a terminal turn may settle the display step.
+    if (this.provider === "codex" || this.provider === "codex-oss") return;
     let lastSettled = -1;
     for (let index = this.toolOrder.length - 1; index >= 0; index--) {
       if (this.toolOrder[index]?.step.status !== "running") {

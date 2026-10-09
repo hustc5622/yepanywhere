@@ -46,6 +46,29 @@ describe("TextBlock", () => {
     vi.clearAllMocks();
   });
 
+  it.each([
+    ["<p>Paragraph</p>", "p"],
+    ["<ul><li>First</li><li><strong>Last</strong></li></ul>", "strong"],
+    ["<pre><code>const x = 1;</code></pre>", "code"],
+  ])(
+    "anchors the cursor inside the final content element: %s",
+    (augmentHtml, tag) => {
+      const { container, rerender } = render(
+        <TextBlock text="text" augmentHtml={augmentHtml} isStreaming />,
+      );
+      const tails = container.querySelectorAll(".text-streaming-tail");
+      expect(tails).toHaveLength(1);
+      expect(tails[0]?.tagName.toLowerCase()).toBe(tag);
+      expect(
+        container
+          .querySelector(".text-block-markdown")
+          ?.classList.contains("text-streaming-tail"),
+      ).toBe(false);
+      rerender(<TextBlock text="text" augmentHtml={augmentHtml} />);
+      expect(container.querySelector(".text-streaming-tail")).toBeNull();
+    },
+  );
+
   it("opens project-local markdown file links in the file viewer", async () => {
     vi.mocked(api.getFile).mockResolvedValue({
       metadata: {

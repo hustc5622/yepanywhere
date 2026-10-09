@@ -53,6 +53,156 @@ describe("useStreamingContent", () => {
     vi.clearAllMocks();
   });
 
+  it.each(["content_block_stop", "message_stop"])(
+    "flushes final tokens and stops the cursor on %s",
+    (type) => {
+      const { result } = renderHook(() =>
+        useStreamingContent(defaultOptions()),
+      );
+      const emit = (event: Record<string, unknown>) =>
+        result.current.handleStreamEvent({ type: "stream_event", event });
+      act(() => {
+        emit({ type: "message_start", message: { id: "message" } });
+        emit({
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        });
+        emit({
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "Final tokens" },
+        });
+        emit({ type, index: 0 });
+      });
+      expect(onUpdateMessage.mock.lastCall?.[0]).toMatchObject({
+        _isStreaming: false,
+        _isStreamingPlaceholder: true,
+        message: { content: [{ text: "Final tokens" }] },
+      });
+      const count = onUpdateMessage.mock.calls.length;
+      act(() => {
+        vi.advanceTimersByTime(100);
+      });
+      expect(onUpdateMessage).toHaveBeenCalledTimes(count);
+    },
+  );
+
+  it("handles Codex item-scoped deltas without start events and closes a superseded item", () => {
+    const { result } = renderHook(() => useStreamingContent(defaultOptions()));
+    const delta = (id: string, text: string) =>
+      result.current.handleStreamEvent({
+        type: "stream_event",
+        uuid: id,
+        codexTurnId: "turn",
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text },
+        },
+      });
+    act(() => {
+      delta("old", "Old partial");
+      delta("new", "New text");
+      vi.advanceTimersByTime(50);
+    });
+    expect(
+      onUpdateMessage.mock.calls.map(([message]) => message),
+    ).toMatchObject([
+      {
+        id: "old",
+        _isStreaming: false,
+        message: { content: [{ text: "Old partial" }] },
+      },
+      {
+        id: "new",
+        _isStreaming: true,
+        message: { content: [{ text: "New text" }] },
+      },
+    ]);
+  });
+
+  it("a child completion does not flush or discard the main stream", () => {
+    const { result } = renderHook(() => useStreamingContent(defaultOptions()));
+    const emit = (
+      agentId: string | undefined,
+      event: Record<string, unknown>,
+    ) =>
+      result.current.handleStreamEvent({
+        type: "stream_event",
+        ...(agentId ? { isSubagent: true, agentId } : {}),
+        event,
+      });
+    act(() => {
+      for (const agentId of [undefined, "child"]) {
+        emit(agentId, {
+          type: "message_start",
+          message: { id: agentId ?? "main" },
+        });
+        emit(agentId, {
+          type: "content_block_start",
+          index: 0,
+          content_block: { type: "text", text: "" },
+        });
+      }
+      emit(undefined, {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: "Main" },
+      });
+      emit("child", { type: "message_stop" });
+      result.current.clearStreaming({ agentId: "child" });
+      emit(undefined, {
+        type: "content_block_delta",
+        index: 0,
+        delta: { type: "text_delta", text: " continues" },
+      });
+      vi.advanceTimersByTime(50);
+    });
+    expect(onUpdateMessage.mock.lastCall).toMatchObject([
+      {
+        id: "main",
+        _isStreaming: true,
+        message: { content: [{ text: "Main continues" }] },
+      },
+      undefined,
+    ]);
+    expect(streamingMarkdownCallbacks.onStreamEnd).not.toHaveBeenCalled();
+    expect(
+      streamingMarkdownCallbacks.setCurrentMessageId,
+    ).toHaveBeenCalledTimes(1);
+  });
+
+  it("late tokens and completion of an old turn cannot stop a newer stream", () => {
+    const { result } = renderHook(() => useStreamingContent(defaultOptions()));
+    const delta = (id: string, turn: string, text: string) =>
+      result.current.handleStreamEvent({
+        type: "stream_event",
+        uuid: id,
+        codexTurnId: turn,
+        event: {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text },
+        },
+      });
+    act(() => {
+      delta("old", "old-turn", "Old");
+      result.current.finishStreaming({ turnId: "old-turn" });
+      delta("new", "new-turn", "New");
+      result.current.clearStreaming({ turnId: "old-turn" });
+      delta("old", "old-turn", " late");
+      result.current.finishStreaming({ turnId: "old-turn" });
+      delta("new", "new-turn", " continues");
+      vi.advanceTimersByTime(50);
+    });
+    expect(onUpdateMessage.mock.lastCall?.[0]).toMatchObject({
+      id: "new",
+      _isStreaming: true,
+      message: { content: [{ text: "New continues" }] },
+    });
+  });
+
   describe("handleStreamEvent", () => {
     it("returns false for non-stream_event messages", () => {
       const { result } = renderHook(() =>
@@ -226,95 +376,55 @@ describe("useStreamingContent", () => {
       );
     });
 
-    it("batches throttled updates when a batch callback is provided", () => {
+    it("batches independent agent streams without mixing their text", () => {
       const onUpdateMessages = vi.fn();
       const { result } = renderHook(() =>
         useStreamingContent({ ...defaultOptions(), onUpdateMessages }),
       );
-
+      const emit = (agentId: string, event: Record<string, unknown>) =>
+        result.current.handleStreamEvent({
+          type: "stream_event",
+          isSubagent: true,
+          agentId,
+          event,
+        });
       act(() => {
-        result.current.handleStreamEvent({
-          type: "stream_event",
-          event: {
-            type: "message_start",
-            message: { id: "msg-1" },
-          },
-        });
-        result.current.handleStreamEvent({
-          type: "stream_event",
-          event: {
+        for (const id of ["one", "two"]) {
+          emit(id, { type: "message_start", message: { id } });
+          emit(id, {
             type: "content_block_start",
             index: 0,
             content_block: { type: "text", text: "" },
-          },
-        });
-        result.current.handleStreamEvent({
-          type: "stream_event",
-          event: {
-            type: "message_start",
-            message: { id: "msg-2" },
-          },
-        });
-        result.current.handleStreamEvent({
-          type: "stream_event",
-          event: {
-            type: "content_block_start",
-            index: 0,
-            content_block: { type: "text", text: "" },
-          },
-        });
+          });
+        }
       });
-
-      onUpdateMessage.mockClear();
       onUpdateMessages.mockClear();
-
       act(() => {
-        result.current.handleStreamEvent({
-          type: "stream_event",
-          event: {
-            type: "message_start",
-            message: { id: "msg-1" },
-          },
+        emit("one", {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "One" },
         });
-        result.current.handleStreamEvent({
-          type: "stream_event",
-          event: {
-            type: "content_block_delta",
-            index: 0,
-            delta: { type: "text_delta", text: "One" },
-          },
-        });
-        result.current.handleStreamEvent({
-          type: "stream_event",
-          event: {
-            type: "message_start",
-            message: { id: "msg-2" },
-          },
-        });
-        result.current.handleStreamEvent({
-          type: "stream_event",
-          event: {
-            type: "content_block_delta",
-            index: 0,
-            delta: { type: "text_delta", text: "Two" },
-          },
+        emit("two", {
+          type: "content_block_delta",
+          index: 0,
+          delta: { type: "text_delta", text: "Two" },
         });
       });
-
       expect(onUpdateMessages).not.toHaveBeenCalled();
-
       act(() => {
         vi.advanceTimersByTime(50);
       });
-
       expect(onUpdateMessages).toHaveBeenCalledTimes(1);
-      expect(onUpdateMessages.mock.calls[0]?.[0]).toEqual([
-        expect.objectContaining({
-          message: expect.objectContaining({ id: "msg-1" }),
-        }),
-        expect.objectContaining({
-          message: expect.objectContaining({ id: "msg-2" }),
-        }),
+      expect(onUpdateMessages.mock.calls[0]?.[0]).toMatchObject([
+        {
+          agentId: "one",
+          message: { id: "one", message: { content: [{ text: "One" }] } },
+        },
+        {
+          agentId: "two",
+          message: { id: "two", message: { content: [{ text: "Two" }] } },
+        },
       ]);
       expect(onUpdateMessage).not.toHaveBeenCalled();
     });

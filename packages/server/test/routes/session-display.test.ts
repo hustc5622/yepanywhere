@@ -247,6 +247,90 @@ describe("session display routes", () => {
     },
   );
 
+  it.each(["present", "missing", "result-only"])(
+    "resolves raw CodexExec details when the native invocation is %s",
+    async (nativeState) => {
+      const { getSession } = createRoutes(1);
+      const loaded = await getSession();
+      const script = 'text(await tools.exec_command({cmd:"pwd"}));';
+      const invocation: Message = {
+        uuid: "exec-call",
+        type: "assistant",
+        codexTurnId: "turn",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "raw-call",
+              name: "CodexExec",
+              input: { script },
+            },
+          ],
+        },
+      };
+      const result: Message = {
+        uuid: "exec-result",
+        type: "user",
+        codexTurnId: "turn",
+        message: {
+          role: "user",
+          content: [
+            {
+              type: "tool_result",
+              tool_use_id: "raw-call",
+              content: "Script completed\nOutput:\n/project",
+            },
+          ],
+        },
+      };
+      const rawMessages = [invocation, result];
+      const reader = {
+        getSession: vi.fn(async () => ({
+          ...loaded,
+          projectedMessages: rawMessages,
+        })),
+        getSessionSummary: vi.fn(async () => loaded.summary),
+      };
+      const getSemanticTurn = vi.fn(async () => ({
+        kind: "loaded" as const,
+        revision: "revision",
+        messages:
+          nativeState === "present"
+            ? rawMessages
+            : nativeState === "result-only"
+              ? [result]
+              : buildMessages(1),
+      }));
+      const source = createSessionDisplaySource({
+        scanner: {
+          getOrCreateProject: vi.fn(async () => ({
+            ...project(),
+            provider: "codex" as const,
+          })),
+        },
+        providerResolution: {
+          readerFactory: () => reader as never,
+          codexReaderFactory: () => reader as never,
+        },
+        codexAppServerHistoryReader: {
+          getSemanticTurn,
+          getSemanticTurnsPage: vi.fn(),
+        },
+      });
+      const detail = await source.detail(
+        { projectId: PROJECT_ID, sessionId: SESSION_ID },
+        "turn",
+        "raw-call",
+      );
+      expect(detail).toEqual(rawMessages);
+      expect(reader.getSession).toHaveBeenCalledTimes(
+        nativeState === "present" ? 0 : 1,
+      );
+      expect(getSemanticTurn).toHaveBeenCalledOnce();
+    },
+  );
+
   it("shares concurrent file-index scans and isolates app instances", async () => {
     const { app, getSession } = createRoutes(2);
     const path = `/projects/${PROJECT_ID}/sessions/${SESSION_ID}/files`;

@@ -760,6 +760,7 @@ function processMessage(
         sourceMessages: [msg],
         isSubagent: msg.isSubagent,
         augmentHtml: messageHtml ?? augments?.markdown?.[msgId]?.html,
+        isStreaming: msg._isStreaming === true,
       });
     }
     return;
@@ -797,17 +798,10 @@ function processMessage(
   }
 
   // Assistant message - process each block
-  // First pass: find the last text block index (for streaming cursor placement)
-  let lastTextBlockIndex = -1;
-  if (msg._isStreaming) {
-    for (let i = content.length - 1; i >= 0; i--) {
-      const block = content[i];
-      if (block?.type === "text" && block.text?.trim()) {
-        lastTextBlockIndex = i;
-        break;
-      }
-    }
-  }
+  // A later thinking/tool block closes the earlier prose, even within one message.
+  const streamingBlockIndex = msg._isStreaming
+    ? (msg._streamingBlockIndex ?? content.length - 1)
+    : -1;
 
   for (let i = 0; i < content.length; i++) {
     const block = content[i];
@@ -827,8 +821,8 @@ function processMessage(
           ...(msg.codexAsyncMessage && { asyncMessage: msg.codexAsyncMessage }),
           sourceMessages: [msg],
           isSubagent: msg.isSubagent,
-          // Only show streaming cursor on the last text block
-          isStreaming: msg._isStreaming && i === lastTextBlockIndex,
+          // Only the block currently receiving deltas owns the cursor.
+          isStreaming: i === streamingBlockIndex,
           // Prefer inline _html from server, fall back to markdownAugments (SSE path)
           augmentHtml: blockHtml ?? augments?.markdown?.[msgId]?.html,
         });
@@ -840,7 +834,7 @@ function processMessage(
           id: blockId,
           thinking: block.thinking,
           signature: undefined,
-          status: "complete",
+          status: i === streamingBlockIndex ? "streaming" : "complete",
           sourceMessages: [msg],
           isSubagent: msg.isSubagent,
         });

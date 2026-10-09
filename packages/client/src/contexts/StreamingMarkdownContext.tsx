@@ -24,10 +24,13 @@ interface StreamingHandlers {
 interface StreamingMarkdownContextValue {
   /**
    * Register as the current streaming text block handler.
-   * Only one handler can be registered at a time (the streaming TextBlock).
+   * Handlers are scoped to a message so subagent prose cannot steal main output.
    * Returns an unregister function.
    */
-  registerStreamingHandler: (handlers: StreamingHandlers) => () => void;
+  registerStreamingHandler: (
+    handlers: StreamingHandlers,
+    messageId?: string,
+  ) => () => void;
 
   /**
    * Dispatch an augment event to the current streaming handler.
@@ -76,27 +79,27 @@ interface StreamingMarkdownProviderProps {
 export function StreamingMarkdownProvider({
   children,
 }: StreamingMarkdownProviderProps) {
-  // Current streaming handler (only one TextBlock at a time is streaming)
-  const handlersRef = useRef<StreamingHandlers | null>(null);
+  const handlersRef = useRef(new Map<string, StreamingHandlers>());
 
-  // Current streaming message ID (for debugging/tracking, not used for dispatch)
+  // Main stream identity for pending/end events that do not carry a message ID.
   const currentMessageIdRef = useRef<string | null>(null);
+  const captureMessageIdRef = useRef<string | null>(null);
 
   const registerStreamingHandler = useCallback(
-    (handlers: StreamingHandlers): (() => void) => {
+    (handlers: StreamingHandlers, messageId = ""): (() => void) => {
       if (
         typeof window !== "undefined" &&
         (window as unknown as { __STREAMING_DEBUG__?: boolean })
           .__STREAMING_DEBUG__
       ) {
         console.log("%c[CONTEXT] Handler registered", "color: #2196F3", {
-          hadPreviousHandler: !!handlersRef.current,
+          hadPreviousHandler: handlersRef.current.has(messageId),
         });
       }
-      handlersRef.current = handlers;
+      handlersRef.current.set(messageId, handlers);
       return () => {
         // Only unregister if this is still the current handler
-        if (handlersRef.current === handlers) {
+        if (handlersRef.current.get(messageId) === handlers) {
           if (
             typeof window !== "undefined" &&
             (window as unknown as { __STREAMING_DEBUG__?: boolean })
@@ -104,7 +107,7 @@ export function StreamingMarkdownProvider({
           ) {
             console.log("%c[CONTEXT] Handler unregistered", "color: #FF5722");
           }
-          handlersRef.current = null;
+          handlersRef.current.delete(messageId);
         }
       };
     },
@@ -113,6 +116,7 @@ export function StreamingMarkdownProvider({
 
   const setCurrentMessageId = useCallback((messageId: string | null) => {
     currentMessageIdRef.current = messageId;
+    if (messageId) captureMessageIdRef.current = messageId;
   }, []);
 
   const dispatchAugment = useCallback((augment: AugmentEvent) => {
@@ -126,7 +130,10 @@ export function StreamingMarkdownProvider({
         augment: { blockIndex: augment.blockIndex, type: augment.type },
       });
     }
-    handlersRef.current?.onAugment(augment);
+    const id = augment.messageId ?? currentMessageIdRef.current ?? "";
+    (handlersRef.current.get(id) ?? handlersRef.current.get(""))?.onAugment(
+      augment,
+    );
   }, []);
 
   const dispatchPending = useCallback((pending: PendingEvent) => {
@@ -140,17 +147,28 @@ export function StreamingMarkdownProvider({
         htmlLength: pending.html.length,
       });
     }
-    handlersRef.current?.onPending(pending);
+    const id = pending.messageId ?? currentMessageIdRef.current ?? "";
+    (handlersRef.current.get(id) ?? handlersRef.current.get(""))?.onPending(
+      pending,
+    );
   }, []);
 
   const dispatchStreamEnd = useCallback(() => {
-    handlersRef.current?.onStreamEnd();
+    (
+      handlersRef.current.get(currentMessageIdRef.current ?? "") ??
+      handlersRef.current.get("")
+    )?.onStreamEnd();
     // Clear current message ID after stream ends
     currentMessageIdRef.current = null;
   }, []);
 
   const captureStreamingHtml = useCallback((): string | null => {
-    return handlersRef.current?.captureHtml?.() ?? null;
+    return (
+      (
+        handlersRef.current.get(captureMessageIdRef.current ?? "") ??
+        handlersRef.current.get("")
+      )?.captureHtml?.() ?? null
+    );
   }, []);
 
   const value: StreamingMarkdownContextValue = {

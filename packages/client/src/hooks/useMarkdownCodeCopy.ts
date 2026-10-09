@@ -144,7 +144,8 @@ export function serializeMarkdownWithoutCopyControls(
 ): string {
   if (
     !container.querySelector(COPY_CONTROL_SELECTOR) &&
-    !container.querySelector(`.${COPYABLE_PRE_CLASS}`)
+    !container.querySelector(`.${COPYABLE_PRE_CLASS}`) &&
+    !container.querySelector(".text-streaming-tail")
   ) {
     return container.innerHTML;
   }
@@ -152,6 +153,9 @@ export function serializeMarkdownWithoutCopyControls(
   const clone = container.cloneNode(true) as HTMLElement;
   for (const control of clone.querySelectorAll(COPY_CONTROL_SELECTOR)) {
     control.remove();
+  }
+  for (const tail of clone.querySelectorAll(".text-streaming-tail")) {
+    tail.classList.remove("text-streaming-tail");
   }
   for (const pre of clone.querySelectorAll(`.${COPYABLE_PRE_CLASS}`)) {
     pre.classList.remove(COPYABLE_PRE_CLASS);

@@ -37,6 +37,7 @@ import {
 interface Props {
   text: string;
   isStreaming?: boolean;
+  streamingMessageId?: string;
   phase?: "commentary" | "final_answer";
   asyncMessage?: CodexAsyncMessage;
   /** Pre-rendered HTML from server (for completed messages) */
@@ -177,6 +178,7 @@ function renderPlainTextWithLocalMediaLinks(text: string): React.ReactNode {
 export const TextBlock = memo(function TextBlock({
   text,
   isStreaming = false,
+  streamingMessageId,
   phase,
   asyncMessage,
   augmentHtml,
@@ -217,19 +219,22 @@ export const TextBlock = memo(function TextBlock({
     }
 
     // Register handlers with the context
-    const unregister = streamingContext.registerStreamingHandler({
-      onAugment: (augment) => {
-        // Mark that we're using streaming content on first augment
-        setUseStreamingContent(true);
-        streamingMarkdown.onAugment(augment);
+    const unregister = streamingContext.registerStreamingHandler(
+      {
+        onAugment: (augment) => {
+          // Mark that we're using streaming content on first augment
+          setUseStreamingContent(true);
+          streamingMarkdown.onAugment(augment);
+        },
+        onPending: streamingMarkdown.onPending,
+        onStreamEnd: streamingMarkdown.onStreamEnd,
+        captureHtml: streamingMarkdown.captureHtml,
       },
-      onPending: streamingMarkdown.onPending,
-      onStreamEnd: streamingMarkdown.onStreamEnd,
-      captureHtml: streamingMarkdown.captureHtml,
-    });
+      streamingMessageId,
+    );
 
     return unregister;
-  }, [isStreaming, streamingContext, streamingMarkdown]);
+  }, [isStreaming, streamingContext, streamingMarkdown, streamingMessageId]);
 
   const {
     modal,
@@ -313,6 +318,48 @@ export const TextBlock = memo(function TextBlock({
     appliedAugmentRef.current = { host, html: augmentHtml };
   }, [augmentHtml, showAugmentHost]);
 
+  // Anchor to the actual prose tail, including nested lists/code, rather than
+  // the outer HTML host (whose ::after creates a separate empty line).
+  useLayoutEffect(() => {
+    if (!isStreaming || benchmarkEval) return;
+    const host = blockRef.current?.querySelector(
+      showStreamingContent
+        ? ".text-block-live"
+        : showAugmentHost
+          ? ".text-block-markdown"
+          : ".text-block-plain",
+    );
+    if (!host) return;
+    let tail: Element | null = null;
+    const update = () => {
+      const walker = document.createTreeWalker(host, NodeFilter.SHOW_TEXT);
+      let next: Element | null = null;
+      while (walker.nextNode()) {
+        const node = walker.currentNode;
+        if (
+          node.textContent?.trim() &&
+          !node.parentElement?.closest("button, [aria-hidden='true']")
+        )
+          next = node.parentElement;
+      }
+      if (next === tail) return;
+      tail?.classList.remove("text-streaming-tail");
+      tail = next;
+      tail?.classList.add("text-streaming-tail");
+    };
+    update();
+    const observer = new MutationObserver(update);
+    observer.observe(host, {
+      childList: true,
+      characterData: true,
+      subtree: true,
+    });
+    return () => {
+      observer.disconnect();
+      tail?.classList.remove("text-streaming-tail");
+    };
+  }, [isStreaming, showStreamingContent, showAugmentHost, benchmarkEval]);
+
   // Always render streaming container when isStreaming so refs are attached
   // before first augment arrives. Hidden until useStreamingContent becomes true.
   const renderStreamingContainer = isStreaming;
@@ -344,7 +391,10 @@ export const TextBlock = memo(function TextBlock({
       )}
       {/* Always render streaming elements when streaming so refs are ready for augments */}
       {renderStreamingContainer && (
-        <div style={showStreamingContent ? undefined : { display: "none" }}>
+        <div
+          className="text-block-live"
+          style={showStreamingContent ? undefined : { display: "none" }}
+        >
           <div
             ref={streamingMarkdown.containerRef}
             className="streaming-blocks"
@@ -362,7 +412,7 @@ export const TextBlock = memo(function TextBlock({
           <BenchmarkEvalResult block={benchmarkEval} />
         ) : augmentHtml ? (
           // Content is written by the layout effect above (see why there).
-          <div ref={augmentHostRef} />
+          <div ref={augmentHostRef} className="text-block-markdown" />
         ) : (
           // Plain text fallback (no server augment available)
           <p className="text-block-plain">

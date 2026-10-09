@@ -516,11 +516,17 @@ export async function createStreamAugmenter(
       options?: StreamAugmenterProcessOptions,
     ): Promise<void> {
       const mode = options?.mode ?? "live";
+      const subagent =
+        message.isSubagent === true ||
+        message.isSidechain === true ||
+        Boolean(message.parent_tool_use_id || message.parentToolUseId);
 
-      if (mode === "live") {
+      if (mode === "live" && !subagent) {
         // Track message ID from message_start or assistant messages.
         const streamStartMessageId = extractMessageIdFromStart(message);
         if (streamStartMessageId) {
+          if (streamStartMessageId !== currentStreamingMessageId)
+            coordinator?.reset();
           streamedMessageIds.add(streamStartMessageId);
         }
         const messageId =
@@ -542,7 +548,9 @@ export async function createStreamAugmenter(
       // Replay carries complete historical messages. Feeding their text into
       // the coordinator would generate duplicate pending/delta UI and could
       // contaminate the next live message's streaming state.
-      if (mode === "replay") return;
+      // Child streams retain their raw text and final markdown. They must not
+      // enter the single main-message Markdown coordinator or flush its tail.
+      if (mode === "replay" || subagent) return;
 
       // Process text deltas for streaming markdown.
       // `extractTextFromAssistant` exists for providers that never stream

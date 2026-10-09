@@ -189,11 +189,12 @@ export function createSessionSubscription(
       return;
     }
     const aug = await getAugmenter();
-    await aug.processMessage(message, { mode });
+    const routedMessage = markSubagent(message);
+    await aug.processMessage(routedMessage, { mode });
     if (completed) return;
-    emit("message", markSubagent(message));
+    emit("message", routedMessage);
 
-    if (mode === "replay") return;
+    if (mode === "replay" || routedMessage.isSubagent) return;
 
     const streamStartMessageId = extractMessageIdFromStart(message);
     if (streamStartMessageId) {

@@ -103,6 +103,26 @@ function messageContent(message: RecordValue): unknown {
   return asRecord(message.message)?.content ?? message.content;
 }
 
+function hasToolInvocation(messages: readonly Message[]): boolean {
+  return messages.some((message) => {
+    const content = messageContent(message);
+    return (
+      Array.isArray(content) &&
+      content.some((block) => asRecord(block)?.type === "tool_use")
+    );
+  });
+}
+
+function displayTextIdentity(message: RecordValue): string {
+  if (typeof message.codexCorrelationKey === "string")
+    return message.codexCorrelationKey;
+  const raw = String(message.uuid ?? message.id ?? "");
+  const run = message.codexTurnId ?? message.turnId;
+  if (typeof run === "string" && raw.endsWith(`-${run}`))
+    return `codex:${run}:agent-message:${raw.slice(0, -run.length - 1)}`;
+  return String(asRecord(message.message)?.id ?? raw);
+}
+
 /** Retained replay overlay contains display facts/previews, never raw bodies. */
 export function compactDisplayMessage(message: RecordValue): RecordValue {
   const result: RecordValue = {};
@@ -129,6 +149,8 @@ export function compactDisplayMessage(message: RecordValue): RecordValue {
     "isSubagent",
     "isSidechain",
     "_isStreaming",
+    "_isStreamingPlaceholder",
+    "_streamingBlockIndex",
     "error",
     "parentUuid",
     "branch",
@@ -216,6 +238,7 @@ export function compactDisplayMessage(message: RecordValue): RecordValue {
           for (const key of [
             "command",
             "cmd",
+            "script",
             "file_path",
             "path",
             "url",
@@ -237,10 +260,19 @@ export function compactDisplayMessage(message: RecordValue): RecordValue {
           return {
             type: "tool_use",
             id: block.id,
-            displayChangedPaths: extractToolPaths(block.input),
-            name: block.name,
-            status: block.status,
-            ...(block.input !== undefined ? { input: args } : {}),
+            // Output deltas omit invocation metadata. Keep those keys absent
+            // so merging a delta cannot erase the original name or status.
+            ...(block.name !== undefined ? { name: block.name } : {}),
+            ...(block.status !== undefined ? { status: block.status } : {}),
+            ...(block.input !== undefined
+              ? {
+                  input:
+                    typeof block.input === "string"
+                      ? block.input.slice(0, 1_024)
+                      : args,
+                  displayChangedPaths: extractToolPaths(block.input),
+                }
+              : {}),
             ...(typeof block.partialOutput === "string"
               ? { partialOutput: block.partialOutput.slice(-2_048) }
               : {}),
@@ -374,9 +406,10 @@ export class SessionDisplayService {
     this.expire(entry);
   }
 
-  private rememberBody(entry: Entry, message: RecordValue): void {
+  private rememberBody(entry: Entry, message: RecordValue): RecordValue {
     const content = messageContent(message);
-    if (!Array.isArray(content)) return;
+    if (!Array.isArray(content)) return message;
+    const mergedBlocks = new Map<unknown, RecordValue>();
     const blocks = content.filter((v) => {
       const b = asRecord(v);
       return b?.type === "tool_use" || b?.type === "tool_result";
@@ -394,11 +427,13 @@ export class SessionDisplayService {
         previous && Array.isArray(previous.message?.content)
           ? asRecord(previous.message.content[0])
           : undefined;
+      const mergedBlock = { ...oldBlock, ...block };
+      mergedBlocks.set(value, mergedBlock);
       const next = {
         ...message,
         message: {
           role: asRecord(message.message)?.role ?? message.type,
-          content: [{ ...oldBlock, ...block }],
+          content: [mergedBlock],
         },
       } as Message;
       const bytes = JSON.stringify(next).length * 2;
@@ -416,6 +451,50 @@ export class SessionDisplayService {
         entry.details.delete(first[0]);
       }
     }
+    // A returning reader may only have the invocation in subscription replay,
+    // while persisted history still lacks the running command. Hydrate live
+    // deltas from that invocation before building the compact display overlay.
+    return {
+      ...message,
+      message: {
+        ...asRecord(message.message),
+        content: content.map((block) => mergedBlocks.get(block) ?? block),
+      },
+    };
+  }
+
+  private stopStreaming(
+    entry: Entry,
+    options: {
+      exceptId?: string;
+      onlyId?: string;
+      runId?: string;
+      supersededBy?: string;
+    } = {},
+  ): void {
+    for (const [id, pending] of entry.overlay) {
+      if (
+        (pending._isStreaming !== true &&
+          !(pending._isStreamingPlaceholder && options.supersededBy)) ||
+        id === options.exceptId ||
+        (options.onlyId && id !== options.onlyId) ||
+        (options.runId &&
+          (pending.codexTurnId ?? pending.turnId) !== options.runId)
+      )
+        continue;
+      const stopped = {
+        ...pending,
+        _isStreaming: false,
+        _isStreamingPlaceholder: true,
+        ...(options.supersededBy &&
+        !pending._displaySupersededBy &&
+        displayTextIdentity(pending) !== options.supersededBy
+          ? { _displaySupersededBy: options.supersededBy }
+          : {}),
+      };
+      entry.overlay.set(id, stopped);
+      entry.model?.message(stopped);
+    }
   }
 
   private event(entry: Entry, type: string, data: unknown): void {
@@ -426,10 +505,18 @@ export class SessionDisplayService {
       typeof message?.messageId === "string" &&
       typeof message.text === "string"
     ) {
+      const previous = entry.overlay.get(message.messageId);
+      if (
+        (previous && previous._isStreaming !== true) ||
+        entry.model?.isMessageCommitted(message.messageId)
+      )
+        return;
       this.event(entry, "message", {
+        ...previous,
         type: "assistant",
         uuid: message.messageId,
         _isStreaming: true,
+        _isStreamingPlaceholder: true,
         message: { role: "assistant", content: message.text },
       });
       return;
@@ -444,10 +531,10 @@ export class SessionDisplayService {
         message.parentToolUseId
       )
         return;
-      this.rememberBody(entry, message);
+      const remembered = this.rememberBody(entry, message);
       if (message.isReplay === true) {
         if (!entry.model && entry.bootstrapReplay.length < 500)
-          entry.bootstrapReplay.push(compactDisplayMessage(message));
+          entry.bootstrapReplay.push(compactDisplayMessage(remembered));
         return;
       }
       if (
@@ -490,32 +577,124 @@ export class SessionDisplayService {
       }
       let compact: RecordValue;
       if (message.type === "stream_event") {
+        const runId = message.codexTurnId ?? message.turnId;
+        if (typeof runId === "string" && entry.model?.isRunEnded(runId)) return;
         const event = asRecord(message.event);
-        if (event?.type === "message_start")
+        if (event?.type === "message_start") {
+          this.stopStreaming(entry);
           entry.streamId = asRecord(event.message)?.id as string | undefined;
-        const delta = asRecord(event?.delta);
+          this.scheduleFlush(entry);
+          return;
+        }
+        // Codex deltas identify their item directly and do not emit message_start.
+        const id = message.codexTurnId
+          ? (message.uuid ?? message.id)
+          : (entry.streamId ?? message.uuid ?? message.id);
+        if (typeof id !== "string") return;
         if (
-          event?.type !== "content_block_delta" ||
-          delta?.type !== "text_delta" ||
-          typeof delta.text !== "string"
+          event?.type === "content_block_stop" ||
+          event?.type === "message_stop"
+        ) {
+          this.stopStreaming(entry, { onlyId: id });
+          if (event.type === "message_stop") entry.streamId = undefined;
+          this.scheduleFlush(entry);
+          return;
+        }
+        const delta = asRecord(event?.delta);
+        const start = event?.type === "content_block_start";
+        const block = asRecord(event?.content_block);
+        if (start) this.stopStreaming(entry);
+        const deltaText =
+          start && block?.type === "text"
+            ? (block.text ?? "")
+            : event?.type === "content_block_delta" &&
+                delta?.type === "text_delta"
+              ? delta.text
+              : undefined;
+        if (typeof deltaText !== "string") {
+          this.scheduleFlush(entry);
+          return;
+        }
+        const previous = entry.overlay.get(id);
+        // A late delta must not resurrect a stopped or committed message.
+        if (
+          previous &&
+          previous._isStreaming !== true &&
+          (!start || previous._isStreamingPlaceholder !== true)
         )
           return;
-        const id = entry.streamId ?? message.uuid ?? message.id;
-        if (typeof id !== "string") return;
-        const previous = entry.overlay.get(id);
-        const text = messageContent(previous ?? {});
+        if (!previous || start) this.stopStreaming(entry, { exceptId: id });
+        const index =
+          typeof event?.index === "number" &&
+          Number.isSafeInteger(event.index) &&
+          event.index >= 0 &&
+          event.index < 10_000
+            ? event.index
+            : 0;
+        const content = messageContent(previous ?? {});
+        const blocks: RecordValue[] = Array.isArray(content)
+          ? content.map((b) => ({ ...asRecord(b) }))
+          : typeof content === "string"
+            ? [{ type: "text", text: content }]
+            : [];
+        while (blocks.length <= index) blocks.push({ type: "text", text: "" });
+        const oldText = start ? "" : blocks[index]?.text;
+        blocks[index] = {
+          type: "text",
+          text: (typeof oldText === "string" ? oldText : "") + deltaText,
+        };
         compact = compactDisplayMessage({
+          ...previous,
           ...message,
           uuid: id,
           type: "assistant",
           _isStreaming: true,
+          _isStreamingPlaceholder: true,
+          _streamingBlockIndex: index,
           message: {
             role: "assistant",
             id,
-            content: (typeof text === "string" ? text : "") + delta.text,
+            content: blocks,
           },
         });
-      } else compact = compactDisplayMessage(message);
+      } else {
+        compact = compactDisplayMessage(remembered);
+        const content = messageContent(message);
+        const hasTool =
+          Array.isArray(content) &&
+          content.some((b) => asRecord(b)?.type === "tool_use");
+        const isPrompt =
+          message.type === "user" &&
+          !(
+            Array.isArray(content) &&
+            content.some((b) => asRecord(b)?.type === "tool_result")
+          );
+        if (
+          message.type === "assistant" ||
+          hasTool ||
+          isPrompt ||
+          message.type === "result" ||
+          message.type === "error" ||
+          message.subtype === "turn_complete"
+        ) {
+          const run = message.codexTurnId ?? message.turnId;
+          this.stopStreaming(entry, {
+            ...(!isPrompt && typeof run === "string" ? { runId: run } : {}),
+            ...(message._isStreaming === true
+              ? { exceptId: String(message.uuid ?? message.id) }
+              : {}),
+            ...(message.type === "assistant" &&
+            typeof run === "string" &&
+            !message._isStreaming &&
+            !hasTool &&
+            (typeof content === "string" ||
+              (Array.isArray(content) &&
+                content.some((b) => asRecord(b)?.type === "text")))
+              ? { supersededBy: displayTextIdentity(message) }
+              : {}),
+          });
+        }
+      }
       if (entry.provider === "pi" || entry.provider === "kimi") {
         // Prose ids differ between live and persisted entries for these
         // providers; stable tool ids stream while source reads reconcile prose.
@@ -629,6 +808,16 @@ export class SessionDisplayService {
       entry.sourceSubscription = null;
     }
     entry.controls.set(type, data);
+    if (
+      type === "complete" ||
+      type === "error" ||
+      (type === "retry-status" && message?.retryStatus) ||
+      ((type === "connected" || type === "status") &&
+        ["idle", "hold", "waiting-input"].includes(String(message?.state)))
+    ) {
+      this.stopStreaming(entry);
+      entry.model?.stopStreaming();
+    }
     if (type === "connected" || type === "status") {
       if (message?.state === "in-turn") entry.model?.setRuntime("running");
       else if (message?.state === "waiting-input")
@@ -733,6 +922,9 @@ export class SessionDisplayService {
   }
 
   private acknowledgePersisted(entry: Entry, page: DisplaySourcePage): void {
+    for (const [runId, status] of Object.entries(page.turnStatuses ?? {})) {
+      if (status !== "running") this.stopStreaming(entry, { runId });
+    }
     const results = new Set<string>();
     const questions = new Set<string>();
     const texts = new Map<string, string>();
@@ -758,14 +950,7 @@ export class SessionDisplayService {
       ]);
     };
     const completedAnswerTurns = new Set<string>();
-    const identity = (message: RecordValue) =>
-      String(
-        message.codexCorrelationKey ??
-          asRecord(message.message)?.id ??
-          message.uuid ??
-          message.id ??
-          "",
-      );
+    const identity = displayTextIdentity;
     const text = (content: unknown) =>
       typeof content === "string"
         ? content
@@ -857,13 +1042,26 @@ export class SessionDisplayService {
       const tools = blocks.filter(
         (block) => block?.type === "tool_use" || block?.type === "tool_result",
       );
+      // A later committed item can replace an abandoned sampling attempt while
+      // the turn keeps running. Wait for that specific replacement in history;
+      // until then retain the partial text with its streaming indicator stopped.
+      if (
+        message._isStreamingPlaceholder === true &&
+        !tools.length &&
+        typeof message._displaySupersededBy === "string" &&
+        texts.has(message._displaySupersededBy)
+      ) {
+        entry.overlay.delete(key);
+        continue;
+      }
       // A sampling retry can abandon an item mid-delta and finish under a new
       // item ID. It will never have an exact persisted identity/text match.
       // Retire only transient prose from a turn whose completed final answer
       // is in this source page; live completion alone can race persistence.
       if (
         message.type === "assistant" &&
-        message._isStreaming === true &&
+        (message._isStreaming === true ||
+          message._isStreamingPlaceholder === true) &&
         !tools.length &&
         typeof turnId === "string" &&
         completedAnswerTurns.has(turnId)
@@ -1128,7 +1326,10 @@ export class SessionDisplayService {
       ),
       [locator.rawId],
     );
-    if (!messages.length || !messages.some((m) => m.type === "user")) {
+    if (
+      !hasToolInvocation(messages) ||
+      !messages.some((m) => m.type === "user")
+    ) {
       const persisted = await this.requireSource().detail(
         selection,
         locator.runId,
@@ -1136,6 +1337,8 @@ export class SessionDisplayService {
       );
       if (persisted.length) messages = persisted;
     }
+    if (!hasToolInvocation(messages))
+      throw new Error("Tool invocation is unavailable");
     // Persisted detail may only contain the original invocation. Keep the
     // current output tail independent of that body, including JSON pagination.
     const output = this.toolOutput(entry, toolId);

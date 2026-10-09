@@ -176,6 +176,11 @@ export const RenderItemComponent = memo(function RenderItemComponent({
           <TextBlock
             text={item.text}
             isStreaming={item.isStreaming}
+            streamingMessageId={
+              item.sourceMessages[0]
+                ? getMessageId(item.sourceMessages[0])
+                : undefined
+            }
             augmentHtml={item.augmentHtml}
             phase={item.phase}
             asyncMessage={item.asyncMessage}

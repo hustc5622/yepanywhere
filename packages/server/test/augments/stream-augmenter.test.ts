@@ -20,6 +20,68 @@ async function createHarness() {
 }
 
 describe("createStreamAugmenter", () => {
+  it("does not let a child stream reset or flush the main Markdown tail", async () => {
+    const { augmenter, captured } = await createHarness();
+    const start = (id: string, child = false) =>
+      augmenter.processMessage({
+        type: "stream_event",
+        ...(child ? { parent_tool_use_id: "task" } : {}),
+        event: { type: "message_start", message: { id } },
+      });
+    const delta = (text: string, child = false) =>
+      augmenter.processMessage({
+        type: "stream_event",
+        ...(child ? { parent_tool_use_id: "task" } : {}),
+        event: {
+          type: "content_block_delta",
+          delta: { type: "text_delta", text },
+        },
+      });
+    await start("main");
+    await delta("Main ");
+    await start("child", true);
+    await delta("Child text", true);
+    await augmenter.processMessage({
+      type: "stream_event",
+      parent_tool_use_id: "task",
+      event: { type: "message_stop" },
+    });
+    expect(augmenter.getCurrentMessageId()).toBe("main");
+    await delta("continues.\n\n");
+    await augmenter.flush();
+    const html = captured.augments.map((a) => a.html).join("");
+    expect(html).toContain("Main continues.");
+    expect(html).not.toContain("Child text");
+    expect(captured.augments.every((a) => a.messageId === "main")).toBe(true);
+  });
+
+  it("starts retry Markdown cleanly even when the previous message never stopped", async () => {
+    const { augmenter, captured } = await createHarness();
+    for (const [id, text] of [
+      ["abandoned", "Abandoned draft"],
+      ["retry", "Actual answer.\n\n"],
+    ]) {
+      await augmenter.processMessage({
+        type: "stream_event",
+        event: { type: "message_start", message: { id } },
+      });
+      await augmenter.processMessage({
+        type: "stream_event",
+        event: {
+          type: "content_block_delta",
+          delta: { type: "text_delta", text },
+        },
+      });
+    }
+    await augmenter.flush();
+    const retry = captured.augments
+      .filter((a) => a.messageId === "retry")
+      .map((a) => a.html)
+      .join("");
+    expect(retry).toContain("Actual answer.");
+    expect(retry).not.toContain("Abandoned draft");
+  });
+
   it("does not replay a streamed message's text through the coordinator", async () => {
     const { augmenter, captured } = await createHarness();
 

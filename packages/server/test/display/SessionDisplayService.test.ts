@@ -57,6 +57,254 @@ function fixture(pollMs = 60_000) {
   };
 }
 describe("SessionDisplayService", () => {
+  it.each([
+    "tool",
+    "progress",
+    "retry",
+    "idle",
+    "hold",
+    "waiting-input",
+    "completed",
+    "failed",
+    "interrupted",
+  ])(
+    "closes transient prose on %s and does not revive it on refresh/reconnect",
+    async (boundary) => {
+      vi.useFakeTimers();
+      const { service, source, push } = fixture(10);
+      const initial = await source.read();
+      await service.subscribe(selection, vi.fn());
+      const delta = (text: string) =>
+        push("message", {
+          type: "stream_event",
+          uuid: "draft-turn",
+          codexTurnId: "turn",
+          event: {
+            type: "content_block_delta",
+            index: 0,
+            delta: { type: "text_delta", text },
+          },
+        });
+      delta("Partial text worth keeping");
+      const texts = (snapshot: SessionDisplaySnapshot) =>
+        snapshot.nodes.flatMap((n) =>
+          n.type === "segment" && n.segment.type === "assistant_text"
+            ? [n.segment]
+            : [],
+        );
+      expect(texts(await service.snapshot(selection))[0]?.streaming).toBe(true);
+      if (boundary === "tool")
+        push("message", {
+          type: "assistant",
+          uuid: "tool-turn",
+          codexTurnId: "turn",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "call",
+                name: "Bash",
+                input: { command: "pwd" },
+              },
+            ],
+          },
+        });
+      else if (boundary === "progress")
+        push("message", {
+          type: "assistant",
+          uuid: "next-turn",
+          codexTurnId: "turn",
+          codexMessagePhase: "commentary",
+          message: { role: "assistant", content: "Replacement progress" },
+        });
+      else if (boundary === "retry")
+        push("retry-status", {
+          retryStatus: { attempt: 1, message: "Retrying" },
+        });
+      else if (["idle", "hold", "waiting-input"].includes(boundary))
+        push("status", { state: boundary });
+      else
+        push("message", {
+          type: "system",
+          subtype: "turn_complete",
+          codexTurnId: "turn",
+          turnStatus: boundary,
+        });
+      delta(" late token");
+      expect(texts(await service.snapshot(selection))[0]).toMatchObject({
+        content: "Partial text worth keeping",
+        streaming: false,
+      });
+      source.read.mockResolvedValue({ ...initial, stamp: "2" });
+      source.stamp.mockResolvedValue("2");
+      await vi.advanceTimersByTimeAsync(25);
+      const reconnect = vi.fn();
+      await service.subscribe(selection, reconnect);
+      const snapshot = reconnect.mock.calls.find(
+        ([type]) => type === "display-snapshot",
+      )?.[1];
+      expect(texts(snapshot)[0]).toMatchObject({
+        content: "Partial text worth keeping",
+        streaming: false,
+      });
+    },
+  );
+
+  it("keeps stream blocks separate and closes each block without waiting for the assistant commit", async () => {
+    const { service, source, push } = fixture();
+    source.read.mockResolvedValue({
+      ...(await source.read()),
+      provider: "claude",
+    });
+    await service.subscribe(selection, vi.fn());
+    const emit = (event: Record<string, unknown>) =>
+      push("message", { type: "stream_event", uuid: "event", event });
+    emit({ type: "message_start", message: { id: "claude-message" } });
+    for (const [index, text] of ["First", "Second"].entries()) {
+      emit({
+        type: "content_block_start",
+        index,
+        content_block: { type: "text", text: "" },
+      });
+      emit({
+        type: "content_block_delta",
+        index,
+        delta: { type: "text_delta", text },
+      });
+      emit({ type: "content_block_stop", index });
+    }
+    emit({ type: "message_stop" });
+    const texts = (await service.snapshot(selection)).nodes.flatMap((n) =>
+      n.type === "segment" && n.segment.type === "assistant_text"
+        ? [n.segment]
+        : [],
+    );
+    expect(texts).toMatchObject([
+      { content: "First", streaming: false },
+      { content: "Second", streaming: false },
+    ]);
+  });
+
+  it("keeps a newer turn streaming when a late terminal event or delta arrives for the old turn", async () => {
+    const { service, push } = fixture();
+    await service.subscribe(selection, vi.fn());
+    const delta = (turn: string, id: string) =>
+      push("message", {
+        type: "stream_event",
+        uuid: `${id}-${turn}`,
+        codexTurnId: turn,
+        event: {
+          type: "content_block_delta",
+          delta: { type: "text_delta", text: id },
+        },
+      });
+    delta("turn", "old");
+    push("message", {
+      type: "system",
+      subtype: "turn_complete",
+      codexTurnId: "turn",
+      turnStatus: "interrupted",
+    });
+    delta("new-turn", "new");
+    push("message", {
+      type: "system",
+      subtype: "turn_complete",
+      codexTurnId: "turn",
+      turnStatus: "interrupted",
+    });
+    delta("turn", "unknown-late-item");
+    const texts = (await service.snapshot(selection)).nodes.flatMap((n) =>
+      n.type === "segment" && n.segment.type === "assistant_text"
+        ? [n.segment]
+        : [],
+    );
+    expect(texts).toMatchObject([
+      { content: "old", streaming: false },
+      { content: "new", streaming: true },
+    ]);
+  });
+
+  it("retires a superseded draft once its replacement progress is persisted, while the turn is still running", async () => {
+    vi.useFakeTimers();
+    const { service, source, push } = fixture(10);
+    const initial = await source.read();
+    await service.subscribe(selection, vi.fn());
+    push("message", {
+      type: "stream_event",
+      uuid: "draft-turn",
+      codexTurnId: "turn",
+      event: {
+        type: "content_block_delta",
+        delta: { type: "text_delta", text: "Abandoned wording" },
+      },
+    });
+    const replacement: Message = {
+      type: "assistant",
+      uuid: "replacement-turn",
+      codexTurnId: "turn",
+      codexCorrelationKey: "codex:turn:agent-message:replacement",
+      codexMessagePhase: "commentary",
+      message: { role: "assistant", content: "Actual progress" },
+    };
+    push("message", replacement);
+    expect(JSON.stringify((await service.snapshot(selection)).nodes)).toContain(
+      "Abandoned wording",
+    );
+    source.read.mockResolvedValue({
+      ...initial,
+      messages: [...initial.messages, replacement],
+      stamp: "2",
+    });
+    source.stamp.mockResolvedValue("2");
+    await vi.advanceTimersByTimeAsync(25);
+    const snapshot = await service.snapshot(selection);
+    expect(snapshot.activity.state).toBe("running");
+    expect(JSON.stringify(snapshot.nodes)).not.toContain("Abandoned wording");
+    expect(JSON.stringify(snapshot.nodes)).toContain("Actual progress");
+  });
+
+  it("ignores stale catch-up text after a live stop or a persisted completion", async () => {
+    const { service, source, push } = fixture();
+    source.read.mockResolvedValue({
+      ...(await source.read()),
+      messages: [
+        {
+          uuid: "persisted-turn",
+          type: "assistant",
+          codexTurnId: "turn",
+          codexCorrelationKey: "codex:turn:agent-message:persisted",
+          message: { role: "assistant", content: "Final" },
+        },
+      ] as Message[],
+    });
+    await service.subscribe(selection, vi.fn());
+    push("display-text-catchup", {
+      messageId: "persisted-turn",
+      text: "Partial",
+    });
+    push("message", {
+      type: "stream_event",
+      uuid: "draft-turn",
+      codexTurnId: "turn",
+      event: {
+        type: "content_block_delta",
+        delta: { type: "text_delta", text: "Draft" },
+      },
+    });
+    push("status", { state: "hold" });
+    push("display-text-catchup", { messageId: "draft-turn", text: "Draft" });
+    const texts = (await service.snapshot(selection)).nodes.flatMap((n) =>
+      n.type === "segment" && n.segment.type === "assistant_text"
+        ? [n.segment]
+        : [],
+    );
+    expect(texts).toMatchObject([
+      { content: "Final", streaming: false },
+      { content: "Draft", streaming: false },
+    ]);
+  });
+
   it.each(["interAgentMessage", "subAgentActivity"])(
     "acknowledges persisted %s despite different live and rollout message ids",
     async (itemType) => {
@@ -250,7 +498,7 @@ describe("SessionDisplayService", () => {
       await vi.advanceTimersByTimeAsync(11);
       expect(texts(await service.snapshot(selection))).toContainEqual({
         content: "Original answer cut off",
-        streaming: true,
+        streaming: false,
       });
 
       delta("next", "next-turn", "Next turn in progress");
@@ -454,15 +702,14 @@ describe("SessionDisplayService", () => {
       ]);
       const groupId = displayToolId("turn", "slow").replace("dt2.", "dg2.");
       const snapshot = await service.snapshot(selection);
-      // "slow" never got a result while every later batch settled, so the
-      // projection retires it as `unknown` instead of spinning forever. It
-      // still belongs to the group and still counts toward its total.
+      // A Codex command can remain in the background across later batches.
+      // It stays in its original group until its own result arrives.
       expect(snapshot.nodes.find((node) => node.id === groupId)).toMatchObject({
         segment: {
           count,
           displayMode: "summary",
-          runningCount: 0,
-          unknownCount: 1,
+          runningCount: 1,
+          unknownCount: 0,
         },
       });
       const first = await service.group(selection, groupId);
@@ -478,7 +725,7 @@ describe("SessionDisplayService", () => {
       ]);
       expect(steps.every((step) => step.groupId === groupId)).toBe(true);
       expect(steps[0]).toMatchObject({
-        status: "unknown",
+        status: "running",
         summary: "run slow",
       });
       expect(earlier?.nextCursor).toBeUndefined();
@@ -492,8 +739,7 @@ describe("SessionDisplayService", () => {
         groupId,
         String(count > 50 ? 5 : count),
       );
-      // A late result always wins: retiring a stranded step is a display
-      // decision, never a refusal to accept the real outcome.
+      // Completion updates the same group even after it has collapsed.
       expect(updated.steps[0]).toMatchObject({ status: "completed" });
       expect(updated.total).toBe(count);
       expect(source.detail).not.toHaveBeenCalled();
@@ -535,6 +781,83 @@ describe("SessionDisplayService", () => {
     expect(earlier.nextCursor).toBeUndefined();
     expect(source.detail).toHaveBeenCalledWith(selection, "older-turn");
   });
+  it.each([
+    ["Bash", false],
+    ["Bash", true],
+    ["CodexExec", false],
+  ] as const)(
+    "preserves %s invocation metadata across output deltas and source refreshes (replay=%s)",
+    async (name, isReplay) => {
+      vi.useFakeTimers();
+      const { service, source, push } = fixture(10);
+      const initial = await source.read();
+      const script = 'text(await tools.exec_command({cmd:"pnpm test"}));';
+      const input = name === "Bash" ? { command: "pnpm test" } : { script };
+      const invocation = {
+        uuid: "command-turn",
+        type: "assistant",
+        codexTurnId: "turn",
+        message: {
+          role: "assistant",
+          content: [
+            {
+              type: "tool_use",
+              id: "command",
+              name,
+              input,
+              status: "in_progress",
+            },
+          ],
+        },
+      };
+      await service.subscribe(selection, vi.fn());
+      push("message", { ...invocation, isReplay });
+      push("message", {
+        ...invocation,
+        message: {
+          role: "assistant",
+          content: [
+            { type: "tool_use", id: "command", partialOutput: "first output" },
+          ],
+        },
+      });
+      source.read.mockResolvedValue({ ...initial, stamp: "2" });
+      source.stamp.mockResolvedValue("2");
+      await vi.advanceTimersByTimeAsync(25);
+      expect(source.read).toHaveBeenCalledTimes(3);
+      const snapshot = await service.snapshot(selection);
+      const groupId = displayToolId("turn", "command").replace("dt2.", "dg2.");
+      expect(snapshot.activity.runningCount).toBe(1);
+      expect((await service.group(selection, groupId)).steps).toMatchObject([
+        {
+          name,
+          status: "running",
+          summary: name === "Bash" ? "pnpm test" : script,
+        },
+      ]);
+      expect(
+        await service.output(selection, displayToolId("turn", "command")),
+      ).toMatchObject({
+        status: "running",
+        output: "first output",
+      });
+      const detail = await service.detail(
+        selection,
+        displayToolId("turn", "command"),
+      );
+      expect(detail.messages[0]?.message?.content).toMatchObject([
+        { type: "tool_use", name, input, status: "in_progress" },
+      ]);
+    },
+  );
+
+  it("reports unavailable tool details instead of returning a blank successful response", async () => {
+    const { service } = fixture();
+    await expect(
+      service.detail(selection, displayToolId("turn", "missing")),
+    ).rejects.toThrow("Tool invocation is unavailable");
+  });
+
   it("retains per-call image previews in the compact live tool replay", () => {
     const message = {
       type: "assistant",

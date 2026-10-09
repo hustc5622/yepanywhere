@@ -122,6 +122,12 @@ export interface AppMessageExtensions {
    */
   _isStreaming?: boolean;
 
+  /** Transient stream copy awaiting an authoritative assistant message. */
+  _isStreamingPlaceholder?: boolean;
+
+  /** Content block currently receiving deltas; other blocks are already closed. */
+  _streamingBlockIndex?: number;
+
   /**
    * True if this message is from a Task subagent.
    * Used for UI grouping and lazy-loading of subagent content.

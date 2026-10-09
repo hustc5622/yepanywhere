@@ -930,3 +930,38 @@ describe("mergeStreamMessage", () => {
     });
   });
 });
+
+describe("streaming completion reconciliation", () => {
+  it.each(["sdk", "jsonl"] as const)(
+    "clears transient state on %s completion",
+    (source) => {
+      const partial: Message = {
+        id: "message",
+        type: "assistant",
+        _source: "sdk",
+        _isStreaming: true,
+        _isStreamingPlaceholder: true,
+        _streamingBlockIndex: 0,
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Part" }],
+        },
+      };
+      const final: Message = {
+        id: "message",
+        type: "assistant",
+        message: {
+          role: "assistant",
+          content: [{ type: "text", text: "Full answer" }],
+        },
+      };
+      const merged = mergeMessage(partial, final, source);
+      expect(merged._isStreaming).toBe(false);
+      expect(merged._isStreamingPlaceholder).toBe(false);
+      expect(getMessageContent(merged)).toEqual([
+        { type: "text", text: "Full answer" },
+      ]);
+      expect(mergeMessage(merged, partial, "sdk")).toBe(merged);
+    },
+  );
+});

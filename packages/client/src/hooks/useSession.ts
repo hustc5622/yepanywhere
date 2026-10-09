@@ -1708,6 +1708,7 @@ export function useSession(
   const {
     handleStreamEvent,
     clearStreaming,
+    finishStreaming,
     cleanup: cleanupStreaming,
   } = useStreamingContent({
     onUpdateMessage: handleStreamingUpdate,
@@ -1726,13 +1727,26 @@ export function useSession(
   }, [cleanupStreaming]);
 
   const clearStreamingPlaceholders = useCallback(
-    (options?: { agentId?: string; allAgents?: boolean; main?: boolean }) => {
-      clearStreaming();
+    (options?: {
+      agentId?: string;
+      allAgents?: boolean;
+      main?: boolean;
+      turnId?: string;
+    }) => {
+      clearStreaming(options ?? {});
 
       const shouldClearMain = options?.main ?? !options?.agentId;
       if (shouldClearMain) {
         setMessages((prev) => {
-          const filtered = prev.filter((m) => !m._isStreaming);
+          const filtered = prev.filter(
+            (m) =>
+              (!m._isStreaming && !m._isStreamingPlaceholder) ||
+              Boolean(
+                options?.turnId &&
+                  m.codexTurnId &&
+                  m.codexTurnId !== options.turnId,
+              ),
+          );
           return filtered.length === prev.length ? prev : filtered;
         });
       }
@@ -1746,7 +1760,15 @@ export function useSession(
         for (const [currentAgentId, existing] of Object.entries(prev)) {
           if (agentId && currentAgentId !== agentId) continue;
 
-          const filtered = existing.messages.filter((m) => !m._isStreaming);
+          const filtered = existing.messages.filter(
+            (m) =>
+              (!m._isStreaming && !m._isStreamingPlaceholder) ||
+              Boolean(
+                options?.turnId &&
+                  m.codexTurnId &&
+                  m.codexTurnId !== options.turnId,
+              ),
+          );
           if (filtered.length === existing.messages.length) continue;
 
           if (!next) next = { ...prev };
@@ -1829,6 +1851,27 @@ export function useSession(
           }
         }
 
+        if (
+          (msgType === "assistant" &&
+            isToolUseOnlyAssistantMessage(sdkMessage)) ||
+          msgType === "result" ||
+          msgType === "error" ||
+          sdkMessage.subtype === "turn_complete"
+        ) {
+          const agentId = sdkMessage.isSubagent
+            ? ((sdkMessage.parentToolUseId ?? sdkMessage.agentId) as
+                | string
+                | undefined)
+            : undefined;
+          finishStreaming({
+            agentId,
+            turnId:
+              typeof sdkMessage.codexTurnId === "string"
+                ? sdkMessage.codexTurnId
+                : undefined,
+          });
+        }
+
         // For assistant messages, clear the matching streaming placeholder.
         // Skip pure tool_use messages: they don't represent the final form of
         // any streamed text/thinking, so clearing here would erase still-shown
@@ -1841,17 +1884,29 @@ export function useSession(
           // Use parentToolUseId as the routing key (it's the Task tool_use id)
           const isSubagentMsg =
             sdkMessage.isSubagent &&
-            typeof sdkMessage.parentToolUseId === "string";
+            (typeof sdkMessage.parentToolUseId === "string" ||
+              typeof sdkMessage.agentId === "string");
           const msgAgentId = isSubagentMsg
-            ? (sdkMessage.parentToolUseId as string)
+            ? ((sdkMessage.parentToolUseId ?? sdkMessage.agentId) as string)
             : undefined;
 
           if (msgAgentId) {
             // Remove streaming placeholders from this agent's content.
-            clearStreamingPlaceholders({ agentId: msgAgentId });
+            clearStreamingPlaceholders({
+              agentId: msgAgentId,
+              turnId:
+                typeof sdkMessage.codexTurnId === "string"
+                  ? sdkMessage.codexTurnId
+                  : undefined,
+            });
           } else {
             // Remove streaming placeholder messages from main messages.
-            clearStreamingPlaceholders();
+            clearStreamingPlaceholders({
+              turnId:
+                typeof sdkMessage.codexTurnId === "string"
+                  ? sdkMessage.codexTurnId
+                  : undefined,
+            });
           }
         }
 
@@ -1949,9 +2004,11 @@ export function useSession(
         // Use parentToolUseId as the routing key (it's the Task tool_use id)
         if (
           sdkMessage.isSubagent &&
-          typeof sdkMessage.parentToolUseId === "string"
+          (typeof sdkMessage.parentToolUseId === "string" ||
+            typeof sdkMessage.agentId === "string")
         ) {
-          const agentId = sdkMessage.parentToolUseId;
+          const agentId = (sdkMessage.parentToolUseId ??
+            sdkMessage.agentId) as string;
 
           // Capture toolUseId → agentId mapping on first subagent message
           // This allows TaskRenderer to access agentContent immediately
@@ -1982,8 +2039,11 @@ export function useSession(
           signalHistoryRewriteSync();
         }
         if (statusData.state === "idle") {
+          finishStreaming();
           scheduleAuthoritativeSnapshotRefresh();
         }
+        if (statusData.state === "hold" || statusData.state === "waiting-input")
+          finishStreaming();
         // Capture pending input request when waiting for user input
         if (statusData.state === "waiting-input" && statusData.request) {
           setPendingInputRequest(statusData.request);
@@ -2010,7 +2070,7 @@ export function useSession(
         setDeferredMessages(deferredData.messages ?? []);
       } else if (data.eventType === "complete") {
         setIsCompacting(false);
-        clearStreamingPlaceholders({ main: true, allAgents: true });
+        finishStreaming();
         setProcessState("idle");
         setStatus({ owner: "none" });
         setPendingInputRequest(null);
@@ -2018,7 +2078,7 @@ export function useSession(
         scheduleAuthoritativeSnapshotRefresh();
       } else if (data.eventType === "error") {
         setIsCompacting(false);
-        clearStreamingPlaceholders({ main: true, allAgents: true });
+        finishStreaming();
       } else if (data.eventType === "connected") {
         // Sync state and permission mode from connected event
         const connectedData = data as {
@@ -2166,9 +2226,11 @@ export function useSession(
         const pendingData = data as {
           eventType: string;
           html: string;
+          messageId?: string;
         };
         streamingMarkdownCallbacks?.onPending?.({
           html: pendingData.html,
+          messageId: pendingData.messageId,
         });
       } else if (data.eventType === "session-id-changed") {
         // Handle session ID change (temp ID → real SDK ID)
@@ -2197,6 +2259,7 @@ export function useSession(
       sessionId,
       handleStreamEvent,
       clearStreamingPlaceholders,
+      finishStreaming,
       removePendingMessage,
       setPendingMessages,
       streamingMarkdownCallbacks,

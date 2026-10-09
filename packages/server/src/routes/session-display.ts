@@ -1000,7 +1000,22 @@ export function createSessionDisplaySource(
           resolved.project.path,
           runId,
         );
-        if (native.kind === "loaded") messages = native.messages;
+        if (native.kind === "loaded") {
+          // Raw code-mode calls can appear in the rollout projection without
+          // a matching native item. A successful native read is not enough:
+          // the explicitly requested tool must actually be present.
+          const selected = rawId
+            ? selectSessionDisplayToolMessages(native.messages, [rawId])
+            : native.messages;
+          const hasInvocation = selected.some((message) => {
+            const content = message.message?.content ?? message.content;
+            return (
+              Array.isArray(content) &&
+              content.some((block) => block.type === "tool_use")
+            );
+          });
+          if (!rawId || hasInvocation) messages = selected;
+        }
       }
       if (!messages) {
         const loaded = await resolved.source.reader.getSession(

@@ -15,7 +15,7 @@ export interface StreamingMarkdownCallbacks {
     type: string;
     messageId?: string;
   }) => void;
-  onPending?: (pending: { html: string }) => void;
+  onPending?: (pending: { html: string; messageId?: string }) => void;
   onStreamEnd?: () => void;
   setCurrentMessageId?: (messageId: string | null) => void;
   captureHtml?: () => string | null;
@@ -54,7 +54,17 @@ export interface UseStreamingContentResult {
   /** Process a stream_event SSE message. Returns true if handled. */
   handleStreamEvent: (data: Record<string, unknown>) => boolean;
   /** Clear all streaming state (called when assistant message arrives) */
-  clearStreaming: () => void;
+  clearStreaming: (scope?: {
+    agentId?: string;
+    allAgents?: boolean;
+    turnId?: string;
+  }) => void;
+  /** Stop indicators and flush partial text without discarding it. */
+  finishStreaming: (scope?: {
+    agentId?: string;
+    allAgents?: boolean;
+    turnId?: string;
+  }) => void;
   /** Cleanup function for useEffect (clears timers) */
   cleanup: () => void;
   /** Get the current streaming agent ID (for routing assistant messages) */
@@ -66,6 +76,8 @@ interface StreamingState {
   blocks: ContentBlock[];
   isStreaming: boolean;
   agentId?: string;
+  activeBlockIndex?: number;
+  codexTurnId?: string;
 }
 
 /**
@@ -95,7 +107,15 @@ export function useStreamingContent(
 
   // Track current streaming message ID (from message_start event)
   // Each stream_event has its own uuid, but they all belong to the same message
-  const currentStreamingIdRef = useRef<string | null>(null);
+  const currentStreamingIdsRef = useRef(new Map<string, string>());
+  const closedIdsRef = useRef(new Set<string>());
+  const rememberClosed = useCallback((id: string) => {
+    closedIdsRef.current.add(id);
+    if (closedIdsRef.current.size > 256) {
+      const first = closedIdsRef.current.values().next().value;
+      if (first) closedIdsRef.current.delete(first);
+    }
+  }, []);
 
   // Track current streaming agentId (if this is a subagent stream)
   const currentStreamingAgentIdRef = useRef<string | null>(null);
@@ -118,9 +138,14 @@ export function useStreamingContent(
         role: "assistant",
         message: {
           role: "assistant",
-          content: streaming.blocks,
+          content: streaming.blocks.map((block) => ({ ...block })),
         },
-        _isStreaming: true,
+        _isStreaming: streaming.isStreaming,
+        _isStreamingPlaceholder: true,
+        _streamingBlockIndex: streaming.activeBlockIndex,
+        ...(streaming.codexTurnId
+          ? { codexTurnId: streaming.codexTurnId }
+          : {}),
         _source: "sdk",
       };
 
@@ -180,6 +205,29 @@ export function useStreamingContent(
     [emitStreamingUpdates],
   );
 
+  const finishStreaming = useCallback(
+    (scope?: { agentId?: string; allAgents?: boolean; turnId?: string }) => {
+      const ids: string[] = [];
+      for (const [id, state] of streamingContentRef.current) {
+        if (scope && !scope.allAgents && state.agentId !== scope.agentId)
+          continue;
+        if (
+          scope?.turnId &&
+          state.codexTurnId &&
+          state.codexTurnId !== scope.turnId
+        )
+          continue;
+        if (!state.isStreaming) continue;
+        state.isStreaming = false;
+        state.activeBlockIndex = undefined;
+        streamingThrottleRef.current.pendingIds.delete(id);
+        ids.push(id);
+      }
+      emitStreamingUpdates(ids);
+    },
+    [emitStreamingUpdates],
+  );
+
   // Process a stream_event SSE message
   // Returns true if the event was handled, false if it should be processed elsewhere
   const handleStreamEvent = useCallback(
@@ -205,6 +253,7 @@ export function useStreamingContent(
       const streamAgentId = isSubagentStream
         ? ((data.parentToolUseId as string) ?? (data.agentId as string))
         : undefined;
+      const route = streamAgentId ?? "";
 
       // Set toolUseToAgent mapping for subagent streams so TaskRenderer can find content
       if (streamAgentId && onToolUseMapping) {
@@ -216,13 +265,16 @@ export function useStreamingContent(
       if (eventType === "message_start") {
         const message = event.message as Record<string, unknown> | undefined;
         if (message?.id) {
-          currentStreamingIdRef.current = message.id as string;
+          if (closedIdsRef.current.has(message.id as string)) return true;
+          finishStreaming({ agentId: streamAgentId });
+          currentStreamingIdsRef.current.set(route, message.id as string);
           // Also track if this is a subagent stream
           currentStreamingAgentIdRef.current = streamAgentId ?? null;
           // Notify streaming markdown context of new message
-          streamingMarkdownCallbacks?.setCurrentMessageId?.(
-            message.id as string,
-          );
+          if (!streamAgentId)
+            streamingMarkdownCallbacks?.setCurrentMessageId?.(
+              message.id as string,
+            );
 
           // Extract context usage for subagent progress tracking
           // Note: We only update subagent context usage from message_start, not main session.
@@ -255,16 +307,39 @@ export function useStreamingContent(
         return true;
       }
 
-      // Use the captured message ID, or fall back to generating one
+      // Codex supplies item identity directly; other providers use message_start.
+      const explicitId =
+        typeof data.codexTurnId === "string"
+          ? getMessageId(data as Message)
+          : undefined;
       const streamingId =
-        currentStreamingIdRef.current ?? `stream-${Date.now()}`;
-      // Use tracked agentId, falling back to current message's agentId
-      const agentId = currentStreamingAgentIdRef.current ?? streamAgentId;
+        explicitId ?? currentStreamingIdsRef.current.get(route);
+      if (!streamingId) return true;
+      if (
+        closedIdsRef.current.has(streamingId) ||
+        (eventType === "content_block_delta" &&
+          streamingContentRef.current.get(streamingId)?.isStreaming === false)
+      )
+        return true;
+      if (
+        explicitId &&
+        currentStreamingIdsRef.current.get(route) !== explicitId
+      ) {
+        finishStreaming({ agentId: streamAgentId });
+        currentStreamingIdsRef.current.set(route, explicitId);
+      }
+      const agentId = streamAgentId;
+      const index =
+        typeof event.index === "number" &&
+        Number.isSafeInteger(event.index) &&
+        event.index >= 0 &&
+        event.index < 10_000
+          ? event.index
+          : 0;
 
       // Handle different stream event types
       if (eventType === "content_block_start") {
         // New content block starting
-        const index = event.index as number;
         const contentBlock = event.content_block as Record<
           string,
           unknown
@@ -275,6 +350,9 @@ export function useStreamingContent(
             isStreaming: true,
             agentId, // Track which agent this stream belongs to
           };
+          streaming.isStreaming =
+            contentBlock.type === "text" || contentBlock.type === "thinking";
+          streaming.activeBlockIndex = index;
           // Ensure array is long enough
           while (streaming.blocks.length <= index) {
             streaming.blocks.push({ type: "text", text: "" });
@@ -291,10 +369,22 @@ export function useStreamingContent(
       } else if (eventType === "content_block_delta") {
         // Content delta - append to existing block
         // Use throttled updates to avoid overwhelming React with re-renders
-        const index = event.index as number;
         const delta = event.delta as Record<string, unknown> | null;
         if (delta) {
-          const streaming = streamingContentRef.current.get(streamingId);
+          let streaming = streamingContentRef.current.get(streamingId);
+          // Codex emits item-scoped deltas without message/block start events.
+          if (!streaming && explicitId && delta.type === "text_delta") {
+            streaming = {
+              blocks: [{ type: "text", text: "" }],
+              isStreaming: true,
+              activeBlockIndex: index,
+              agentId,
+              codexTurnId: data.codexTurnId as string,
+            };
+            streamingContentRef.current.set(streamingId, streaming);
+          }
+          if (!streaming?.isStreaming || streaming.activeBlockIndex !== index)
+            return true;
           if (streaming?.blocks[index]) {
             const block = streaming.blocks[index];
             const deltaType = delta.type as string;
@@ -308,14 +398,14 @@ export function useStreamingContent(
           }
         }
       } else if (eventType === "content_block_stop") {
-        // Block complete - nothing special needed, final message will replace
+        const streaming = streamingContentRef.current.get(streamingId);
+        if (streaming?.activeBlockIndex === index) finishStreaming({ agentId });
       } else if (eventType === "message_stop") {
-        // Message complete - clean up streaming ref state
-        // DON'T clear currentStreamingIdRef here - we need it to remove the
-        // streaming placeholder when the final assistant message arrives
-        streamingContentRef.current.delete(streamingId);
-        // Notify streaming markdown context that stream has ended
-        streamingMarkdownCallbacks?.onStreamEnd?.();
+        // Flush throttled tokens before closing. Keep the placeholder until its
+        // authoritative message arrives, but never show a cursor on it again.
+        finishStreaming({ agentId });
+        rememberClosed(streamingId);
+        if (!agentId) streamingMarkdownCallbacks?.onStreamEnd?.();
       }
 
       return true; // Event was handled
@@ -327,20 +417,50 @@ export function useStreamingContent(
       onToolUseMapping,
       onAgentContextUsage,
       defaultContextWindowSize,
+      finishStreaming,
+      rememberClosed,
     ],
   );
 
   // Clear all streaming state (called when assistant message arrives)
-  const clearStreaming = useCallback(() => {
-    if (streamingThrottleRef.current.timer) {
-      clearTimeout(streamingThrottleRef.current.timer);
-      streamingThrottleRef.current.timer = null;
-    }
-    streamingThrottleRef.current.pendingIds.clear();
-    streamingContentRef.current.clear();
-    currentStreamingIdRef.current = null;
-    currentStreamingAgentIdRef.current = null;
-  }, []);
+  const clearStreaming = useCallback(
+    (scope?: { agentId?: string; allAgents?: boolean; turnId?: string }) => {
+      for (const [id, state] of streamingContentRef.current) {
+        if (scope && !scope.allAgents && state.agentId !== scope.agentId)
+          continue;
+        if (
+          scope?.turnId &&
+          state.codexTurnId &&
+          state.codexTurnId !== scope.turnId
+        )
+          continue;
+        streamingThrottleRef.current.pendingIds.delete(id);
+        streamingContentRef.current.delete(id);
+        rememberClosed(id);
+      }
+      for (const [route, id] of currentStreamingIdsRef.current) {
+        if (
+          (!scope || scope.allAgents || route === (scope.agentId ?? "")) &&
+          (!scope?.turnId || !streamingContentRef.current.has(id))
+        )
+          currentStreamingIdsRef.current.delete(route);
+      }
+      if (
+        !streamingThrottleRef.current.pendingIds.size &&
+        streamingThrottleRef.current.timer
+      ) {
+        clearTimeout(streamingThrottleRef.current.timer);
+        streamingThrottleRef.current.timer = null;
+      }
+      if (
+        !scope ||
+        scope.allAgents ||
+        currentStreamingAgentIdRef.current === (scope.agentId ?? null)
+      )
+        currentStreamingAgentIdRef.current = null;
+    },
+    [rememberClosed],
+  );
 
   // Get the current streaming agent ID (for routing assistant messages)
   const getCurrentAgentId = useCallback(() => {
@@ -359,6 +479,7 @@ export function useStreamingContent(
   return {
     handleStreamEvent,
     clearStreaming,
+    finishStreaming,
     cleanup,
     getCurrentAgentId,
   };
