@@ -616,7 +616,13 @@ export function Sidebar({
       ...allOlderProjectGroups,
     ]
       .filter((group) =>
-        group.sessions.some((session) => session.id === currentSessionId),
+        group.sessions.some(
+          (session) =>
+            session.id === currentSessionId ||
+            (currentSessionId !== undefined &&
+              (session.forkFamilySessionIds?.includes(currentSessionId) ??
+                false)),
+        ),
       )
       .map((group) => group.key);
 
@@ -667,7 +673,11 @@ export function Sidebar({
       session={session}
       showProjectName={showProjectName}
       basePath={basePath}
-      isCurrent={session.id === currentSessionId}
+      isCurrent={
+        session.id === currentSessionId ||
+        (currentSessionId !== undefined &&
+          (session.forkFamilySessionIds?.includes(currentSessionId) ?? false))
+      }
       hasDraft={drafts.has(session.id)}
       isSelected={selectedSessionIds.has(session.id)}
       isSelectionMode={isSelectionMode}
@@ -682,7 +692,11 @@ export function Sidebar({
       {groups.map((group) => {
         const isExpanded = expandedProjectGroups.has(group.key);
         const isCurrentGroup = group.sessions.some(
-          (session) => session.id === currentSessionId,
+          (session) =>
+            session.id === currentSessionId ||
+            (currentSessionId !== undefined &&
+              (session.forkFamilySessionIds?.includes(currentSessionId) ??
+                false)),
         );
         const runningLabel = t("agentsRunning");
         const unreadLabel = t("globalSessionsStatusUnread");

@@ -7,6 +7,57 @@ import {
 } from "../sessionDisplay";
 
 describe("buildSessionDisplayRenderItems", () => {
+  it("adds the edit switcher when lineage arrives after a cached display snapshot", () => {
+    const branches = ["original", "edited"].map((id, index) => ({
+      id,
+      sessionId: id === "original" ? "root" : "child",
+      parentId: "shared",
+      prompt: id,
+      title: id,
+      depth: 2,
+      index,
+      siblingIndex: index + 1,
+      siblingCount: 2,
+      isActive: id === "edited",
+      provider: "codex" as const,
+    }));
+    const items = buildSessionDisplayRenderItems(
+      {
+        sessionId: "child",
+        revision: "cached-before-fork",
+        turns: [
+          {
+            id: "turn:edited",
+            question: { messageId: "edited", content: "edited" },
+            segments: [],
+          },
+        ],
+      },
+      {
+        projectId: "project",
+        formatNotice: () => "notice",
+        branchState: {
+          sessionId: "child",
+          provider: "codex",
+          activeBranchId: "edited",
+          selectedBranchId: "edited",
+          branches,
+        },
+      },
+    );
+    expect(items[0]).toMatchObject({
+      type: "user_prompt",
+      sourceMessages: [
+        {
+          branch: {
+            branchId: "edited",
+            siblingCount: 2,
+            alternatives: branches,
+          },
+        },
+      ],
+    });
+  });
   it("maps a timed main-agent wait notice to its native renderer", () => {
     const items = buildSessionDisplayRenderItems(
       {

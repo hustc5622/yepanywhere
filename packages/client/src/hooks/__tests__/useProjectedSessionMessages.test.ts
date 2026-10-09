@@ -73,6 +73,25 @@ afterEach(() => {
 });
 
 describe("projected session messages", () => {
+  it("loads display and metadata concurrently when refreshing a branch", async () => {
+    const { result } = renderHook(() => useProjectedSessionMessages(options));
+    await waitFor(() => expect(result.current.loading).toBe(false));
+    const metadata = deferred<unknown>();
+    api.getSessionMetadata.mockReturnValueOnce(metadata.promise);
+    api.getSessionDisplayView.mockClear();
+    let refresh!: Promise<unknown>;
+    act(() => {
+      refresh = result.current.refreshSessionMessages();
+    });
+    expect(api.getSessionDisplayView).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      metadata.resolve({
+        session: { id: "session", provider: "codex" },
+        ownership: { owner: "none" },
+      });
+      await refresh;
+    });
+  });
   it.each(["SESSION_DISPLAY_STALE", "SESSION_DISPLAY_CHANGED"])(
     "retries a cold %s response without publishing a page error",
     async (code) => {

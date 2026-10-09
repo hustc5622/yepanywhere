@@ -1080,6 +1080,20 @@ describe("CodexAppServerHistoryReader", () => {
       userEntry("turn-d", "user-d", "d"),
     ];
     const fake = client({
+      listTurns: vi.fn(async ({ threadId }: { threadId: string }) => ({
+        data: (threadId === "child" ? childItems : rootItems).map((entry) => ({
+          id: entry.turnId,
+          items: [entry.item],
+          itemsView: "summary" as const,
+          status: "completed" as const,
+          error: null,
+          startedAt: null,
+          completedAt: null,
+          durationMs: null,
+        })),
+        nextCursor: null,
+        backwardsCursor: null,
+      })),
       listItems: vi.fn(async ({ threadId }: { threadId: string }) => ({
         data: threadId === "child" ? childItems : rootItems,
         nextCursor: null,
@@ -1137,6 +1151,97 @@ describe("CodexAppServerHistoryReader", () => {
     const rootState = await reader.getForkBranchState("root", candidates);
     expect(rootState?.activeBranchId).toBe("user-c-turn-c");
     expect(rootState?.branches).toHaveLength(6);
+    // Two threads, shared by metadata and display consumers. Tool history is
+    // independent of the branch graph even when it spans thousands of items.
+    expect(fake.listTurns).toHaveBeenCalledTimes(2);
+    expect(fake.listItems).not.toHaveBeenCalled();
+    await reader.getForkBranchState(
+      "child",
+      candidates.map((candidate) =>
+        candidate.id === "child"
+          ? { ...candidate, updatedAt: "new-revision" }
+          : candidate,
+      ),
+    );
+    expect(fake.listTurns).toHaveBeenCalledTimes(3);
+  });
+
+  it("hydrates only the turn containing a steered edit boundary, including inherited copies", async () => {
+    const user = (id: string) => ({
+      type: "userMessage" as const,
+      id,
+      clientId: null,
+      content: [{ type: "text" as const, text: id, text_elements: [] }],
+    });
+    const turn = (id: string, itemId: string) => ({
+      id,
+      items: [user(itemId)],
+      itemsView: "summary" as const,
+      status: "completed" as const,
+      error: null,
+      startedAt: null,
+      completedAt: null,
+      durationMs: null,
+    });
+    const fake = client({
+      listTurns: vi.fn(async ({ threadId }: { threadId: string }) => ({
+        data:
+          threadId === "child"
+            ? [turn("a", "a"), turn("edited", "replacement")]
+            : threadId === "later"
+              ? [turn("a", "a"), turn("b", "first"), turn("c2", "later")]
+              : [turn("a", "a"), turn("b", "first"), turn("c", "last")],
+        nextCursor: null,
+        backwardsCursor: null,
+      })),
+      listItems: vi.fn(async () => ({
+        data: [user("first"), user("steered")].map((item) => ({
+          turnId: "b",
+          item,
+        })),
+        nextCursor: null,
+        backwardsCursor: null,
+      })),
+    });
+    const reader = new CodexAppServerHistoryReader({ client: fake });
+    const candidates = [
+      { id: "root" },
+      {
+        id: "later",
+        forkParentSessionId: "root",
+        forkTargetMessageId: "last-c",
+      },
+      {
+        id: "child",
+        forkParentSessionId: "root",
+        forkTargetMessageId: "steered-b",
+      },
+    ];
+    const [state, concurrent] = await Promise.all([
+      reader.getForkBranchState("child", candidates),
+      reader.getForkBranchState("root", candidates),
+    ]);
+    expect(
+      state?.branches.find((branch) => branch.id === "replacement-edited"),
+    ).toMatchObject({
+      parentId: "first-b",
+      siblingCount: 2,
+    });
+    expect(
+      concurrent?.branches.find((branch) => branch.id === "steered-b")
+        ?.siblingCount,
+    ).toBe(2);
+    expect(
+      state?.branches.find((branch) => branch.id === "later-c2"),
+    ).toMatchObject({ parentId: "steered-b", siblingCount: 2 });
+    expect(fake.listTurns).toHaveBeenCalledTimes(3);
+    expect(fake.listItems).toHaveBeenCalledTimes(2);
+    expect(fake.listItems).toHaveBeenCalledWith(
+      expect.objectContaining({ threadId: "later", turnId: "b" }),
+    );
+    expect(fake.listItems).toHaveBeenCalledWith(
+      expect.objectContaining({ threadId: "root", turnId: "b" }),
+    );
   });
 
   it("maps a bounded paginated item page without reading the rollout", async () => {

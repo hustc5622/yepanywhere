@@ -162,6 +162,8 @@ export interface InboxResponse {
  * An item in the global sessions list.
  */
 export interface GlobalSessionItem {
+  forkParentSessionId?: string;
+  forkFamilySessionIds?: string[];
   id: string;
   title: string | null;
   createdAt: string;

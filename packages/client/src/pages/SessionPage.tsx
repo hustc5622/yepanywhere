@@ -251,7 +251,11 @@ function calculateCodexForkExcludedTurns(
 function hasBranchChoices(session: Session | null | undefined): boolean {
   const branchState = session?.branchState ?? session?.codexBranchState;
   return (
-    branchState?.branches.some((branch) => branch.siblingCount > 1) ?? false
+    branchState?.branches.some(
+      (branch) =>
+        branch.siblingCount > 1 &&
+        (session?.provider !== "codex" || branch.sessionId === session.id),
+    ) ?? false
   );
 }
 
@@ -491,6 +495,8 @@ function SessionPageContent({
   }, [sessionId]);
 
   const sessionBranchState = session?.branchState ?? session?.codexBranchState;
+  const hasCurrentBranchChoices =
+    session?.id === sessionId && hasBranchChoices(session);
   const isViewingHistoricalBranch = useMemo(() => {
     if (!selectedBranchId || !sessionBranchState) return false;
     const selectedBranch = sessionBranchState.branches.find(
@@ -605,6 +611,11 @@ function SessionPageContent({
 
   useEffect(() => {
     if (!pendingEditBranchRefresh) return;
+    if (hasCurrentBranchChoices) {
+      clearEditBranchRefreshTimer();
+      setPendingEditBranchRefresh(false);
+      return;
+    }
 
     let cancelled = false;
     const refreshActiveBranch = async () => {
@@ -613,7 +624,11 @@ function SessionPageContent({
       if (cancelled) return;
 
       const attempt = editBranchRefreshAttemptsRef.current;
-      if (hasBranchChoices(refreshedSession) || attempt >= 9) {
+      if (
+        (refreshedSession?.id === sessionId &&
+          hasBranchChoices(refreshedSession)) ||
+        attempt >= 9
+      ) {
         setPendingEditBranchRefresh(false);
         return;
       }
@@ -637,6 +652,8 @@ function SessionPageContent({
     clearSelectedBranchAfterEdit,
     pendingEditBranchRefresh,
     refreshSessionMessages,
+    hasCurrentBranchChoices,
+    sessionId,
   ]);
 
   // Sharing: check if configured (hidden unless sharing.json exists on server)

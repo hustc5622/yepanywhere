@@ -923,6 +923,7 @@ describe("Sessions metadata route", () => {
         title: "Stable family",
         fullTitle: "Stable family full title",
         forkParentSessionId: root.id,
+        forkFamilySessionIds: expect.arrayContaining([root.id, child.id]),
         branchState,
         codexBranchState: branchState,
       },

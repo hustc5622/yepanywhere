@@ -830,6 +830,7 @@ export class Supervisor {
       process,
       !resumeSessionId || isForkedResume,
       isForkedResume ? undefined : resumeSessionId,
+      isForkedResume ? resumeSessionId : undefined,
     );
 
     return process;
@@ -1396,6 +1397,7 @@ export class Supervisor {
     process: Process,
     isNewSession: boolean,
     resumedSessionId?: string,
+    forkParentSessionId?: string,
   ): void {
     const log = getLogger();
     log.info(
@@ -1425,7 +1427,7 @@ export class Supervisor {
 
     // Emit session created event for new sessions
     if (isNewSession) {
-      this.emitSessionCreated(process, ownership);
+      this.emitSessionCreated(process, ownership, forkParentSessionId);
       this.scheduleInitialSessionReconciliation(
         process.sessionId,
         process.projectId,
@@ -1757,6 +1759,7 @@ export class Supervisor {
   private emitSessionCreated(
     process: Process,
     ownership: SessionOwnership,
+    forkParentSessionId?: string,
   ): void {
     if (!this.eventBus) return;
 
@@ -1764,6 +1767,7 @@ export class Supervisor {
     const optimistic = this.buildOptimisticSessionSeed(process);
     const session: SessionSummary = {
       id: process.sessionId,
+      ...(forkParentSessionId ? { forkParentSessionId } : {}),
       projectId: process.projectId,
       title: optimistic.title,
       fullTitle: optimistic.fullTitle,

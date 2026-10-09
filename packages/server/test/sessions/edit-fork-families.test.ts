@@ -12,6 +12,29 @@ const summary = (
 });
 
 describe("collapseEditForkFamilies", () => {
+  it("retains hidden ancestors across incremental inserts and missing intermediate rows", () => {
+    const source = summary("root", "2026-07-15T00:00:00Z");
+    const child = summary("child", "2026-07-15T01:00:00Z", "root");
+    const grandchild = summary("grandchild", "2026-07-15T02:00:00Z", "child");
+    const collapsed = collapseEditForkFamilies([source, child, grandchild]);
+    expect(collapsed).toHaveLength(1);
+    expect(
+      collapseEditForkFamilies([...collapsed, source, child]),
+    ).toHaveLength(1);
+    expect(collapsed[0]).toMatchObject({
+      forkFamilySessionIds: expect.arrayContaining([
+        "root",
+        "child",
+        "grandchild",
+      ]),
+    });
+    expect(
+      collapseEditForkFamilies([
+        summary("left", "2026-07-15T01:00:00Z", "missing"),
+        summary("right", "2026-07-15T02:00:00Z", "missing"),
+      ]),
+    ).toHaveLength(1);
+  });
   it("keeps only the most recently updated member of a fork family", () => {
     const summaries = [
       summary("ses_parent", "2026-07-15T00:00:00.000Z"),

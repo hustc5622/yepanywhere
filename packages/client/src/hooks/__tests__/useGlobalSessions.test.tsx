@@ -161,6 +161,73 @@ describe("useGlobalSessions", () => {
     expect(result.current.sessions[0]?.title).toBe("Resolved session title");
   });
 
+  it("keeps one family row through fork creation and late ancestor metadata", async () => {
+    mockGetGlobalSessions.mockResolvedValue(
+      response([{ ...baseSession, title: "Original", messageCount: 10 }]),
+    );
+    const { result } = renderHook(() => useGlobalSessions({ limit: 50 }));
+    await flushPromises();
+    act(() =>
+      activityHandlers.onSessionCreated?.({
+        type: "session-created",
+        timestamp: "2026-06-22T09:00:00Z",
+        session: {
+          ...baseSessionSummary,
+          id: "child",
+          title: "Edited",
+          messageCount: 1,
+          updatedAt: "2026-06-22T09:00:00Z",
+          forkParentSessionId: baseSession.id,
+        },
+      }),
+    );
+    expect(result.current.sessions).toHaveLength(1);
+    expect(result.current.sessions[0]).toMatchObject({
+      id: "child",
+      title: "Original",
+    });
+    act(() =>
+      activityHandlers.onSessionCreated?.({
+        type: "session-created",
+        timestamp: "2026-06-22T10:00:00Z",
+        session: {
+          ...baseSessionSummary,
+          id: "grandchild",
+          messageCount: 1,
+          updatedAt: "2026-06-22T10:00:00Z",
+          forkParentSessionId: "child",
+        },
+      }),
+    );
+    mockGetSessionMetadata.mockResolvedValue({
+      session: baseSessionSummary,
+      ownership: { owner: "none" },
+    });
+    act(() =>
+      activityHandlers.onSessionStatusChange?.({
+        type: "session-status-changed",
+        sessionId: baseSession.id,
+        projectId,
+        ownership: { owner: "none" },
+        timestamp: "2026-06-22T10:01:00Z",
+      }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(result.current.sessions).toHaveLength(1);
+    expect(result.current.sessions[0]).toMatchObject({
+      id: "grandchild",
+      title: "Original",
+      forkFamilySessionIds: expect.arrayContaining([
+        baseSession.id,
+        "child",
+        "grandchild",
+      ]),
+    });
+    expect(mockGetGlobalSessions).toHaveBeenCalledTimes(1);
+  });
+
   it("cancels pending title refetches when session-updated provides a title", async () => {
     mockGetGlobalSessions.mockResolvedValue(response([]));
 

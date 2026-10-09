@@ -47,8 +47,9 @@ const MAX_TURN_PAGE_LIMIT = 100;
 const SEMANTIC_ITEM_READ_CONCURRENCY = 4;
 const MAX_SEMANTIC_ITEMS_PER_TURN = 10_000;
 const MAX_FORK_BRANCH_FAMILY_SIZE = 64;
-const MAX_FORK_BRANCH_ITEM_PAGES = 100;
-const MAX_FORK_BRANCH_ITEMS = 10_000;
+const MAX_FORK_BRANCH_TURN_PAGES = 100;
+const FORK_BRANCH_CACHE_TTL_MS = 2_000;
+const MAX_FORK_BRANCH_CACHE_ENTRIES = 128;
 const LOCAL_MODEL_PROVIDERS = new Set(["ollama", "lmstudio", "local"]);
 const KNOWN_THREAD_ITEM_TYPES = new Set([
   "userMessage",
@@ -115,6 +116,7 @@ export interface CodexForkBranchCandidate {
   id: string;
   forkParentSessionId?: string;
   forkTargetMessageId?: string;
+  updatedAt?: string;
   createdAt?: string;
   provider?: "codex" | "codex-oss";
 }
@@ -204,6 +206,16 @@ export function decodeCodexAppServerCursor(
 }
 
 export class CodexAppServerHistoryReader {
+  // Cache only compact prompt identities. Metadata, display bootstrap and
+  // branch switching share reads; no tool transcripts are retained here.
+  private readonly forkPromptCache = new Map<
+    string,
+    {
+      revision: string;
+      expiresAt: number;
+      messages: Promise<ZCodeStoredMessage[]>;
+    }
+  >();
   private readonly mode: "auto" | "rollout" | "app-server";
 
   constructor(private readonly options: CodexAppServerHistoryReaderOptions) {
@@ -556,7 +568,9 @@ export class CodexAppServerHistoryReader {
    * Build the provider-neutral b1/b2 branch graph for a native Codex fork
    * family. Paginated forks retain copied turn/item ids, so native identity —
    * not prompt text — proves the shared prefix even when an edit keeps the
-   * exact same text.
+   * exact same text. This is a sparse navigation graph: one prompt per native
+   * turn plus exact edit boundaries. Full transcripts (including steered
+   * messages) continue to come from the display history reader.
    */
   async getForkBranchState(
     sessionId: string,
@@ -570,6 +584,15 @@ export class CodexAppServerHistoryReader {
     }
 
     try {
+      const targets = [
+        ...new Set(
+          family.flatMap((candidate) =>
+            candidate.forkTargetMessageId
+              ? [candidate.forkTargetMessageId]
+              : [],
+          ),
+        ),
+      ].sort();
       const familySessions = await mapWithConcurrency(
         family,
         SEMANTIC_ITEM_READ_CONCURRENCY,
@@ -578,10 +601,7 @@ export class CodexAppServerHistoryReader {
           parentId: candidate.forkParentSessionId ?? null,
           forkBoundaryMessageId: candidate.forkTargetMessageId,
           createdAt: candidate.createdAt,
-          messages: await readCodexForkBranchMessages(
-            this.options.client,
-            candidate.id,
-          ),
+          messages: await this.getForkPromptMessages(candidate, targets),
         }),
       );
       const provider =
@@ -602,6 +622,44 @@ export class CodexAppServerHistoryReader {
       // unavailable history page must not make the transcript itself fail.
       return undefined;
     }
+  }
+
+  private getForkPromptMessages(
+    candidate: CodexForkBranchCandidate,
+    targets: readonly string[],
+  ): Promise<ZCodeStoredMessage[]> {
+    const revision = JSON.stringify([candidate.updatedAt, targets]);
+    const cached = this.forkPromptCache.get(candidate.id);
+    if (cached?.revision === revision && cached.expiresAt > Date.now()) {
+      return cached.messages;
+    }
+    const entry = {
+      revision,
+      expiresAt: Number.POSITIVE_INFINITY,
+      messages: readCodexForkBranchMessages(
+        this.options.client,
+        candidate.id,
+        targets,
+      ),
+    };
+    this.forkPromptCache.delete(candidate.id);
+    this.forkPromptCache.set(candidate.id, entry);
+    while (this.forkPromptCache.size > MAX_FORK_BRANCH_CACHE_ENTRIES) {
+      const oldest = this.forkPromptCache.keys().next().value;
+      if (oldest === undefined) break;
+      this.forkPromptCache.delete(oldest);
+    }
+    void entry.messages.then(
+      () => {
+        entry.expiresAt = Date.now() + FORK_BRANCH_CACHE_TTL_MS;
+      },
+      () => {
+        if (this.forkPromptCache.get(candidate.id) === entry) {
+          this.forkPromptCache.delete(candidate.id);
+        }
+      },
+    );
+    return entry.messages;
   }
 
   async getSession(
@@ -921,58 +979,77 @@ function findCodexForkBranchFamily(
 }
 
 async function readCodexForkBranchMessages(
-  client: Pick<CodexHistoryClient, "listItems">,
+  client: Pick<CodexHistoryClient, "listTurns" | "listItems">,
   sessionId: string,
+  targets: readonly string[],
 ): Promise<ZCodeStoredMessage[]> {
-  const entries: ThreadItemEntry[] = [];
+  const turns: Turn[] = [];
   const seenCursors = new Set<string>();
   let cursor: string | null = null;
   for (
     let pageIndex = 0;
-    pageIndex < MAX_FORK_BRANCH_ITEM_PAGES;
+    pageIndex < MAX_FORK_BRANCH_TURN_PAGES;
     pageIndex += 1
   ) {
-    const page = await client.listItems({
+    const page = await client.listTurns({
       threadId: sessionId,
-      turnId: null,
       cursor,
-      limit: MAX_ITEM_PAGE_LIMIT,
+      limit: MAX_TURN_PAGE_LIMIT,
       sortDirection: "asc",
+      itemsView: "summary",
     });
-    entries.push(...page.data);
-    if (entries.length > MAX_FORK_BRANCH_ITEMS) {
-      throw new CodexHistoryParityError();
-    }
-    if (!page.nextCursor) {
-      cursor = null;
-      break;
-    }
-    if (!seenCursors.add(page.nextCursor)) {
-      throw new CodexHistoryParityError();
-    }
+    turns.push(...page.data);
     cursor = page.nextCursor;
+    if (!cursor) break;
+    if (seenCursors.has(cursor)) throw new CodexHistoryParityError();
+    seenCursors.add(cursor);
   }
   if (cursor) throw new CodexHistoryParityError();
 
-  const messages: ZCodeStoredMessage[] = [];
-  for (const entry of entries) {
-    if (entry.item.type !== "userMessage") continue;
-    const id = codexSemanticMessageId(entry.item.id, entry.turnId);
-    messages.push({
-      id,
-      role: "user",
-      parts: [
-        {
-          id: `${id}:text`,
-          messageID: id,
-          sessionID: sessionId,
-          type: "text",
-          text: codexUserPromptText(entry.item),
-        },
-      ],
-    });
-  }
-  return messages;
+  const prompts = await mapWithConcurrency(
+    turns,
+    SEMANTIC_ITEM_READ_CONCURRENCY,
+    async (turn) => {
+      // Summary includes the FIRST user message only. A historical edit may
+      // target a later steered prompt in the same turn. Hydrate that exact turn
+      // in every family member that inherited it, keeping copied prefixes equal.
+      const needsExactBoundary = targets.some(
+        (target) =>
+          target.endsWith(`-${turn.id}`) &&
+          !turn.items.some(
+            (item) =>
+              item.type === "userMessage" &&
+              codexSemanticMessageId(item.id, turn.id) === target,
+          ),
+      );
+      const items = needsExactBoundary
+        ? await readAllTurnItems(client, sessionId, turn.id)
+        : turn.items;
+      return items.flatMap((item): ZCodeStoredMessage[] => {
+        if (item.type !== "userMessage") return [];
+        const id = codexSemanticMessageId(item.id, turn.id);
+        return [
+          {
+            id,
+            role: "user",
+            ...(turn.startedAt != null
+              ? { createdAt: turn.startedAt * 1_000 }
+              : {}),
+            parts: [
+              {
+                id: `${id}:text`,
+                messageID: id,
+                sessionID: sessionId,
+                type: "text",
+                text: codexUserPromptText(item),
+              },
+            ],
+          },
+        ];
+      });
+    },
+  );
+  return prompts.flat();
 }
 
 function codexUserPromptText(

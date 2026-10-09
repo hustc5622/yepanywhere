@@ -890,6 +890,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         id: summary.id,
         forkParentSessionId: summary.forkParentSessionId,
         createdAt: summary.createdAt,
+        updatedAt: summary.updatedAt,
         provider: summary.provider,
       });
     }
@@ -915,6 +916,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         forkTargetMessageId:
           existing?.forkTargetMessageId ?? metadata.forkTargetMessageId,
         createdAt: existing?.createdAt,
+        updatedAt: existing?.updatedAt,
         provider: existing?.provider ?? metadata.provider,
       });
     }
@@ -930,6 +932,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       forkTargetMessageId:
         current?.forkTargetMessageId ?? currentMetadata?.forkTargetMessageId,
       createdAt: current?.createdAt ?? currentSummary.createdAt,
+      updatedAt: current?.updatedAt ?? currentSummary.updatedAt,
       provider: current?.provider ?? currentSummary.provider,
     });
     return historyReader.getForkBranchState(
@@ -1283,6 +1286,14 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         parentSessionId: sessionSummary?.parentSessionId,
         forkParentSessionId:
           metadata?.forkParentSessionId ?? sessionSummary?.forkParentSessionId,
+        forkFamilySessionIds: forkBranchState
+          ? [
+              ...new Set([
+                sessionId,
+                ...forkBranchState.branches.map((branch) => branch.sessionId),
+              ]),
+            ]
+          : undefined,
         model: process?.model ?? sessionSummary?.model ?? metadata?.model,
         reasoningEffort:
           process?.reasoningEffort ?? sessionSummary?.reasoningEffort,

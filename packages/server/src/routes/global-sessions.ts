@@ -126,6 +126,8 @@ function isLiveAnyBridgeSessionView(
 }
 
 export interface GlobalSessionItem {
+  forkParentSessionId?: string;
+  forkFamilySessionIds?: string[];
   // From cache (cheap)
   id: string;
   title: string | null;
@@ -398,6 +400,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
   const listSessionsForProject = async (
     project: Project,
     providerCatalog: Awaited<ReturnType<typeof buildProviderProjectCatalog>>,
+    bridgeSessions: SessionSummary[] = [],
   ): Promise<SessionSummary[]> => {
     return listSessionsAcrossProviders(
       project,
@@ -417,6 +420,7 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
         allowStaleSessionCache: true,
       },
       providerCatalog,
+      bridgeSessions,
     );
   };
 
@@ -432,11 +436,20 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
       codexSessionCatalog: deps.codexSessionCatalog,
     });
     const seenSessionIds = new Set<string>();
+    const statsBridgeSessionViews = await listBridgeSessionViews(deps);
 
     for (const project of projects) {
-      const sessions = await listSessionsForProject(project, providerCatalog);
+      const sessions = await listSessionsForProject(
+        project,
+        providerCatalog,
+        statsBridgeSessionViews
+          .filter((item) => item.session.projectId === project.id)
+          .map((item) => item.session),
+      );
       for (const session of sessions) {
         seenSessionIds.add(session.id);
+        for (const id of session.forkFamilySessionIds ?? [])
+          seenSessionIds.add(id);
         const metadata = deps.sessionMetadataService?.getMetadata(session.id);
         const isArchived = metadata?.isArchived ?? session.isArchived ?? false;
         const isStarred = metadata?.isStarred ?? session.isStarred ?? false;
@@ -455,7 +468,6 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
       }
     }
 
-    const statsBridgeSessionViews = await listBridgeSessionViews(deps);
     for (const item of statsBridgeSessionViews) {
       if (seenSessionIds.has(item.session.id)) continue;
       const metadata = deps.sessionMetadataService?.getMetadata(
@@ -659,11 +671,19 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
         break;
       }
 
-      const sessions = await listSessionsForProject(project, providerCatalog);
+      const sessions = await listSessionsForProject(
+        project,
+        providerCatalog,
+        bridgeSessionViews
+          .filter((item) => item.session.projectId === project.id)
+          .map((item) => item.session),
+      );
 
       // Enrich each session
       for (const session of sessions) {
         knownSessionIds.add(session.id);
+        for (const id of session.forkFamilySessionIds ?? [])
+          knownSessionIds.add(id);
 
         // Get session metadata
         const metadata = deps.sessionMetadataService?.getMetadata(session.id);
@@ -775,6 +795,8 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
 
         const item: GlobalSessionItem = {
           id: session.id,
+          forkParentSessionId: session.forkParentSessionId,
+          forkFamilySessionIds: session.forkFamilySessionIds,
           title: session.title,
           createdAt: session.createdAt,
           updatedAt: session.updatedAt,

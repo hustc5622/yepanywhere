@@ -1,3 +1,5 @@
+export { collapseEditForkFamilies } from "./edit-fork-families.js";
+export type { CollapsibleForkFamilyMember } from "./edit-fork-families.js";
 export {
   CodexAsyncMessageSchema,
   readCodexAsyncMessage,

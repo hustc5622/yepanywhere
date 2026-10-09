@@ -139,6 +139,8 @@ export interface SessionSummary {
    * `forked_from_id`; other providers may use Yep metadata.
    */
   forkParentSessionId?: string;
+  /** Native branch members collapsed into this conversation in lists. */
+  forkFamilySessionIds?: string[];
   /** Model used for this session (extracted from JSONL, e.g. "claude-opus-4-5-20251101") */
   model?: string;
   /** Provider-specific reasoning effort (e.g. Claude "max", Codex "xhigh") */

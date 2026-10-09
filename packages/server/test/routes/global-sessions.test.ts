@@ -1076,6 +1076,49 @@ describe("Global Sessions Routes", () => {
       expect(result.sessions[0].activity).toBe("in-turn");
     });
 
+    it.each([true, false])(
+      "collapses persisted and bridge fork rows before pagination (catalog child: %s)",
+      async (persistedChild) => {
+        const project = createProject("proj1", "project", "/sessions/proj1");
+        const root = createSession("root", "proj1", minutesAgo(5), {
+          provider: "codex",
+        });
+        const child = createSession("child", "proj1", minutesAgo(1), {
+          provider: "codex",
+          forkParentSessionId: "root",
+        });
+        vi.mocked(mockScanner.listProjects).mockResolvedValue([project]);
+        sessionsByDir.set(
+          project.sessionDir,
+          persistedChild ? [root, child] : [root],
+        );
+        const codexBridgeService = {
+          listSessionViews: vi.fn(async () =>
+            [root, child].map((session) => ({
+              session,
+              projectName: "project",
+              activity: "idle",
+              active: false,
+            })),
+          ),
+        } as unknown as CodexBridgeController;
+        const routes = createGlobalSessionsRoutes(
+          getDeps({ codexBridgeService }),
+        );
+        const response = await routes.request("/?limit=1&includeStats=true");
+        const data = (await response.json()) as GlobalSessionsResponse;
+        expect(data.sessions).toHaveLength(1);
+        expect(data.sessions[0]).toMatchObject({
+          id: "child",
+          forkFamilySessionIds: expect.arrayContaining(["root", "child"]),
+        });
+        expect(data.hasMore).toBe(false);
+        expect(data.stats?.totalCount).toBe(1);
+        const statsResponse = await routes.request("/stats");
+        expect((await statsResponse.json()).stats.totalCount).toBe(1);
+      },
+    );
+
     it("marks idle bridged sessions with open connections as external", async () => {
       const project = createProject("proj1", "project", "/sessions/proj1");
       const session = createSession("sess1", "proj1", minutesAgo(5), {

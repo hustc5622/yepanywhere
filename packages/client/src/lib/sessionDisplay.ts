@@ -264,7 +264,13 @@ function questionSourceMessage(
   question: NonNullable<SessionDisplayPage["turns"][number]["question"]>,
   options: BuildSessionDisplayRenderItemsOptions,
 ): Message {
-  const branch = question.branch;
+  // Fork metadata may arrive after the display snapshot was cached. Resolve
+  // the stable prompt id again so its switcher appears without reloading the
+  // transcript (or waiting for another provider event).
+  const option = options.branchState?.branches.find(
+    (candidate) => candidate.id === question.messageId,
+  );
+  const branch = option ? { ...option, branchId: option.id } : question.branch;
   const siblingBranches = branch
     ? (options.branchState?.branches.filter(
         (candidate) => candidate.parentId === branch.parentId,

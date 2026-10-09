@@ -182,18 +182,18 @@ export function useProjectedSessionMessages(
       const expected = keyRef.current;
       const expectedEpoch = snapshotRef.current?.view.epoch;
       const task = (async () => {
-        await fetchSessionMetadata();
-        if (keyRef.current !== expected) return null;
         const targetBranch =
           refreshOptions?.branchId === null
             ? undefined
             : (refreshOptions?.branchId ?? branchId);
-        const next = SessionDisplaySnapshotSchema.parse(
-          await api.getSessionDisplayView(projectId, sessionId, {
+        const [, display] = await Promise.all([
+          fetchSessionMetadata(),
+          api.getSessionDisplayView(projectId, sessionId, {
             branchId: targetBranch,
             reset: refreshOptions?.replaceMessages,
           }),
-        );
+        ]);
+        const next = SessionDisplaySnapshotSchema.parse(display);
         if (keyRef.current !== expected) return null;
         if (
           snapshotRef.current?.view.epoch !== expectedEpoch &&

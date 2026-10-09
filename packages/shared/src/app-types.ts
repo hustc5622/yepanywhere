@@ -816,6 +816,8 @@ export interface AppSessionSummary {
   parentSessionId?: string;
   /** Source session when this session is a source-preserving edit fork. */
   forkParentSessionId?: string;
+  /** Native branch members collapsed into this conversation in lists. */
+  forkFamilySessionIds?: string[];
   // Model used for this session (resolved, not "default")
   model?: string;
   // Provider-specific reasoning effort for this session (e.g. "max", "xhigh")

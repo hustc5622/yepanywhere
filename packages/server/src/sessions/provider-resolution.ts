@@ -406,6 +406,7 @@ export async function listSessionsAcrossProviders(
   project: Project,
   deps: ProviderResolutionDeps,
   catalog?: ProviderProjectCatalog,
+  additionalSessions: readonly SessionSummary[] = [],
 ): Promise<SessionSummary[]> {
   const sessions: SessionSummary[] = [];
   const seenSessionIds = new Set<string>();
@@ -424,10 +425,17 @@ export async function listSessionsAcrossProviders(
     }
   }
 
+  // Bridge rows arrive independently of the persisted catalog. Collapse only
+  // after merging them, retaining hidden member ids for later live updates.
+  for (const session of additionalSessions) {
+    if (seenSessionIds.has(session.id)) continue;
+    seenSessionIds.add(session.id);
+    sessions.push(session);
+  }
   sessions.sort(
     (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
   );
-  return sessions;
+  return collapseEditForkFamilies(applyForkLineageMetadata(sessions, deps));
 }
 
 export async function findSessionSummaryAcrossProviders(

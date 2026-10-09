@@ -428,8 +428,12 @@ describe("Supervisor", () => {
         startSession,
         getAvailableModels: async () => [],
       };
+      const events: BusEvent[] = [];
+      const eventBus = new EventBus();
+      eventBus.subscribe((event) => events.push(event));
       const providerSupervisor = new Supervisor({
         provider,
+        eventBus,
         idleTimeoutMs: 100,
       });
 
@@ -460,6 +464,15 @@ describe("Supervisor", () => {
         (process as { id: string }).id,
       );
 
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "session-created",
+          session: expect.objectContaining({
+            id: "sess-123-fork",
+            forkParentSessionId: "sess-123",
+          }),
+        }),
+      );
       aborted = true;
       await providerSupervisor.abortProcess((process as { id: string }).id);
     });

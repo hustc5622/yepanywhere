@@ -1,5 +1,6 @@
 import {
   type SessionKind,
+  collapseEditForkFamilies,
   getSessionArchiveBlock,
   sessionMatchesKind,
 } from "@yep-anywhere/shared";
@@ -452,9 +453,9 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
             return existing
               ? prev.filter((session) => session.id !== sessionId)
               : prev;
-          if (!existing) return [next, ...prev];
-          return prev.map((session) =>
-            session.id === sessionId ? next : session,
+          if (!existing) return collapseEditForkFamilies([next, ...prev]);
+          return collapseEditForkFamilies(
+            prev.map((session) => (session.id === sessionId ? next : session)),
           );
         });
       } catch {
@@ -503,7 +504,7 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
         // Deduplicate when appending
         const existingIds = new Set(prev.map((s) => s.id));
         const newSessions = data.sessions.filter((s) => !existingIds.has(s.id));
-        return [...prev, ...newSessions];
+        return collapseEditForkFamilies([...prev, ...newSessions]);
       });
 
       setHasMore(data.hasMore);
@@ -680,6 +681,8 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
         // Convert SessionSummary to GlobalSessionItem
         const globalSession: GlobalSessionItem = {
           id: event.session.id,
+          forkParentSessionId: event.session.forkParentSessionId,
+          forkFamilySessionIds: event.session.forkFamilySessionIds,
           title: event.session.title,
           createdAt: event.session.createdAt,
           updatedAt: event.session.updatedAt,
@@ -710,7 +713,7 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
           lastErrorMessage: event.session.lastErrorMessage,
         };
 
-        return [globalSession, ...prev];
+        return collapseEditForkFamilies([globalSession, ...prev]);
       });
     },
     [
