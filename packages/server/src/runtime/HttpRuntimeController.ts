@@ -1,3 +1,4 @@
+import { setTimeout as delay } from "node:timers/promises";
 import type {
   ContextStatusSdkPayload,
   InputRequest,
@@ -503,16 +504,47 @@ export class HttpRuntimeController implements RuntimeController {
     listener: RuntimeActivityEventListener,
     options?: Pick<RuntimeSessionSubscriptionOptions, "onError">,
   ): Promise<RuntimeSessionSubscription | null> {
-    const token = await this.getToken();
     const controller = new AbortController();
-    const response = await this.fetchFn(`${this.baseUrl}/activity-events`, {
-      headers: {
-        accept: "text/event-stream",
-        authorization: `Bearer ${token}`,
+    this.subscriptionControllers.add(controller);
+    let response: Response | null;
+    try {
+      response = await this.openActivityStream(controller);
+    } catch (error) {
+      this.subscriptionControllers.delete(controller);
+      throw error;
+    }
+    if (!response || controller.signal.aborted) {
+      await response?.body?.cancel().catch(() => {});
+      this.subscriptionControllers.delete(controller);
+      return null;
+    }
+
+    void this.followActivityStream(response, controller, listener, options);
+    return {
+      cleanup: () => {
+        controller.abort();
+        this.subscriptionControllers.delete(controller);
       },
-      signal: controller.signal,
-    });
+    };
+  }
+
+  private async openActivityStream(
+    controller: AbortController,
+    reconcile = false,
+  ): Promise<Response | null> {
+    const token = await this.getToken();
+    const response = await this.fetchFn(
+      `${this.baseUrl}/activity-events${reconcile ? "?reconcile=true" : ""}`,
+      {
+        headers: {
+          accept: "text/event-stream",
+          authorization: `Bearer ${token}`,
+        },
+        signal: controller.signal,
+      },
+    );
     if (!response.ok || !response.body) {
+      await response.body?.cancel();
       if (response.status === 503) return null;
       throw new RuntimeHttpError(
         response.status,
@@ -520,14 +552,52 @@ export class HttpRuntimeController implements RuntimeController {
       );
     }
 
-    this.subscriptionControllers.add(controller);
-    void this.consumeActivityStream(response, controller, listener, options);
-    return {
-      cleanup: () => {
-        controller.abort();
-        this.subscriptionControllers.delete(controller);
-      },
-    };
+    return response;
+  }
+
+  private async followActivityStream(
+    initialResponse: Response,
+    controller: AbortController,
+    listener: RuntimeActivityEventListener,
+    options?: Pick<RuntimeSessionSubscriptionOptions, "onError">,
+  ): Promise<void> {
+    let response: Response | null = initialResponse;
+    let retryDelayMs = 1000;
+    try {
+      while (!controller.signal.aborted) {
+        const connectedAt = Date.now();
+        try {
+          response ??= await this.openActivityStream(controller, true);
+          if (!response) throw new Error("Runtime activity stream unavailable");
+          await this.consumeActivityStream(response, controller, listener);
+          if (!controller.signal.aborted) {
+            throw new Error("Runtime activity stream ended");
+          }
+        } catch (error) {
+          if (controller.signal.aborted) break;
+          if (options?.onError) options.onError(error);
+          else
+            console.warn(
+              "[AgentRuntime] Activity stream lost; reconnecting:",
+              error,
+            );
+        }
+        response = null;
+        if (controller.signal.aborted) break;
+        if (Date.now() - connectedAt >= 30_000) retryDelayMs = 1000;
+        try {
+          await delay(retryDelayMs, undefined, {
+            signal: controller.signal,
+            ref: false,
+          });
+        } catch {
+          break; // Explicit cleanup/shutdown cancels both reads and retries.
+        }
+        retryDelayMs = Math.min(retryDelayMs * 2, 30_000);
+      }
+    } finally {
+      this.subscriptionControllers.delete(controller);
+    }
   }
 
   async replay(options: RuntimeReplayOptions): Promise<RuntimeEventRecord[]> {
@@ -592,15 +662,18 @@ export class HttpRuntimeController implements RuntimeController {
     response: Response,
     controller: AbortController,
     listener: (event: BusEvent) => void,
-    options?: Pick<RuntimeSessionSubscriptionOptions, "onError">,
   ): Promise<void> {
     const reader = response.body?.getReader();
     if (!reader) return;
     const decoder = new TextDecoder();
     let buffer = "";
+    const cancel = () => {
+      void reader.cancel().catch(() => {});
+    };
+    controller.signal.addEventListener("abort", cancel, { once: true });
 
     try {
-      while (true) {
+      while (!controller.signal.aborted) {
         const { done, value } = await reader.read();
         buffer += decoder.decode(value, { stream: !done });
         let boundary = buffer.indexOf("\n\n");
@@ -620,10 +693,9 @@ export class HttpRuntimeController implements RuntimeController {
         }
         if (done) break;
       }
-    } catch (error) {
-      if (!controller.signal.aborted) options?.onError?.(error);
     } finally {
-      this.subscriptionControllers.delete(controller);
+      controller.signal.removeEventListener("abort", cancel);
+      await reader.cancel().catch(() => {});
       reader.releaseLock();
     }
   }

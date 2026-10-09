@@ -366,6 +366,10 @@ describe("useGlobalSessions", () => {
     const first = { ...baseSession, title: "First", hasUnread: true };
     const second = { ...first, id: "session-2" };
     mockGetGlobalSessions.mockResolvedValue(response([first, second]));
+    mockGetSessionMetadata.mockResolvedValue({
+      session: { ...first, activity: "idle", hasUnread: false },
+      ownership: first.ownership,
+    });
     const { result } = renderHook(() =>
       useGlobalSessions({ excludeSessionKind: SLASH_COMMAND_SESSION_KIND }),
     );
@@ -424,7 +428,95 @@ describe("useGlobalSessions", () => {
       await vi.advanceTimersByTimeAsync(8000);
     });
     expect(mockGetGlobalSessions).toHaveBeenCalledTimes(1);
-    expect(mockGetSessionMetadata).not.toHaveBeenCalled();
+    expect(mockGetSessionMetadata).toHaveBeenCalledTimes(1);
+    expect(result.current.sessions[1]).toBe(untouched);
+  });
+
+  it.each(["idle", "terminated"] as const)(
+    "reconciles only the completed card after %s without a summary event",
+    async (activity) => {
+      const running = {
+        ...baseSession,
+        title: "Running session",
+        messageCount: 1,
+        activity: "in-turn" as const,
+      };
+      const other = { ...running, id: "session-2" };
+      const completed = {
+        ...running,
+        activity,
+        updatedAt: "2026-06-22T08:06:40.000Z",
+        messageCount: 12,
+        hasUnread: true,
+      };
+      mockGetGlobalSessions.mockResolvedValue(response([running, other]));
+      mockGetSessionMetadata.mockResolvedValue({
+        session: completed,
+        ownership: completed.ownership,
+      });
+      const { result } = renderHook(() => useGlobalSessions());
+      await flushPromises();
+      const untouched = result.current.sessions[1];
+      act(() => {
+        for (let i = 0; i < 3; i++) {
+          activityHandlers.onProcessStateChange?.({
+            type: "process-state-changed",
+            sessionId: running.id,
+            projectId,
+            activity,
+            timestamp: completed.updatedAt,
+          });
+        }
+      });
+      expect(result.current.sessions[0]?.activity).toBe(activity);
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(500);
+      });
+      expect(mockGetSessionMetadata).toHaveBeenCalledTimes(1);
+      expect(mockGetSessionMetadata).toHaveBeenCalledWith(
+        projectId,
+        running.id,
+      );
+      expect(mockGetGlobalSessions).toHaveBeenCalledTimes(1);
+      expect(result.current.sessions[0]).toMatchObject(completed);
+      expect(result.current.sessions[1]).toBe(untouched);
+    },
+  );
+
+  it("reconciles a released session when its terminal process event was missed", async () => {
+    const running = {
+      ...baseSession,
+      title: "Running",
+      activity: "in-turn" as const,
+    };
+    mockGetGlobalSessions.mockResolvedValue(response([running]));
+    mockGetSessionMetadata.mockResolvedValue({
+      session: {
+        ...running,
+        activity: "idle",
+        updatedAt: "2026-06-22T08:06:40.000Z",
+      },
+      ownership: { owner: "none" },
+    });
+    const { result } = renderHook(() => useGlobalSessions());
+    await flushPromises();
+    act(() =>
+      activityHandlers.onSessionStatusChange?.({
+        type: "session-status-changed",
+        sessionId: running.id,
+        projectId,
+        ownership: { owner: "none" },
+        timestamp: "2026-06-22T08:06:40.000Z",
+      }),
+    );
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(500);
+    });
+    expect(result.current.sessions[0]).toMatchObject({
+      activity: "idle",
+      updatedAt: "2026-06-22T08:06:40.000Z",
+    });
+    expect(mockGetGlobalSessions).toHaveBeenCalledTimes(1);
   });
 
   it("hydrates only an unknown session and coalesces its event burst", async () => {

@@ -552,6 +552,9 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
         else queueSessionRefresh(event.sessionId, event.projectId);
         return;
       }
+      if (event.ownership.owner === "none") {
+        queueSessionRefresh(event.sessionId, event.projectId);
+      }
       setSessions((prev) =>
         prev.map((session) => {
           if (session.id !== event.sessionId) return session;
@@ -593,6 +596,12 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
         if (searchQuery) debouncedRefetch();
         else queueSessionRefresh(event.sessionId, event.projectId);
         return;
+      }
+      // A terminal activity event contains no updatedAt, usage or unread
+      // summary. Reconcile this card even when no session-updated event follows
+      // (notably with an external runtime). The queue coalesces duplicate ends.
+      if (event.activity === "idle" || event.activity === "terminated") {
+        queueSessionRefresh(event.sessionId, event.projectId);
       }
       setSessions((prev) =>
         prev.map((session) => {

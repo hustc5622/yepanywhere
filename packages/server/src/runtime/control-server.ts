@@ -317,16 +317,107 @@ export function createRuntimeControlApp(
 
     return streamSSE(c, async (stream) => {
       let writeChain = Promise.resolve();
-      writer = (event) => {
-        writeChain = writeChain.then(() =>
-          stream.writeSSE({ data: JSON.stringify({ event }) }),
-        );
+      let finished = false;
+      let finishStream!: () => void;
+      const closed = new Promise<void>((resolve) => {
+        finishStream = () => {
+          finished = true;
+          resolve();
+        };
+      });
+      stream.onAbort(finishStream);
+      const enqueue = (write: () => Promise<unknown>) => {
+        writeChain = writeChain
+          .then(async () => {
+            if (!finished) await write();
+          })
+          .catch(finishStream);
         return writeChain;
       };
-      for (const event of buffered.splice(0)) await writer(event);
-      await new Promise<void>((resolve) => stream.onAbort(resolve));
-      await writeChain.catch(() => {});
-      subscription.cleanup();
+      const writeEvent = (event: unknown) =>
+        enqueue(() => stream.writeSSE({ data: JSON.stringify({ event }) }));
+      // Activity can be silent for an entire long turn. Flush headers now and
+      // keep the HTTP stream alive independently of session message traffic.
+      const heartbeat = setInterval(() => {
+        void enqueue(() => stream.write(": heartbeat\n\n"));
+      }, 15_000);
+      heartbeat.unref();
+      try {
+        await enqueue(() => stream.write(": connected\n\n"));
+        if (c.req.query("reconcile") === "true") {
+          // Subscribe before reading snapshots, then drain buffered changes so
+          // a turn ending during reconciliation cannot disappear in the gap.
+          const [processes, terminated, activity] = await Promise.all([
+            controller.listProcessSnapshots(),
+            controller.listRecentlyTerminatedProcesses(),
+            controller.getWorkerActivity(),
+          ]);
+          const timestamp = new Date().toISOString();
+          const liveIds = new Set(
+            processes.map((process) => process.sessionId),
+          );
+          await writeEvent({
+            type: "worker-activity-changed",
+            ...activity,
+            timestamp,
+          });
+          for (const process of processes) {
+            await writeEvent({
+              type: "session-status-changed",
+              sessionId: process.sessionId,
+              projectId: process.projectId,
+              ownership: {
+                owner: "self",
+                processId: process.id,
+                permissionMode: process.permissionMode,
+                modeVersion: process.modeVersion,
+              },
+              activity: process.state,
+              timestamp,
+            });
+            await writeEvent({
+              type: "process-state-changed",
+              sessionId: process.sessionId,
+              projectId: process.projectId,
+              activity: process.state,
+              pendingInputType: process.pendingInputRequest
+                ? process.pendingInputRequest.type === "tool-approval"
+                  ? "tool-approval"
+                  : "user-question"
+                : undefined,
+              retryStatus: process.retryStatus,
+              timestamp,
+            });
+          }
+          for (const process of terminated) {
+            if (liveIds.has(process.sessionId)) continue;
+            await writeEvent({
+              type: "session-status-changed",
+              sessionId: process.sessionId,
+              projectId: process.projectId,
+              ownership: { owner: "none" },
+              timestamp,
+            });
+          }
+          for (const process of processes) {
+            await writeEvent({
+              type: "session-updated",
+              sessionId: process.sessionId,
+              projectId: process.projectId,
+              timestamp,
+            });
+          }
+        }
+        // Set the writer synchronously with draining the buffer: newly arriving
+        // events are appended to the same write chain after buffered events.
+        for (const event of buffered.splice(0)) void writeEvent(event);
+        writer = writeEvent;
+        await closed;
+      } finally {
+        clearInterval(heartbeat);
+        writer = null;
+        subscription.cleanup();
+      }
     });
   });
 
