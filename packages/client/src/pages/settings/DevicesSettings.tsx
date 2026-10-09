@@ -1,3 +1,4 @@
+import { SettingsListSkeleton } from "../../components/SettingsSkeleton";
 import { useBrowserProfiles } from "../../hooks/useBrowserProfiles";
 import { useConnectedDevices } from "../../hooks/useConnectedDevices";
 import { usePushNotifications } from "../../hooks/usePushNotifications";
@@ -71,8 +72,11 @@ export function DevicesSettings() {
         {error && <p className="form-error">{error}</p>}
 
         <div className="settings-group">
-          {isLoading ? (
-            <p className="settings-hint">{t("devicesLoadingProfiles")}</p>
+          {isLoading && profiles.length === 0 ? (
+            <SettingsListSkeleton
+              label={t("devicesLoadingProfiles")}
+              variant="devices"
+            />
           ) : profiles.length === 0 ? (
             <p className="settings-hint">{t("devicesEmpty")}</p>
           ) : (

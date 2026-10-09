@@ -1,9 +1,13 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   type LlmGatewayChannelEntry,
   type LlmGatewayKeyEntry,
   api,
 } from "../api/client";
+import {
+  getNewSessionScope,
+  updateNewSessionLayout,
+} from "../lib/newSessionLayout";
 
 export interface UseLlmGatewayKeysResult {
   channels: LlmGatewayChannelEntry[];
@@ -33,24 +37,43 @@ export interface UseLlmGatewayKeysResult {
 export function useLlmGatewayKeys(enabled = true): UseLlmGatewayKeysResult {
   const [channels, setChannels] = useState<LlmGatewayChannelEntry[]>([]);
   const [loading, setLoading] = useState(enabled);
+  const [hasLoaded, setHasLoaded] = useState(false);
+  const loadVersion = useRef(0);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   const refresh = useCallback(
     async (fresh = false) => {
       if (!enabled) return;
+      const version = ++loadVersion.current;
+      const scope = getNewSessionScope();
       setLoading(true);
       try {
         const response = await api.getLlmGatewayKeys({ probe: true, fresh });
-        setChannels(response.channels);
+        if (version !== loadVersion.current) return;
+        if (!response.error || response.channels.length > 0)
+          setChannels(response.channels);
+        if (!response.error) {
+          updateNewSessionLayout(
+            {
+              piGatewayKeyCounts: response.channels.map(
+                (channel) => channel.keys.length,
+              ),
+            },
+            scope,
+          );
+        }
         setError(response.error);
       } catch (loadError) {
-        setChannels([]);
+        if (version !== loadVersion.current) return;
         setError(
           loadError instanceof Error ? loadError.message : String(loadError),
         );
       } finally {
-        setLoading(false);
+        if (version === loadVersion.current) {
+          setLoading(false);
+          setHasLoaded(true);
+        }
       }
     },
     [enabled],
@@ -58,6 +81,9 @@ export function useLlmGatewayKeys(enabled = true): UseLlmGatewayKeysResult {
 
   useEffect(() => {
     void refresh();
+    return () => {
+      ++loadVersion.current;
+    };
   }, [refresh]);
 
   const addKey = useCallback(
@@ -118,7 +144,7 @@ export function useLlmGatewayKeys(enabled = true): UseLlmGatewayKeysResult {
   return {
     channels,
     keys,
-    loading,
+    loading: enabled && (!hasLoaded || loading),
     busy,
     error,
     setError,

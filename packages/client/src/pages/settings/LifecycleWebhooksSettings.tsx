@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { SettingsFormSkeleton } from "../../components/SettingsSkeleton";
 import { useServerSettings } from "../../hooks/useServerSettings";
 import { useI18n } from "../../i18n";
 
@@ -43,8 +44,34 @@ export function LifecycleWebhooksSettings() {
       <section className="settings-section">
         <h2>{t("lifecycleWebhooksTitle")}</h2>
         <p className="settings-section-description">
-          {t("lifecycleWebhooksLoading")}
+          {t("lifecycleWebhooksDescription")}
         </p>
+        <SettingsFormSkeleton
+          label={t("lifecycleWebhooksLoading")}
+          fields={[
+            {
+              title: t("lifecycleWebhooksEnableTitle"),
+              description: t("lifecycleWebhooksEnableDescription"),
+              control: "toggle",
+            },
+            {
+              title: t("lifecycleWebhooksUrlTitle"),
+              description: t("lifecycleWebhooksUrlDescription"),
+              control: "input",
+            },
+            {
+              title: t("lifecycleWebhooksTokenTitle"),
+              description: t("lifecycleWebhooksTokenDescription"),
+              control: "input",
+            },
+            {
+              title: t("lifecycleWebhooksDryRunTitle"),
+              description: t("lifecycleWebhooksDryRunDescription"),
+              control: "toggle",
+            },
+          ]}
+          actions
+        />
       </section>
     );
   }

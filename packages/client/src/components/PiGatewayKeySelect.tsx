@@ -5,6 +5,7 @@ import {
   gatewayChannelIdForModel,
 } from "../hooks/useLlmGatewayKeys";
 import { useI18n } from "../i18n";
+import { PiGatewayKeySkeleton } from "./NewSessionSkeleton";
 
 interface PiGatewayKeySelectProps {
   /** Selected key id; `null` means the default channel's environment key. */
@@ -131,8 +132,23 @@ export function PiGatewayKeySelect({
     [onChange, onRemove, value],
   );
 
-  if (loading && channels.length === 0) return null;
-  if (channels.length === 0) return null;
+  if (loading && channels.length === 0) return <PiGatewayKeySkeleton />;
+  if (channels.length === 0) {
+    return error ? (
+      <div className="new-session-gateway-key-section">
+        <p className="new-session-limit-error" role="alert">
+          {error}
+        </p>
+        <button
+          type="button"
+          className="gateway-key-text-button"
+          onClick={() => void onRefresh(true)}
+        >
+          {t("gatewayKeysRefresh")}
+        </button>
+      </div>
+    ) : null;
+  }
 
   const renderKey = (
     channel: LlmGatewayChannelEntry,

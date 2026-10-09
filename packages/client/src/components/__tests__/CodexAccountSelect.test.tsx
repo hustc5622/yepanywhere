@@ -6,10 +6,12 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { type CodexAccountEntry, api } from "../../api/client";
 import { I18nProvider } from "../../i18n";
-import { CODEX_ACCOUNTS_UPDATED } from "../../lib/codexAccounts";
+import { getCodexAccountsStore } from "../../lib/codexAccounts";
+import { updateNewSessionLayout } from "../../lib/newSessionLayout";
+import { setCurrentInstallId } from "../../lib/storageKeys";
 import { CodexAccountSelect } from "../CodexAccountSelect";
 import { CodexUsageCard } from "../CodexUsageCard";
 
@@ -44,6 +46,12 @@ function renderSelect(
   );
   return onChange;
 }
+
+let testScope = 0;
+beforeEach(() => {
+  setCurrentInstallId(`codex-account-select-${++testScope}`);
+  sessionStorage.clear();
+});
 
 afterEach(() => {
   cleanup();
@@ -143,6 +151,18 @@ describe("CodexAccountSelect", () => {
         <CodexUsageCard />
       </I18nProvider>,
     );
+    const disclosure = screen.getByRole("button", {
+      name: "Codex usage & accounts Expand",
+      expanded: false,
+    });
+    await waitFor(() => {
+      expect(screen.getAllByText("b@example.com")).toHaveLength(2);
+    });
+    expect(disclosure.getAttribute("aria-expanded")).toBe("false");
+    expect(
+      screen.queryByRole("button", { name: "Use for sessions" }),
+    ).toBeNull();
+    fireEvent.click(disclosure);
     fireEvent.click(
       await screen.findByRole("button", { name: "Use for sessions" }),
     );
@@ -157,6 +177,14 @@ describe("CodexAccountSelect", () => {
         "true",
       );
     });
+    fireEvent.click(disclosure);
+    expect(
+      screen.queryByRole("button", { name: "Use for sessions" }),
+    ).toBeNull();
+    fireEvent.click(disclosure);
+    expect(
+      screen.getByRole("button", { name: "Use for sessions" }),
+    ).toBeTruthy();
   });
 
   it("ignores an old picker response after an account update", async () => {
@@ -182,14 +210,105 @@ describe("CodexAccountSelect", () => {
         account: { type: "chatgpt", email: "b@example.com", planType: "pro" },
       }),
     ];
-    act(() => {
-      window.dispatchEvent(
-        new CustomEvent(CODEX_ACCOUNTS_UPDATED, { detail: updated }),
-      );
+    vi.mocked(api.getCodexAccounts).mockResolvedValue({
+      accounts: updated,
+      error: null,
+    });
+    await act(async () => {
+      await getCodexAccountsStore().refresh();
     });
     await act(async () => {
       resolveLoad({ accounts: [makeEntry({})], error: null });
     });
     expect(screen.getByText("b@example.com")).toBeTruthy();
+  });
+
+  it("reserves the known account count while a shared initial read is pending", async () => {
+    updateNewSessionLayout({ codexAccountCount: 3 });
+    let resolveLoad!: (
+      response: Awaited<ReturnType<typeof api.getCodexAccounts>>,
+    ) => void;
+    vi.spyOn(api, "getCodexAccounts").mockReturnValue(
+      new Promise((resolve) => {
+        resolveLoad = resolve;
+      }),
+    );
+    const { container } = render(
+      <I18nProvider>
+        <CodexAccountSelect value={null} onChange={vi.fn()} />
+        <CodexUsageCard />
+      </I18nProvider>,
+    );
+    expect(
+      container.querySelectorAll(".new-session-account-skeleton"),
+    ).toHaveLength(3);
+    expect(
+      screen.getByRole("status", { name: "Loading session options…" }),
+    ).toBeTruthy();
+    expect(api.getCodexAccounts).toHaveBeenCalledTimes(1);
+    await act(async () => {
+      resolveLoad({ accounts: [makeEntry({})], error: null });
+    });
+    expect(
+      container.querySelectorAll(".new-session-account-skeleton"),
+    ).toHaveLength(0);
+  });
+
+  it("keeps cached accounts during a failed revalidation without resetting selection", async () => {
+    const accounts = [
+      makeEntry({}),
+      makeEntry({
+        id: "acct-b",
+        isDefault: false,
+        isActive: false,
+        account: { type: "chatgpt", email: "b@example.com", planType: "pro" },
+      }),
+    ];
+    renderSelect(accounts);
+    await screen.findByText("b@example.com");
+    cleanup();
+    let rejectLoad!: (error: Error) => void;
+    vi.mocked(api.getCodexAccounts).mockReturnValue(
+      new Promise((_, reject) => {
+        rejectLoad = reject;
+      }),
+    );
+    const onChange = vi.fn();
+    const { container } = render(
+      <I18nProvider>
+        <CodexAccountSelect value="acct-b" onChange={onChange} />
+      </I18nProvider>,
+    );
+    expect(screen.getByText("b@example.com")).toBeTruthy();
+    expect(
+      container.querySelectorAll(".new-session-account-skeleton"),
+    ).toHaveLength(0);
+    await act(async () => {
+      rejectLoad(new Error("Offline"));
+    });
+    expect(screen.getByText("b@example.com")).toBeTruthy();
+    expect(onChange).not.toHaveBeenCalled();
+  });
+
+  it("isolates live snapshots and layout hints when switching servers", async () => {
+    renderSelect([
+      makeEntry({}),
+      makeEntry({ id: "acct-b", isDefault: false, isActive: false }),
+    ]);
+    await waitFor(() =>
+      expect(screen.getAllByText("a@example.com")).toHaveLength(2),
+    );
+    cleanup();
+    setCurrentInstallId("other-codex-server");
+    vi.mocked(api.getCodexAccounts).mockReturnValue(new Promise(() => {}));
+    render(
+      <I18nProvider>
+        <CodexAccountSelect value={null} onChange={vi.fn()} />
+      </I18nProvider>,
+    );
+    expect(screen.queryByText("a@example.com")).toBeNull();
+    expect(
+      screen.getByRole("status", { name: "Loading session options…" }),
+    ).toBeTruthy();
   });
 });

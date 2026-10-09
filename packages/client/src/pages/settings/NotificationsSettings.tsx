@@ -1,6 +1,7 @@
 import { BrowserNotificationToggle } from "../../components/BrowserNotificationToggle";
 import { NativePushNotificationToggle } from "../../components/NativePushNotificationToggle";
 import { PushNotificationToggle } from "../../components/PushNotificationToggle";
+import { SettingsListSkeleton } from "../../components/SettingsSkeleton";
 import { useBrowserNotifications } from "../../hooks/useBrowserNotifications";
 import { useConnectedDevices } from "../../hooks/useConnectedDevices";
 import { useNotificationSettings } from "../../hooks/useNotificationSettings";
@@ -322,8 +323,11 @@ export function NotificationsSettings() {
           {t("notificationsDevicesDescription")}
         </p>
         <div className="settings-group">
-          {isLoading ? (
-            <p className="settings-hint">{t("notificationsLoadingDevices")}</p>
+          {isLoading && unifiedDevices.length === 0 ? (
+            <SettingsListSkeleton
+              label={t("notificationsLoadingDevices")}
+              variant="devices"
+            />
           ) : unifiedDevices.length === 0 ? (
             <p className="settings-hint">{t("notificationsNoDevices")}</p>
           ) : (

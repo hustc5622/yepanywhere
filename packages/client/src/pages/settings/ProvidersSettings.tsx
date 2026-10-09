@@ -1,5 +1,7 @@
 import { useCallback, useEffect, useState } from "react";
 import { type OhMyRouterThroughputStatus, api } from "../../api/client";
+import { SettingsListSkeleton } from "../../components/SettingsSkeleton";
+import { Skeleton } from "../../components/Skeleton";
 import { useProviders } from "../../hooks/useProviders";
 import { useI18n } from "../../i18n";
 import { getAllProviders } from "../../providers/registry";
@@ -70,7 +72,10 @@ function OhMyRouterThroughputBenchmark() {
       </p>
 
       {loading ? (
-        <p className="settings-hint">{t("ohmyrouterBenchmarkLoading")}</p>
+        <SettingsListSkeleton
+          label={t("ohmyrouterBenchmarkLoading")}
+          rows={1}
+        />
       ) : !status?.available ? (
         <p className="settings-hint">
           {t("ohmyrouterBenchmarkUnavailable", {
@@ -162,7 +167,8 @@ function OhMyRouterThroughputBenchmark() {
 
 export function ProvidersSettings() {
   const { t } = useI18n();
-  const { providers: serverProviders } = useProviders();
+  const { providers: serverProviders, loading: providersLoading } =
+    useProviders();
 
   // Merge server detection status with client-side metadata
   const registeredProviders = getAllProviders();
@@ -191,7 +197,9 @@ export function ProvidersSettings() {
               <div className="settings-item-info">
                 <div className="settings-item-header">
                   <strong>{provider.displayName}</strong>
-                  {provider.installed ? (
+                  {providersLoading ? (
+                    <Skeleton width="5em" />
+                  ) : provider.installed ? (
                     <span className="settings-status-badge settings-status-detected">
                       {t("providersDetected")}
                     </span>

@@ -1,8 +1,8 @@
 import { useSearchParams } from "react-router-dom";
 import { NewSessionForm } from "../components/NewSessionForm";
+import { NewSessionFormSkeleton } from "../components/NewSessionSkeleton";
 import { PageHeader } from "../components/PageHeader";
 import { ProjectSelector } from "../components/ProjectSelector";
-import { CardListSkeleton } from "../components/Skeleton";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
 import { useProject, useProjects } from "../hooks/useProjects";
 import {
@@ -81,7 +81,7 @@ export function NewSessionPage() {
           <main className="page-scroll-container">
             <div className="page-content-inner">
               {loading ? (
-                <CardListSkeleton count={2} height={120} />
+                <NewSessionFormSkeleton />
               ) : (
                 <div className="error">
                   {t("newSessionErrorPrefix")} {error?.message}

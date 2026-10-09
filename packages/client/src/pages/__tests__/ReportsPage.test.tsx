@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -62,9 +63,9 @@ const report: ReportDocument = {
   modifiedAt: "2026-07-20T12:00:00.000Z",
 };
 
-function renderPage() {
+function renderPage(path = "/reports?path=alpha.md") {
   return render(
-    <MemoryRouter initialEntries={["/reports?path=alpha.md"]}>
+    <MemoryRouter initialEntries={[path]}>
       <I18nProvider>
         <ToastProvider>
           <ReportsPage />
@@ -175,6 +176,59 @@ describe("ReportsPage document panel", () => {
         .querySelector(".reports-content-inner")
         ?.classList.contains("documents-collapsed"),
     ).toBe(false);
+  });
+
+  it("renders a report when the server normalizes its requested path", async () => {
+    const view = renderPage("/reports?path=.%2Falpha.md");
+    expect(await screen.findByText("Report body")).toBeTruthy();
+    expect(mocks.getReport).toHaveBeenCalledWith("./alpha.md");
+    expect(view.container.querySelector(".reports-reader-skeleton")).toBeNull();
+  });
+
+  it("reserves the mobile reader through both list and document requests", async () => {
+    mocks.isWideScreen = false;
+    let resolveList!: (value: unknown) => void;
+    let resolveDocument!: (value: unknown) => void;
+    mocks.getReports.mockReturnValue(
+      new Promise((resolve) => {
+        resolveList = resolve;
+      }),
+    );
+    mocks.getReport.mockReturnValue(
+      new Promise((resolve) => {
+        resolveDocument = resolve;
+      }),
+    );
+    const view = renderPage("/reports");
+    const selector = screen.getByLabelText("Document");
+    expect(selector.hasAttribute("disabled")).toBe(true);
+    expect(view.container.querySelector(".reports-reader-header")).toBeTruthy();
+    expect(view.container.querySelector(".reports-mobile-toc")).toBeTruthy();
+    expect(
+      view.container.querySelector(".reports-reader-skeleton"),
+    ).toBeTruthy();
+    await act(async () => {
+      resolveList({ rootPath: "/reports", documents: [report] });
+    });
+    await waitFor(() =>
+      expect(mocks.getReport).toHaveBeenCalledWith("alpha.md"),
+    );
+    expect(screen.getByLabelText("Document")).toBe(selector);
+    expect(
+      view.container.querySelector(".reports-reader-skeleton"),
+    ).toBeTruthy();
+    await act(async () => {
+      resolveDocument({
+        metadata: report,
+        content: "# Alpha report\n\nReport body",
+        renderedHtml: "<h1>Alpha report</h1><p>Report body</p>",
+        comments: [],
+      });
+    });
+    expect(screen.getByLabelText("Document")).toBe(selector);
+    expect(selector.hasAttribute("disabled")).toBe(false);
+    expect(screen.getByText("Report body")).toBeTruthy();
+    expect(view.container.querySelector(".reports-reader-skeleton")).toBeNull();
   });
 
   it("creates and edits a comment from selected report text", async () => {

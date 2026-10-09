@@ -19,6 +19,7 @@ import { createPortal } from "react-dom";
 import { useSearchParams } from "react-router-dom";
 import { api, getDesktopAuthToken } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
+import { Skeleton } from "../components/Skeleton";
 import { Modal } from "../components/ui/Modal";
 import { useToastContext } from "../contexts/ToastContext";
 import { useHideSplashOnReady } from "../hooks/useHideSplashOnReady";
@@ -427,6 +428,9 @@ export function ReportsPage() {
   const [listError, setListError] = useState<string | null>(null);
   const [documentData, setDocumentData] =
     useState<ReportDocumentResponse | null>(null);
+  const [loadedDocumentPath, setLoadedDocumentPath] = useState<string | null>(
+    null,
+  );
   const [loadingDocument, setLoadingDocument] = useState(false);
   const [documentError, setDocumentError] = useState<string | null>(null);
   const [uploadingReport, setUploadingReport] = useState(false);
@@ -496,6 +500,7 @@ export function ReportsPage() {
       .then((res) => {
         if (cancelled) return;
         setDocumentData(res);
+        setLoadedDocumentPath(selectedPath);
         setActiveHeadingId(null);
       })
       .catch((err: Error) => {
@@ -602,7 +607,19 @@ export function ReportsPage() {
     );
   }, [documents, filter]);
 
-  const selectedDocument = documentData?.metadata;
+  // The server normalizes metadata.path (e.g. ./alpha.md -> alpha.md).
+  // Match the request identity so valid alternate paths leave the skeleton.
+  const documentIsCurrent =
+    documentData !== null && loadedDocumentPath === selectedPath;
+  const selectedDocument = documentIsCurrent
+    ? documentData?.metadata
+    : undefined;
+  const showReaderSkeleton =
+    !documentIsCurrent &&
+    (loadingList ||
+      loadingDocument ||
+      (!selectedPath && documents.length > 0) ||
+      (!!selectedPath && !documentError));
   const lineCount = countMarkdownLines(documentData?.content ?? "");
   const metaText = selectedDocument
     ? [
@@ -961,8 +978,29 @@ export function ReportsPage() {
             onChange={(event) => setFilter(event.target.value)}
           />
           <div className="reports-document-list">
-            {loadingList && (
-              <div className="reports-state-inline">{t("reportsLoading")}</div>
+            {loadingList && documents.length === 0 && (
+              <div
+                role="status"
+                aria-label={t("reportsLoading")}
+                aria-busy="true"
+              >
+                {[0, 1, 2, 3].map((index) => (
+                  <div
+                    className="reports-document-item"
+                    key={index}
+                    aria-hidden="true"
+                  >
+                    <div className="reports-document-item-main">
+                      <span className="reports-document-title">
+                        <Skeleton width="70%" />
+                      </span>
+                      <span className="reports-document-meta">
+                        <Skeleton width="50%" />
+                      </span>
+                    </div>
+                  </div>
+                ))}
+              </div>
             )}
             {!loadingList && listError && (
               <div className="reports-state-inline reports-state-error">
@@ -1003,8 +1041,31 @@ export function ReportsPage() {
   );
 
   const renderToc = (mobile = false) => {
+    if (showReaderSkeleton) {
+      return mobile ? (
+        <div className="reports-mobile-toc" aria-hidden="true">
+          <div className="reports-toc-placeholder">
+            <Skeleton width="6em" />
+          </div>
+        </div>
+      ) : (
+        <aside className="reports-toc-panel" aria-busy="true">
+          <h2>{t("reportsToc")}</h2>
+          <div className="reports-toc-list" aria-hidden="true">
+            <Skeleton width="80%" />
+            <Skeleton width="60%" />
+            <Skeleton width="70%" />
+          </div>
+        </aside>
+      );
+    }
     if (headings.length === 0) {
-      return mobile ? null : (
+      return mobile ? (
+        <details className="reports-mobile-toc">
+          <summary>{t("reportsToc")}</summary>
+          <p className="reports-toc-empty">{t("reportsNoToc")}</p>
+        </details>
+      ) : (
         <aside className="reports-toc-panel">
           <h2>{t("reportsToc")}</h2>
           <p className="reports-toc-empty">{t("reportsNoToc")}</p>
@@ -1119,7 +1180,15 @@ export function ReportsPage() {
             {isWideScreen && renderDocumentList()}
 
             <section className="reports-reader-column">
-              {!isWideScreen && hasDocuments && (
+              {!isWideScreen && listError && (
+                <div
+                  className="reports-state-block reports-state-error"
+                  role="alert"
+                >
+                  {listError}
+                </div>
+              )}
+              {!isWideScreen && (loadingList || hasDocuments) && (
                 <div className="reports-mobile-selector">
                   <label htmlFor="reports-document-select">
                     {t("reportsSelectDocument")}
@@ -1128,10 +1197,16 @@ export function ReportsPage() {
                     <select
                       id="reports-document-select"
                       value={selectedPath}
+                      disabled={documents.length === 0}
                       onChange={(event) =>
                         handleSelectDocument(event.target.value)
                       }
                     >
+                      {documents.length === 0 && (
+                        <option value={selectedPath}>
+                          {t("reportsLoading")}
+                        </option>
+                      )}
                       {documents.map((doc) => (
                         <option key={doc.path} value={doc.path}>
                           {doc.title}
@@ -1143,52 +1218,85 @@ export function ReportsPage() {
                 </div>
               )}
 
-              {selectedDocument && (
-                <header className="reports-reader-header">
-                  <div>
-                    <p className="reports-reader-meta">{metaText}</p>
+              {showReaderSkeleton ? (
+                <div className="reports-reader-header" aria-hidden="true">
+                  <div className="reports-header-skeleton-text">
+                    <p className="reports-reader-meta">
+                      <Skeleton width="85%" />
+                    </p>
                     <p className="reports-comment-hint">
-                      {comments.length > 0
-                        ? t("reportsCommentCount", { count: comments.length })
-                        : t("reportsCommentHint")}
+                      <Skeleton width="65%" />
                     </p>
                   </div>
                   <div className="reports-reader-actions">
-                    <button
-                      type="button"
-                      className="reports-upload-button"
-                      onClick={() => imageInputRef.current?.click()}
-                      disabled={uploadingImage}
-                      title={t("reportsUploadImage")}
-                      aria-label={t("reportsUploadImage")}
-                    >
-                      <svg
-                        width="16"
-                        height="16"
-                        viewBox="0 0 24 24"
-                        fill="none"
-                        stroke="currentColor"
-                        strokeWidth="2"
-                        strokeLinecap="round"
-                        strokeLinejoin="round"
-                        aria-hidden="true"
-                      >
-                        <rect x="3" y="3" width="18" height="18" rx="2" />
-                        <circle cx="8.5" cy="8.5" r="1.5" />
-                        <polyline points="21 15 16 10 5 21" />
-                        <line x1="12" y1="5" x2="12" y2="11" />
-                        <line x1="9" y1="8" x2="15" y2="8" />
-                      </svg>
-                    </button>
-                    <ReportsDocumentMenu report={selectedDocument} />
+                    <Skeleton width={32} height={32} />
+                    <Skeleton width={32} height={32} />
                   </div>
-                </header>
+                </div>
+              ) : (
+                selectedDocument && (
+                  <header className="reports-reader-header">
+                    <div>
+                      <p className="reports-reader-meta">{metaText}</p>
+                      <p className="reports-comment-hint">
+                        {comments.length > 0
+                          ? t("reportsCommentCount", { count: comments.length })
+                          : t("reportsCommentHint")}
+                      </p>
+                    </div>
+                    <div className="reports-reader-actions">
+                      <button
+                        type="button"
+                        className="reports-upload-button"
+                        onClick={() => imageInputRef.current?.click()}
+                        disabled={uploadingImage}
+                        title={t("reportsUploadImage")}
+                        aria-label={t("reportsUploadImage")}
+                      >
+                        <svg
+                          width="16"
+                          height="16"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          aria-hidden="true"
+                        >
+                          <rect x="3" y="3" width="18" height="18" rx="2" />
+                          <circle cx="8.5" cy="8.5" r="1.5" />
+                          <polyline points="21 15 16 10 5 21" />
+                          <line x1="12" y1="5" x2="12" y2="11" />
+                          <line x1="9" y1="8" x2="15" y2="8" />
+                        </svg>
+                      </button>
+                      <ReportsDocumentMenu report={selectedDocument} />
+                    </div>
+                  </header>
+                )
               )}
 
-              {!isWideScreen && renderToc(true)}
+              {!isWideScreen &&
+                (showReaderSkeleton || selectedDocument) &&
+                renderToc(true)}
 
-              {loadingDocument && (
-                <div className="reports-state-block">{t("reportsLoading")}</div>
+              {showReaderSkeleton && (
+                <div
+                  className="reports-reader-skeleton"
+                  role="status"
+                  aria-label={t("reportsLoading")}
+                  aria-busy="true"
+                >
+                  <Skeleton width="60%" height="2em" />
+                  <Skeleton width="95%" />
+                  <Skeleton />
+                  <Skeleton width="80%" />
+                  <Skeleton width="45%" height="1.5em" />
+                  <Skeleton />
+                  <Skeleton width="90%" />
+                  <Skeleton height="8em" />
+                </div>
               )}
 
               {!loadingDocument && documentError && (
@@ -1208,9 +1316,10 @@ export function ReportsPage() {
                 </div>
               )}
 
-              {!loadingDocument && documentData && (
+              {documentIsCurrent && documentData && (
                 <article
                   ref={articleRef}
+                  aria-busy={loadingDocument}
                   className="reports-markdown"
                   onClick={handleArticleClick}
                   onKeyDown={handleArticleKeyDown}

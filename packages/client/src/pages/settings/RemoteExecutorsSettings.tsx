@@ -1,6 +1,7 @@
 import type { RemoteExecutorConfig } from "@yep-anywhere/shared";
 import { useState } from "react";
 import type { RemoteExecutorTestResult } from "../../api/client";
+import { SettingsListSkeleton } from "../../components/SettingsSkeleton";
 import { useRemoteExecutors } from "../../hooks/useRemoteExecutors";
 import { useI18n } from "../../i18n";
 
@@ -320,8 +321,8 @@ export function RemoteExecutorsSettings() {
       </div>
 
       <h3>{t("remoteExecutorsConfigured")}</h3>
-      {loading ? (
-        <p className="settings-hint">{t("remoteExecutorsLoading")}</p>
+      {loading && executors.length === 0 ? (
+        <SettingsListSkeleton label={t("remoteExecutorsLoading")} />
       ) : loadError ? (
         <p className="form-error">{loadError.message}</p>
       ) : executors.length === 0 ? (

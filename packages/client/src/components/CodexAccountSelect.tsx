@@ -1,10 +1,9 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import { type CodexAccountEntry, api } from "../api/client";
+import { useEffect } from "react";
+import type { CodexAccountEntry } from "../api/client";
+import { useCodexAccounts } from "../hooks/useCodexAccounts";
 import { useI18n } from "../i18n";
-import {
-  CODEX_ACCOUNTS_UPDATED,
-  visibleCodexAccounts,
-} from "../lib/codexAccounts";
+import { visibleCodexAccounts } from "../lib/codexAccounts";
+import { NewSessionAccountSkeleton } from "./NewSessionSkeleton";
 
 const DEFAULT_ACCOUNT_ID = "default";
 
@@ -53,36 +52,8 @@ export function CodexAccountSelect({
   disabled,
 }: CodexAccountSelectProps) {
   const { t } = useI18n();
-  const [accounts, setAccounts] = useState<CodexAccountEntry[]>([]);
-  const [loading, setLoading] = useState(true);
-  const loadVersion = useRef(0);
-
-  const load = useCallback(async () => {
-    const version = ++loadVersion.current;
-    setLoading(true);
-    try {
-      const response = await api.getCodexAccounts();
-      if (version === loadVersion.current) setAccounts(response.accounts);
-    } catch {
-      if (version === loadVersion.current) setAccounts([]);
-    } finally {
-      if (version === loadVersion.current) setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    const onUpdate = (event: Event) => {
-      ++loadVersion.current;
-      setAccounts((event as CustomEvent<CodexAccountEntry[]>).detail);
-      setLoading(false);
-    };
-    window.addEventListener(CODEX_ACCOUNTS_UPDATED, onUpdate);
-    void load();
-    return () => {
-      ++loadVersion.current;
-      window.removeEventListener(CODEX_ACCOUNTS_UPDATED, onUpdate);
-    };
-  }, [load]);
+  const { accounts: snapshot, loading, error } = useCodexAccounts();
+  const accounts = snapshot ?? [];
 
   const selectedId = value ?? DEFAULT_ACCOUNT_ID;
   const visibleAccounts = visibleCodexAccounts(accounts);
@@ -95,20 +66,24 @@ export function CodexAccountSelect({
   // Fall back to the machine account when the saved selection disappeared
   // (account removed) or lost its credentials.
   useEffect(() => {
-    if (loading || accounts.length === 0) return;
+    if (loading || error || accounts.length === 0) return;
     const selected = accounts.find((entry) => entry.id === selectedId);
     const usable =
       selected && (selected.isDefault || Boolean(selected.account));
     if (!usable && selectedId !== DEFAULT_ACCOUNT_ID) {
       onChange(null);
     }
-  }, [accounts, loading, selectedId, onChange]);
+  }, [accounts, loading, error, selectedId, onChange]);
+
+  if (loading && snapshot === null) {
+    return <NewSessionAccountSkeleton provider="codex" />;
+  }
 
   // A single machine account is the common case; no need for a picker.
-  if (!loading && visibleAccounts.length <= 1) return null;
+  if (visibleAccounts.length <= 1) return null;
 
   return (
-    <div className="new-session-codex-account-section">
+    <div className="new-session-codex-account-section" aria-busy={loading}>
       <h3>{t("newSessionCodexAccountTitle")}</h3>
       <p className="new-session-section-hint">
         {t("newSessionCodexAccountDescription")}
@@ -133,7 +108,7 @@ export function CodexAccountSelect({
               onClick={() =>
                 onChange(entry.id === DEFAULT_ACCOUNT_ID ? null : entry.id)
               }
-              disabled={disabled || !signedIn}
+              disabled={disabled || loading || !signedIn}
               aria-pressed={displayedSelectedId === entry.id}
             >
               <span

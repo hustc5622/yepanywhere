@@ -3,7 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { type ArchivedSessionRecord, api } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
 import { ProviderBadge } from "../components/ProviderBadge";
-import { SessionListSkeleton } from "../components/Skeleton";
+import { SessionListSkeleton, Skeleton } from "../components/Skeleton";
 import { useHideSplashOnReady } from "../hooks/useHideSplashOnReady";
 import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
 import { useI18n } from "../i18n";
@@ -155,21 +155,29 @@ export function ArchivePage() {
               </button>
             </div>
 
-            {!loading && (
-              <div className="archive-summary">
-                <span>
-                  {t("archiveSummarySessions", { count: sessions.length })}
-                </span>
-                <span>
-                  {t("archiveSummarySize", { size: formatBytes(totalBytes) })}
-                </span>
-                {archiveDir && (
-                  <span className="archive-summary-path" title={archiveDir}>
-                    {archiveDir}
+            <div className="archive-summary" aria-busy={loading}>
+              {loading ? (
+                <>
+                  <Skeleton width="7em" />
+                  <Skeleton width="6em" />
+                  <Skeleton width="14em" className="archive-summary-path" />
+                </>
+              ) : (
+                <>
+                  <span>
+                    {t("archiveSummarySessions", { count: sessions.length })}
                   </span>
-                )}
-              </div>
-            )}
+                  <span>
+                    {t("archiveSummarySize", { size: formatBytes(totalBytes) })}
+                  </span>
+                  {archiveDir && (
+                    <span className="archive-summary-path" title={archiveDir}>
+                      {archiveDir}
+                    </span>
+                  )}
+                </>
+              )}
+            </div>
 
             {loading && <SessionListSkeleton />}
 

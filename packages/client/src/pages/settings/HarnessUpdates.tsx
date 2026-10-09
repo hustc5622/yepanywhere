@@ -1,6 +1,7 @@
 import type { HarnessId, HarnessUpdateInfo } from "@yep-anywhere/shared";
 import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
+import { SettingsListSkeleton } from "../../components/SettingsSkeleton";
 import { useI18n } from "../../i18n";
 import "./HarnessUpdates.css";
 
@@ -99,7 +100,7 @@ export function HarnessUpdates() {
         {t("harnessUpdatesDescription")}
       </p>
       <p className="settings-hint">{t("harnessUpdatesEffect")}</p>
-      {loading && <p role="status">{t("harnessUpdatesLoading")}</p>}
+      {loading && <SettingsListSkeleton label={t("harnessUpdatesLoading")} />}
       {!loading && harnesses.length === 0 && !error && (
         <p className="settings-hint">{t("harnessUpdatesEmpty")}</p>
       )}

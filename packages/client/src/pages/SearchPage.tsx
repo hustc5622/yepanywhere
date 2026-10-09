@@ -12,7 +12,7 @@ import {
   type FilterOption,
 } from "../components/FilterDropdown";
 import { PageHeader } from "../components/PageHeader";
-import { SessionListSkeleton } from "../components/Skeleton";
+import { Skeleton } from "../components/Skeleton";
 import { useHideSplashOnReady } from "../hooks/useHideSplashOnReady";
 import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
 import {
@@ -26,6 +26,31 @@ import { formatSmartTime } from "../lib/datetime";
 const DEBOUNCE_MS = 300;
 const MIN_QUERY_LENGTH = 2;
 const SORT_OPTIONS: SearchSort[] = ["recent", "relevance"];
+
+function SearchResultsSkeleton() {
+  const { t } = useI18n();
+  return (
+    <div
+      className="search-results"
+      role="status"
+      aria-label={t("searchLoading")}
+      aria-busy="true"
+    >
+      {[0, 1, 2].map((index) => (
+        <div className="search-result-group" key={index} aria-hidden="true">
+          <div className="search-result-header">
+            <Skeleton width="55%" />
+          </div>
+          <div className="search-result-skeleton-snippets">
+            <Skeleton width="90%" />
+            <Skeleton width="75%" />
+            <Skeleton width="45%" height="0.8em" />
+          </div>
+        </div>
+      ))}
+    </div>
+  );
+}
 
 /** Render a snippet with the matched substring wrapped in <mark>. */
 function HighlightedSnippet({ match }: { match: SearchMatch }) {
@@ -68,7 +93,9 @@ export function SearchPage() {
   const [projectOptions, setProjectOptions] = useState<FilterOption<string>[]>(
     [],
   );
-  const [loading, setLoading] = useState(false);
+  const [loading, setLoading] = useState(
+    query.trim().length >= MIN_QUERY_LENGTH,
+  );
   const [error, setError] = useState<Error | null>(null);
   const [summary, setSummary] = useState<{
     sessions: number;
@@ -251,16 +278,15 @@ export function SearchPage() {
                 autoFocus
                 onChange={(e) => handleInputChange(e.target.value)}
               />
-              {projectOptions.length > 0 && (
-                <FilterDropdown
-                  label={t("searchScopeProject")}
-                  options={projectOptions}
-                  selected={projectFilter ? [projectFilter] : []}
-                  onChange={handleProjectFilter}
-                  multiSelect={false}
-                  placeholder={t("searchScopeAll")}
-                />
-              )}
+              <FilterDropdown
+                label={t("searchScopeProject")}
+                options={projectOptions}
+                selected={projectFilter ? [projectFilter] : []}
+                onChange={handleProjectFilter}
+                multiSelect={false}
+                placeholder={t("searchScopeAll")}
+                disabled={projectOptions.length === 0 && !projectFilter}
+              />
             </div>
 
             <div className="search-sort-bar">
@@ -288,11 +314,11 @@ export function SearchPage() {
               </div>
             </div>
 
-            {summaryText && !loading && (
-              <p className="search-summary">{summaryText}</p>
-            )}
+            <p className="search-summary" role="status" aria-live="polite">
+              {loading ? t("searchLoading") : summaryText}
+            </p>
 
-            {loading && <SessionListSkeleton />}
+            {loading && results.length === 0 && <SearchResultsSkeleton />}
 
             {error && (
               <p className="error">
@@ -329,7 +355,7 @@ export function SearchPage() {
             )}
 
             {!error && results.length > 0 && (
-              <div className="search-results">
+              <div className="search-results" aria-busy={loading}>
                 {results.map((result) => (
                   <div key={result.sessionId} className="search-result-group">
                     <Link

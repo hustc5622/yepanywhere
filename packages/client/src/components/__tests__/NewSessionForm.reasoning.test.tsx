@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   fireEvent,
   render,
@@ -14,6 +15,8 @@ import { getThinkingSetting } from "../../hooks/useModelSettings";
 import { useProviders } from "../../hooks/useProviders";
 import { useServerSettings } from "../../hooks/useServerSettings";
 import { I18nProvider } from "../../i18n";
+import { updateNewSessionLayout } from "../../lib/newSessionLayout";
+import { setCurrentInstallId } from "../../lib/storageKeys";
 import { NewSessionForm } from "../NewSessionForm";
 
 vi.mock("../../hooks/useProviders", async (importOriginal) => ({
@@ -48,16 +51,20 @@ const provider: ProviderInfo = {
   ],
 };
 
-function renderForm(compact: boolean) {
-  return render(
+function formElement(compact: boolean) {
+  return (
     <MemoryRouter>
       <I18nProvider>
         <ToastProvider>
           <NewSessionForm projectId="test-project" compact={compact} />
         </ToastProvider>
       </I18nProvider>
-    </MemoryRouter>,
+    </MemoryRouter>
   );
+}
+
+function renderForm(compact: boolean) {
+  return render(formElement(compact));
 }
 
 function selectEffort(compact: boolean, label: string) {
@@ -74,8 +81,11 @@ function selectEffort(compact: boolean, label: string) {
 }
 
 describe("Codex new session reasoning", () => {
+  let testScope = 0;
   beforeEach(() => {
     localStorage.clear();
+    sessionStorage.clear();
+    setCurrentInstallId(`new-session-form-${++testScope}`);
     vi.mocked(useProviders).mockReturnValue({
       providers: [provider],
       loading: false,
@@ -108,6 +118,74 @@ describe("Codex new session reasoning", () => {
   afterEach(() => {
     cleanup();
     vi.restoreAllMocks();
+  });
+
+  it("keeps account placeholders and the draft through settings and account loading", async () => {
+    const readyProviders = vi.mocked(useProviders).getMockImplementation()?.();
+    const readySettings = vi
+      .mocked(useServerSettings)
+      .getMockImplementation()?.();
+    if (!readyProviders || !readySettings)
+      throw new Error("Missing hook fixtures");
+    vi.mocked(useProviders).mockReturnValue({
+      ...readyProviders,
+      providers: [],
+      loading: true,
+    });
+    vi.mocked(useServerSettings).mockReturnValue({
+      ...readySettings,
+      settings: null,
+      isLoading: true,
+    });
+    updateNewSessionLayout({ provider: "codex", codexAccountCount: 3 });
+    let resolveAccounts!: (
+      response: Awaited<ReturnType<typeof api.getCodexAccounts>>,
+    ) => void;
+    vi.spyOn(api, "getCodexAccounts").mockReturnValue(
+      new Promise((resolve) => {
+        resolveAccounts = resolve;
+      }),
+    );
+    const view = renderForm(false);
+    const composer = screen.getByRole("textbox");
+    composer.textContent = "Draft while loading";
+    fireEvent.input(composer);
+    expect(
+      view.container.querySelectorAll(".new-session-account-skeleton"),
+    ).toHaveLength(3);
+
+    vi.mocked(useProviders).mockReturnValue(readyProviders);
+    vi.mocked(useServerSettings).mockReturnValue(readySettings);
+    view.rerender(formElement(false));
+    expect(
+      view.container.querySelectorAll(".new-session-account-skeleton"),
+    ).toHaveLength(3);
+    await act(async () => {
+      resolveAccounts({
+        accounts: Array.from({ length: 3 }, (_, i) => ({
+          id: i === 0 ? "default" : `account-${i}`,
+          label: null,
+          codexHome: `/test/account-${i}`,
+          isDefault: i === 0,
+          isActive: i === 0,
+          account: {
+            type: "chatgpt",
+            email: `account-${i}@example.com`,
+            planType: "pro",
+          },
+          usage: null,
+          error: null,
+          login: null,
+        })),
+        error: null,
+      });
+    });
+    expect(
+      view.container.querySelectorAll(".new-session-account-skeleton"),
+    ).toHaveLength(0);
+    expect(screen.getByText("account-2@example.com")).toBeTruthy();
+    expect(screen.getByRole("textbox")).toBe(composer);
+    expect(composer.textContent).toBe("Draft while loading");
   });
 
   it.each([

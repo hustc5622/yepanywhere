@@ -54,6 +54,7 @@ import {
   resolveModelReasoningEffort,
 } from "../lib/codexReasoning";
 import { handleComposerSubmitKey } from "../lib/composerKeyboard";
+import { updateNewSessionLayout } from "../lib/newSessionLayout";
 import {
   getProviderPermissionModes,
   normalizeProviderPermissionMode,
@@ -74,6 +75,7 @@ import { CodexUsageCard } from "./CodexUsageCard";
 import { ComposerAttachmentCard } from "./ComposerAttachmentCard";
 import { FilterDropdown, type FilterOption } from "./FilterDropdown";
 import { clearFabPrefill, getFabPrefill } from "./FloatingActionButton";
+import { NewSessionSetupSkeleton } from "./NewSessionSkeleton";
 import { PiGatewayKeySelect } from "./PiGatewayKeySelect";
 import { SlashCommandButton } from "./SlashCommandButton";
 import { VoiceInputButton, type VoiceInputButtonRef } from "./VoiceInputButton";
@@ -699,6 +701,7 @@ export function NewSessionForm({
   const applyProviderSelection = useCallback(
     (provider: ProviderInfo, savedDefaults?: NewSessionProviderDefaults) => {
       const providerName = provider.name;
+      updateNewSessionLayout({ provider: providerName });
       const models = provider.models ?? [];
       const savedGatewayConfig = savedDefaults?.llmGatewayConfig;
       // Codex saved defaults store the bare model slug plus a separate model
@@ -2007,6 +2010,11 @@ export function NewSessionForm({
         <p className="new-session-subtitle">{t("newSessionHeaderSubtitle")}</p>
       </div>
 
+      {!selectedProvider && (providersLoading || settingsLoading) && (
+        <NewSessionSetupSkeleton
+          provider={settings?.newSessionDefaults?.provider}
+        />
+      )}
       {selectedProvider === "codex" && (
         <CodexAccountSelect
           value={selectedCodexAccountId}

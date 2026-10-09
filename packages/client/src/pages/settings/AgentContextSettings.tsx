@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { SettingsFormSkeleton } from "../../components/SettingsSkeleton";
 import { useServerSettings } from "../../hooks/useServerSettings";
 import { useI18n } from "../../i18n";
 
@@ -41,8 +42,19 @@ export function AgentContextSettings() {
       <section className="settings-section">
         <h2>{t("agentContextTitle")}</h2>
         <p className="settings-section-description">
-          {t("agentContextLoading")}
+          {t("agentContextDescription")}
         </p>
+        <SettingsFormSkeleton
+          label={t("agentContextLoading")}
+          fields={[
+            {
+              title: t("agentContextGlobalInstructions"),
+              description: t("agentContextGlobalInstructionsDescription"),
+              control: "textarea",
+            },
+          ]}
+          actions
+        />
       </section>
     );
   }

@@ -31,6 +31,7 @@ export interface FilterDropdownProps<T extends string> {
   selectedDescription?: string; // optional secondary text shown inside the trigger
   /** Optional accent used by selected states, including the mobile portal. */
   accentColor?: string;
+  disabled?: boolean;
 }
 
 /**
@@ -48,6 +49,7 @@ export function FilterDropdown<T extends string>({
   align = "left",
   selectedDescription,
   accentColor,
+  disabled = false,
 }: FilterDropdownProps<T>) {
   const { t } = useI18n();
   const [isOpen, setIsOpen] = useState(false);
@@ -93,6 +95,10 @@ export function FilterDropdown<T extends string>({
   const handleClose = useCallback(() => {
     setIsOpen(false);
   }, []);
+
+  useEffect(() => {
+    if (disabled) handleClose();
+  }, [disabled, handleClose]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -329,6 +335,7 @@ export function FilterDropdown<T extends string>({
         ref={buttonRef}
         type="button"
         className={`filter-dropdown-button ${selected.length > 0 ? "has-selection" : ""}`}
+        disabled={disabled}
         onClick={handleButtonClick}
         title={t("filterByLabel", { label })}
         aria-haspopup="listbox"

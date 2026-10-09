@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useId, useRef, useState } from "react";
 import {
   type CodexAccountEntry,
   type CodexLoginMode,
@@ -8,11 +8,9 @@ import {
   type CodexUsageWindow,
   api,
 } from "../api/client";
+import { useCodexAccounts } from "../hooks/useCodexAccounts";
 import { useI18n } from "../i18n";
-import {
-  CODEX_ACCOUNTS_UPDATED,
-  visibleCodexAccounts,
-} from "../lib/codexAccounts";
+import { visibleCodexAccounts } from "../lib/codexAccounts";
 import { CodexResetCredits } from "./CodexResetCredits";
 
 function clampPercent(value: number): number {
@@ -456,45 +454,51 @@ function AccountBlock({
 
 export function CodexUsageCard() {
   const { t } = useI18n();
-  const [accounts, setAccounts] = useState<CodexAccountEntry[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [expanded, setExpanded] = useState(false);
+  const detailsId = useId();
+  const { accounts: snapshot, loading, error, refresh } = useCodexAccounts();
+  const accounts = snapshot ?? [];
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const loadVersion = useRef(0);
-
-  const load = useCallback(async (fresh = false) => {
-    const version = ++loadVersion.current;
-    setLoading(true);
-    try {
-      const response = await api.getCodexAccounts({ fresh });
-      if (version !== loadVersion.current) return;
-      setAccounts(response.accounts);
-      setError(response.error);
-      window.dispatchEvent(
-        new CustomEvent(CODEX_ACCOUNTS_UPDATED, { detail: response.accounts }),
-      );
-    } catch (requestError) {
-      if (version === loadVersion.current) {
-        setError((requestError as Error).message);
-      }
-    } finally {
-      if (version === loadVersion.current) setLoading(false);
-    }
-  }, []);
-
-  useEffect(() => {
-    void load();
-    return () => {
-      ++loadVersion.current;
-    };
-  }, [load]);
-
-  const refresh = useCallback(() => load(true), [load]);
 
   return (
-    <section className="codex-usage-card" aria-live="polite">
-      <div className="codex-usage-header">
-        <h3>{t("newSessionCodexUsageTitle")}</h3>
+    <section className="codex-usage-card codex-usage-card-collapsible">
+      <h3 className="codex-usage-disclosure-heading">
+        <button
+          type="button"
+          className="codex-usage-disclosure"
+          aria-expanded={expanded}
+          aria-controls={detailsId}
+          onClick={() => setExpanded((value) => !value)}
+        >
+          <span>{t("newSessionCodexUsageTitle")}</span>
+          <span className="codex-usage-disclosure-action">
+            {expanded
+              ? t("newSessionCodexUsageCollapse")
+              : t("newSessionCodexUsageExpand")}
+            <svg
+              className="codex-usage-disclosure-chevron"
+              width="16"
+              height="16"
+              viewBox="0 0 24 24"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+              aria-hidden="true"
+            >
+              <polyline points="6 9 12 15 18 9" />
+            </svg>
+          </span>
+        </button>
+      </h3>
+      {/* Keep login polling and reset-credit state alive while collapsed. */}
+      <div
+        id={detailsId}
+        className="codex-usage-details"
+        hidden={!expanded}
+        aria-live="polite"
+      >
         <div className="codex-account-actions">
           <button
             type="button"
@@ -515,7 +519,7 @@ export function CodexUsageCard() {
                 setBusy(true);
                 try {
                   await api.addCodexAccount();
-                  await load(true);
+                  await refresh();
                 } finally {
                   setBusy(false);
                 }
@@ -525,24 +529,26 @@ export function CodexUsageCard() {
             {t("codexAccountsAdd")}
           </button>
         </div>
-      </div>
 
-      {loading && accounts.length === 0 ? (
-        <p className="codex-usage-state">{t("newSessionCodexUsageLoading")}</p>
-      ) : (
-        <div className="codex-account-list">
-          {visibleCodexAccounts(accounts).map((entry) => (
-            <AccountBlock
-              key={entry.id}
-              entry={entry}
-              busy={busy}
-              onRefresh={refresh}
-              onBusyChange={setBusy}
-            />
-          ))}
-        </div>
-      )}
-      {error && <p className="codex-usage-state">{error}</p>}
+        {loading && accounts.length === 0 ? (
+          <p className="codex-usage-state">
+            {t("newSessionCodexUsageLoading")}
+          </p>
+        ) : (
+          <div className="codex-account-list">
+            {visibleCodexAccounts(accounts).map((entry) => (
+              <AccountBlock
+                key={entry.id}
+                entry={entry}
+                busy={busy}
+                onRefresh={refresh}
+                onBusyChange={setBusy}
+              />
+            ))}
+          </div>
+        )}
+        {error && <p className="codex-usage-state">{error}</p>}
+      </div>
     </section>
   );
 }

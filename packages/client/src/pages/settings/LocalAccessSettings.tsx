@@ -1,6 +1,7 @@
 import { useState } from "react";
 import { api } from "../../api/client";
 import { FilterDropdown } from "../../components/FilterDropdown";
+import { SettingsFormSkeleton } from "../../components/SettingsSkeleton";
 import { useOptionalAuth } from "../../contexts/AuthContext";
 import {
   MOBILE_SHELL_NODES,
@@ -315,8 +316,42 @@ export function LocalAccessSettings() {
         <section className="settings-section">
           <h2>{t("settingsLocalAccessTitle")}</h2>
           <p className="settings-section-description">
-            {t("localAccessLoading")}
+            {t("localAccessDescription")}
           </p>
+          <MobileShellChannelSettings />
+          <SettingsFormSkeleton
+            label={t("localAccessLoading")}
+            fields={[{ title: t("localAccessStatusTitle") }]}
+          />
+          <SettingsFormSkeleton
+            label={t("localAccessLoading")}
+            fields={[
+              {
+                title: t("localAccessListeningPortTitle"),
+                description: t("localAccessListeningPortDescription"),
+              },
+              {
+                title: t("localAccessNetworkTitle"),
+                description: t("localAccessNetworkDescription"),
+                control: "toggle",
+              },
+              {
+                title: t("localAccessAllowAllHostsTitle"),
+                description: t("localAccessAllowAllHostsDescription"),
+                control: "toggle",
+              },
+              ...(!auth.authDisabledByEnv
+                ? [
+                    {
+                      title: t("localAccessRequirePasswordTitle"),
+                      description: t("localAccessRequirePasswordDescription"),
+                      control: "toggle" as const,
+                    },
+                  ]
+                : []),
+            ]}
+            actions
+          />
         </section>
       );
     }
