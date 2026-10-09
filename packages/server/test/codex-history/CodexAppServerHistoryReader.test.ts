@@ -120,6 +120,77 @@ function client(overrides: Record<string, unknown> = {}) {
 }
 
 describe("CodexAppServerHistoryReader", () => {
+  it("restarts a cold semantic read when mailbox messages change during hydration", async () => {
+    const fake = client({
+      listItems: vi.fn(async () => ({ data: [], nextCursor: null })),
+    });
+    const reader = new CodexAppServerHistoryReader({
+      client: fake,
+      readInterAgentRevision: vi
+        .fn()
+        .mockResolvedValueOnce("before")
+        .mockResolvedValue("after"),
+    });
+    const result = await reader.getSemanticTurnsPage(
+      thread().id,
+      "project" as UrlProjectId,
+      "/tmp/project",
+      { limit: 20, itemsView: "full" },
+    );
+    expect(result.kind).toBe("loaded");
+    expect(result.kind === "loaded" && result.revision).toContain(
+      Buffer.from("after").toString("base64url"),
+    );
+    expect(fake.readThread).toHaveBeenCalledTimes(2);
+  });
+
+  it("falls back after bounded cold retries when the mailbox keeps changing", async () => {
+    const fake = client({
+      listItems: vi.fn(async () => ({ data: [], nextCursor: null })),
+    });
+    let revision = 0;
+    const reader = new CodexAppServerHistoryReader({
+      client: fake,
+      readInterAgentRevision: async () => String(++revision),
+    });
+    await expect(
+      reader.getSemanticTurnsPage(
+        thread().id,
+        "project" as UrlProjectId,
+        "/tmp/project",
+        { limit: 20, itemsView: "full" },
+      ),
+    ).resolves.toEqual({ kind: "fallback", reason: "transcript_parity" });
+    expect(fake.readThread).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([
+    { cursor: "older" },
+    {
+      expectedRevision: `cas1.${thread().updatedAt}.${thread().id}.${Buffer.from("before").toString("base64url")}`,
+    },
+  ])("keeps revision-bound semantic reads strict: %j", async (scope) => {
+    const fake = client({
+      listItems: vi.fn(async () => ({ data: [], nextCursor: null })),
+    });
+    const reader = new CodexAppServerHistoryReader({
+      client: fake,
+      readInterAgentRevision: vi
+        .fn()
+        .mockResolvedValueOnce("before")
+        .mockResolvedValue("after"),
+    });
+    await expect(
+      reader.getSemanticTurnsPage(
+        thread().id,
+        "project" as UrlProjectId,
+        "/tmp/project",
+        { limit: 20, itemsView: "full", ...scope },
+      ),
+    ).rejects.toThrow("ROLLOUT_CURSOR_STALE");
+    expect(fake.readThread).toHaveBeenCalledTimes(1);
+  });
+
   it("supplements mailbox results before the parent's answer across history APIs and revises mailbox-only changes", async () => {
     const items = [
       {

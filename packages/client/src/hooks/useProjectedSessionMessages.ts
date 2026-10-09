@@ -298,10 +298,36 @@ export function useProjectedSessionMessages(
     });
     // A cold HTTP snapshot also supports transport startup failures. The WS
     // snapshot establishes the same view/sequence, so older HTTP replies lose.
-    void api
-      .getSessionDisplayView(projectId, sessionId, { branchId })
+    const loadSnapshot = async () => {
+      for (let attempt = 0; ; attempt++) {
+        if (cancelled) return;
+        try {
+          return await api.getSessionDisplayView(projectId, sessionId, {
+            branchId,
+          });
+        } catch (error) {
+          if (cancelled || snapshotRef.current) return;
+          const { status, code } = error as { status?: number; code?: string };
+          if (
+            status !== 409 ||
+            (code !== "SESSION_DISPLAY_STALE" &&
+              code !== "SESSION_DISPLAY_CHANGED") ||
+            attempt >= 2
+          )
+            throw error;
+          // A new cursor-free read can recover a changing source. Do not turn
+          // a transient read conflict into a permanent whole-page error.
+          await new Promise((resolve) =>
+            setTimeout(resolve, 150 * (attempt + 1)),
+          );
+          if (snapshotRef.current) return;
+        }
+      }
+    };
+    void loadSnapshot()
       .then((next) => {
         if (
+          next &&
           !cancelled &&
           currentGeneration === generation.current &&
           (!snapshotRef.current ||

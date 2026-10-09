@@ -266,6 +266,36 @@ export class CodexAppServerHistoryReader {
     projectPath: string,
     options: CodexAppServerSemanticPageOptions,
   ): Promise<CodexAppServerSemanticPageResult> {
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await this.readSemanticTurnsPage(
+          sessionId,
+          projectId,
+          projectPath,
+          options,
+        );
+      } catch (error) {
+        if (
+          !(error instanceof Error) ||
+          error.message !== "ROLLOUT_CURSOR_STALE" ||
+          options.cursor ||
+          options.expectedRevision
+        )
+          throw error;
+        // A cold read has no client revision to invalidate. Mailbox updates
+        // during hydration need a fresh read; sustained writes use the rollout
+        // fallback instead of failing both HTTP and WS view initialization.
+        if (attempt >= 1) return semanticFallback("transcript_parity");
+      }
+    }
+  }
+
+  private async readSemanticTurnsPage(
+    sessionId: string,
+    projectId: UrlProjectId,
+    projectPath: string,
+    options: CodexAppServerSemanticPageOptions,
+  ): Promise<CodexAppServerSemanticPageResult> {
     if (this.mode === "rollout") {
       return { kind: "fallback", reason: "disabled" };
     }

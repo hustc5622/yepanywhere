@@ -5,6 +5,8 @@ import {
   resetDisplaySnapshotCacheForTests,
   useProjectedSessionMessages,
 } from "../useProjectedSessionMessages";
+import { useSession } from "../useSession";
+import { useSessionStream } from "../useSessionStream";
 
 const api = vi.hoisted(() => ({
   getSessionMetadata: vi.fn(),
@@ -13,6 +15,14 @@ const api = vi.hoisted(() => ({
   getContextStatus: vi.fn(),
 }));
 vi.mock("../../api/client", () => ({ api }));
+vi.mock("../useSessionStream", () => ({ useSessionStream: vi.fn() }));
+vi.mock("../useSessionWatchStream", () => ({
+  useSessionWatchStream: () => ({ connected: false }),
+}));
+vi.mock("../useFileActivity", async (importOriginal) => ({
+  ...(await importOriginal<typeof import("../useFileActivity")>()),
+  useFileActivity: () => {},
+}));
 const snapshot = (seq = 0, sessionId = "session"): SessionDisplaySnapshot => ({
   version: 2,
   view: { sessionId, branchScopeId: "active", epoch: "e1" },
@@ -36,6 +46,10 @@ const deferred = <T>() => {
   return { promise, resolve };
 };
 beforeEach(() => {
+  vi.mocked(useSessionStream).mockReturnValue({
+    connected: false,
+    reconnect: vi.fn(),
+  });
   api.getContextStatus.mockResolvedValue({ source: "jsonl" });
   api.getSessionMetadata.mockResolvedValue({
     session: {
@@ -59,6 +73,87 @@ afterEach(() => {
 });
 
 describe("projected session messages", () => {
+  it.each(["SESSION_DISPLAY_STALE", "SESSION_DISPLAY_CHANGED"])(
+    "retries a cold %s response without publishing a page error",
+    async (code) => {
+      api.getSessionDisplayView.mockRejectedValueOnce(
+        Object.assign(new Error("Display changed"), { status: 409, code }),
+      );
+      const onLoadError = vi.fn();
+      const { result } = renderHook(() =>
+        useProjectedSessionMessages({ ...options, onLoadError }),
+      );
+      await waitFor(() => expect(result.current.loading).toBe(false));
+      expect(result.current.displayPage?.sessionId).toBe("session");
+      expect(onLoadError).not.toHaveBeenCalled();
+      expect(api.getSessionDisplayView.mock.calls).toEqual([
+        ["project", "session", { branchId: undefined }],
+        ["project", "session", { branchId: undefined }],
+      ]);
+    },
+  );
+
+  it("stops retrying persistent display conflicts and recovers when WS supplies a snapshot", async () => {
+    const error = Object.assign(new Error("Display changed"), {
+      status: 409,
+      code: "SESSION_DISPLAY_STALE",
+    });
+    api.getSessionDisplayView.mockRejectedValue(error);
+    const { result } = renderHook(() => useSession("project", "session"));
+    await waitFor(() => expect(result.current.error).toBe(error));
+    expect(api.getSessionDisplayView).toHaveBeenCalledTimes(3);
+    const streamOptions = vi.mocked(useSessionStream).mock.lastCall?.[1];
+    act(() => {
+      streamOptions?.onMessage({
+        eventType: "display-snapshot",
+        ...snapshot(),
+      });
+    });
+    await waitFor(() => expect(result.current.error).toBeNull());
+    expect(result.current.displayPage?.sessionId).toBe("session");
+  });
+
+  it("does not retry unrelated failures", async () => {
+    const error = Object.assign(new Error("Session not found"), {
+      status: 404,
+      code: "SESSION_NOT_FOUND",
+    });
+    api.getSessionDisplayView.mockRejectedValue(error);
+    const onLoadError = vi.fn();
+    renderHook(() => useProjectedSessionMessages({ ...options, onLoadError }));
+    await waitFor(() => expect(onLoadError).toHaveBeenCalledWith(error));
+    expect(api.getSessionDisplayView).toHaveBeenCalledTimes(1);
+  });
+
+  it("cancels a scheduled retry after switching sessions", async () => {
+    vi.useFakeTimers();
+    try {
+      api.getSessionDisplayView.mockRejectedValueOnce(
+        Object.assign(new Error("Display changed"), {
+          status: 409,
+          code: "SESSION_DISPLAY_STALE",
+        }),
+      );
+      const onLoadError = vi.fn();
+      const { result, rerender } = renderHook(
+        ({ sessionId }) =>
+          useProjectedSessionMessages({ ...options, sessionId, onLoadError }),
+        { initialProps: { sessionId: "session" } },
+      );
+      await act(async () => {});
+      api.getSessionDisplayView.mockResolvedValue(snapshot(0, "other"));
+      rerender({ sessionId: "other" });
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(1_000);
+      });
+      expect(result.current.displayPage?.sessionId).toBe("other");
+      expect(api.getSessionDisplayView).toHaveBeenCalledTimes(2);
+      expect(onLoadError).not.toHaveBeenCalled();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it("publishes metadata before the display finishes loading and retains live configuration", async () => {
     const pending = deferred<SessionDisplaySnapshot>();
     api.getSessionDisplayView.mockReturnValue(pending.promise);

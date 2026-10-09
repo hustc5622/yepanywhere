@@ -637,6 +637,7 @@ export function useSession(
   // biome-ignore lint/correctness/useExhaustiveDependencies: effect intentionally runs on session switches
   useEffect(() => {
     hasHandledConnectedEventRef.current = false;
+    setError(null);
     setLastStreamActivityAt(null);
     setIsCompacting(false);
     setTurnHealth(null);
@@ -773,6 +774,14 @@ export function useSession(
     onLoadComplete: handleLoadComplete,
     onLoadError: handleLoadError,
   });
+
+  // A WS snapshot or later refresh can recover after the initial HTTP load
+  // failed. Once both metadata and the transcript are ready, retire its error.
+  useEffect(() => {
+    if (session && !loading && (!preferDisplayHistory || displayPage)) {
+      setError(null);
+    }
+  }, [session, loading, preferDisplayHistory, displayPage]);
 
   const lastPrunedActiveWindowRevisionRef = useRef(0);
   useEffect(() => {
