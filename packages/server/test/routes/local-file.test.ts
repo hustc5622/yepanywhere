@@ -78,11 +78,39 @@ describe("Local file routes", () => {
     });
   });
 
+  it.each(["json", "JSON"])(
+    "serves local .%s files as text without project or session metadata",
+    async (extension) => {
+      const filePath = path.join(
+        tempDir,
+        `router-enabled-downstreams.${extension}`,
+      );
+      const content =
+        '{\n  "国内正式": ["minimax-m3"],\n  "enabled": true\n}\n';
+      await writeFile(filePath, content);
+
+      const response = await createLocalFileRoutes().request(
+        `/?path=${encodeURIComponent(filePath)}`,
+      );
+
+      expect(response.status).toBe(200);
+      const json = await response.json();
+      expect(json).toMatchObject({
+        metadata: {
+          path: filePath,
+          size: Buffer.byteLength(content),
+          mimeType: "application/json",
+          isText: true,
+        },
+        content,
+      });
+      expect(json.renderedMarkdownHtml).toBeUndefined();
+    },
+  );
+
   it("rejects unsupported local file extensions", async () => {
-    const allowedDir = path.join(tempDir, ".codex");
-    await mkdir(allowedDir, { recursive: true });
-    const filePath = path.join(allowedDir, "auth.json");
-    await writeFile(filePath, "{}");
+    const filePath = path.join(tempDir, "report.pdf");
+    await writeFile(filePath, "%PDF-1.4");
 
     const routes = createLocalFileRoutes();
 

@@ -14,6 +14,7 @@ const TEXT_FILE_MIME_TYPES: Record<string, string> = {
   ".md": "text/markdown",
   ".markdown": "text/markdown",
   ".txt": "text/plain",
+  ".json": "application/json",
 };
 
 function isMarkdownPath(path: string): boolean {
@@ -25,7 +26,7 @@ function isMarkdownPath(path: string): boolean {
  * Serve small local text files readable by the server, regardless of project
  * or session. This route uses the application's normal API authentication.
  *
- * Supports .md/.markdown/.txt files at absolute paths and refuses large files.
+ * Supports .md/.markdown/.txt/.json files at absolute paths and refuses large files.
  */
 export function createLocalFileRoutes(deps: LocalFileDeps = {}) {
   const routes = new Hono();

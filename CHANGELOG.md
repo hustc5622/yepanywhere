@@ -8,6 +8,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 ## [Unreleased]
 
 ### Added
+- 本地文件预览支持 `.json` 文件，点击项目目录外的 JSON 链接可在侧栏查看原始内容与行号。
 - 设置中的 CLI 更新支持本机 Codex／Pi 检查新版、后台更新、状态恢复和失败重试；识别 npm 全局安装位置及 Codex Homebrew cask，更新后复查原路径版本，保留已有会话和 bridge 进程，拒绝 Yep 中同一 harness 有活动任务时更新。
 
 ### Changed
