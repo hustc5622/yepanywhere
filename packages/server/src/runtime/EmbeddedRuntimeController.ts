@@ -10,7 +10,10 @@ import {
   type CodexNativeCapabilities,
   codexControlFailure,
 } from "../sdk/providers/codex-controls.js";
-import { configureClaudeRemoteExecutors } from "../sdk/providers/index.js";
+import {
+  codexProvider,
+  configureClaudeRemoteExecutors,
+} from "../sdk/providers/index.js";
 import type { UserMessage } from "../sdk/types.js";
 import {
   createSessionSubscription,
@@ -182,6 +185,7 @@ export class EmbeddedRuntimeController implements RuntimeController {
     }
 
     await this.supervisor.shutdown();
+    await codexProvider.disposeBridgeSideConversations();
     for (const cleanup of this.journalSubscriptions.values()) cleanup();
     this.journalSubscriptions.clear();
     await this.eventStore?.flush();
@@ -454,6 +458,30 @@ export class EmbeddedRuntimeController implements RuntimeController {
       permissionMode: process.permissionMode,
       modeVersion: process.modeVersion,
     };
+  }
+
+  async sideConversation(
+    sessionId: string,
+    request: import("@yep-anywhere/shared").SideConversationRequest,
+  ): Promise<import("@yep-anywhere/shared").SideConversationResponse> {
+    const process = this.supervisor.getProcessForSession(sessionId);
+    if (
+      !process ||
+      process.isTerminated ||
+      codexProvider.hasBridgeSideConversation(sessionId)
+    ) {
+      try {
+        return await codexProvider.bridgeSideConversation(sessionId, request);
+      } catch {
+        return { supported: false, reason: "not_ready" };
+      }
+    }
+    return (
+      process.sideConversations?.execute(request) ?? {
+        supported: false,
+        reason: "unsupported",
+      }
+    );
   }
 
   async executeCodexControl(input: RuntimeCodexControlRequest) {

@@ -77,6 +77,33 @@ function createService(
 }
 
 describe("SessionCommandService runtime boundary", () => {
+  it("rejects reserved side commands before touching main lifecycle or queue", async () => {
+    const queueMessage = vi.fn();
+    const resumeSession = vi.fn();
+    const startSession = vi.fn();
+    const service = createService({
+      queueMessage,
+      resumeSession,
+      startSession,
+    });
+    for (const message of ["/side why?", "/btw", "/yep:side-v1 {}"]) {
+      const body = { message, provider: "codex" as const };
+      expect((await service.start({ projectId: "unused", body })).status).toBe(
+        400,
+      );
+      expect(
+        (await service.resume({ projectId: "unused", sessionId: "main", body }))
+          .status,
+      ).toBe(400);
+      expect((await service.queue({ sessionId: "main", body })).status).toBe(
+        400,
+      );
+    }
+    expect(queueMessage).not.toHaveBeenCalled();
+    expect(resumeSession).not.toHaveBeenCalled();
+    expect(startSession).not.toHaveBeenCalled();
+  });
+
   it("preserves trusted Feishu MCP configuration when sending into a resident process", async () => {
     const queueMessage = vi.fn(async () => ({
       success: true,

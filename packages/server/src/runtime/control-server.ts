@@ -1,4 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
+import { SideConversationRequestSchema } from "@yep-anywhere/shared";
 import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import type {
@@ -164,6 +165,19 @@ export function createRuntimeControlApp(
         ...body,
         sessionId: c.req.param("sessionId"),
       }),
+    );
+  });
+  app.post("/sessions/:sessionId/side-conversation", async (c) => {
+    const parsed = SideConversationRequestSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success)
+      return c.json({ error: "Invalid side conversation request" }, 400);
+    return c.json(
+      (await controller.sideConversation?.(
+        c.req.param("sessionId"),
+        parsed.data,
+      )) ?? { supported: false, reason: "unsupported" },
     );
   });
   app.post("/sessions/:sessionId/codex-control", async (c) => {

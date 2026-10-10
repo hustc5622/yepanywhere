@@ -11,6 +11,8 @@ export interface DraftControls {
   restoreFromStorage: () => void;
   /** Programmatically set the input text (e.g. prefill when editing a past message) */
   setText: (value: string) => void;
+  /** Read the live editor value, including text not yet flushed to storage. */
+  getText?: () => string;
 }
 
 /** Save a value to localStorage immediately */
@@ -189,7 +191,13 @@ export function useDraftPersistence(
   }, [flushPending]);
 
   const controls = useMemo(
-    () => ({ clearInput, clearDraft, restoreFromStorage, setText: setValue }),
+    () => ({
+      clearInput,
+      clearDraft,
+      restoreFromStorage,
+      setText: setValue,
+      getText: () => valueRef.current,
+    }),
     [clearInput, clearDraft, restoreFromStorage, setValue],
   );
 

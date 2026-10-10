@@ -1,4 +1,6 @@
 import { randomUUID } from "node:crypto";
+import { createCodexSideConversation } from "../../side-conversations/codex.js";
+import { SideConversationSession } from "../../side-conversations/session.js";
 /**
  * Codex Provider implementation using codex app-server JSON-RPC.
  *
@@ -427,6 +429,10 @@ interface CodexTurnRuntimeState {
   threadId: string;
   activeTurnId: string | null;
   ready: boolean;
+  model?: string;
+  modelProvider?: string;
+  reasoningEffort?: string;
+  serviceTier?: string;
 }
 
 type CodexMessagePhase = "commentary" | "final_answer";
@@ -687,6 +693,7 @@ type AppServerRequestHandler = (
 ) => Promise<unknown>;
 
 interface AppServerRequestMetadata {
+  isolated?: boolean;
   clientMessageId?: string;
 }
 
@@ -774,6 +781,85 @@ export class CodexAppServerClient {
     }
   >();
   private readonly notifications = new AsyncQueue<JsonRpcNotification>();
+  private readonly isolatedThreads = new Map<
+    string,
+    { notify(method: string, params: unknown): void; close(): void }
+  >();
+  private readonly retiredIsolatedThreads = new Set<string>();
+  private isolatedNotificationsOnly = false;
+
+  /** Standalone side clients have no main notification consumer. */
+  useIsolatedNotificationsOnly(): void {
+    this.isolatedNotificationsOnly = true;
+  }
+
+  isolateThread(
+    id: string,
+    notify: (method: string, params: unknown) => void,
+    close: () => void,
+  ): () => void {
+    this.isolatedThreads.set(id, { notify, close });
+    return () => {
+      this.isolatedThreads.delete(id);
+      this.retiredIsolatedThreads.add(id);
+    };
+  }
+
+  async requestIsolated<T>(method: string, params: unknown): Promise<T> {
+    if (
+      [...this.pendingRequests.values()].filter(
+        (pending) => pending.metadata?.isolated,
+      ).length >= 8
+    )
+      throw new Error("Codex side channel is waiting for previous requests.");
+    let expired = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const response = this.requestOnceTracked<T>(method, params, {
+      isolated: true,
+    }).then(async ({ result }) => {
+      // A timed-out fork may still complete. Discard only its child, never the source.
+      if (expired && (method === "thread/fork" || method === "thread/start")) {
+        const thread = asRecord(asRecord(result)?.thread);
+        if (
+          thread?.ephemeral === true &&
+          typeof thread.id === "string" &&
+          thread.id !== asRecord(params)?.threadId
+        ) {
+          this.retiredIsolatedThreads.add(thread.id);
+          void this.requestIsolated("thread/unsubscribe", {
+            threadId: thread.id,
+          }).catch(() => {});
+        }
+      }
+      return result;
+    });
+    try {
+      return await Promise.race([
+        response,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            expired = true;
+            reject(new Error(`Codex side request timed out: ${method}`));
+          }, 30_000);
+          timer.unref?.();
+        }),
+      ]);
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  private closeIsolatedThreads(): void {
+    for (const sink of this.isolatedThreads.values()) {
+      try {
+        sink.close();
+      } catch {
+        /* Side observers cannot fail the parent. */
+      }
+    }
+    this.isolatedThreads.clear();
+  }
+
   private onServerRequest: AppServerRequestHandler | null = null;
   private eventObserver: AppServerEventObserver | null = null;
   private inboundObservationTail: Promise<void> = Promise.resolve();
@@ -975,6 +1061,23 @@ export class CodexAppServerClient {
         };
         const observer = this.eventObserver;
         this.enqueueInboundObservation(async () => {
+          const id = asRecord(request.params)?.threadId;
+          if (
+            typeof id === "string" &&
+            (this.isolatedThreads.has(id) ||
+              this.retiredIsolatedThreads.has(id))
+          ) {
+            this.sendRaw({
+              jsonrpc: "2.0",
+              id: request.id,
+              error: {
+                code: -32601,
+                message:
+                  "Interactive and external tools are unavailable in this read-only side conversation.",
+              },
+            });
+            return;
+          }
           await observer?.onServerRequest(request);
           this.handleServerRequest(request);
         });
@@ -994,6 +1097,22 @@ export class CodexAppServerClient {
       }
       const observer = this.eventObserver;
       this.enqueueInboundObservation(async () => {
+        const params = asRecord(notification.params);
+        const id = params?.threadId ?? asRecord(params?.thread)?.id;
+        if (
+          typeof id === "string" &&
+          (this.isolatedThreads.has(id) || this.retiredIsolatedThreads.has(id))
+        ) {
+          try {
+            this.isolatedThreads
+              .get(id)
+              ?.notify(notification.method, notification.params);
+          } catch {
+            /* Isolate side rendering failures. */
+          }
+          return;
+        }
+        if (this.isolatedNotificationsOnly) return;
         const canonicalEvent =
           await observer?.onServerNotification(notification);
         this.notifications.push({
@@ -1011,7 +1130,7 @@ export class CodexAppServerClient {
       if (!pending) {
         return;
       }
-      const observer = this.eventObserver;
+      const observer = pending.metadata?.isolated ? null : this.eventObserver;
       this.enqueueInboundObservation(async () => {
         if (this.pendingRequests.get(id) !== pending) return;
         this.pendingRequests.delete(id);
@@ -1182,7 +1301,7 @@ export class CodexAppServerClient {
     }
 
     const id = this.nextRequestId++;
-    await this.eventObserver?.onClientRequest({
+    await (metadata?.isolated ? null : this.eventObserver)?.onClientRequest({
       requestId: id,
       method,
       params,
@@ -1235,6 +1354,7 @@ export class CodexAppServerClient {
     if (this.closed) return Promise.resolve();
     this.closed = true;
 
+    this.closeIsolatedThreads();
     const closeError = new Error("Codex app-server client closed");
     this.closeError = closeError;
     for (const pending of this.pendingRequests.values()) {
@@ -1261,6 +1381,7 @@ export class CodexAppServerClient {
   private handleProcessClose(error: Error): void {
     if (this.closed) return;
     this.closed = true;
+    this.closeIsolatedThreads();
     const capturedStderr = this.stderrBuffer.trim();
     const processError = capturedStderr
       ? new Error(
@@ -1404,6 +1525,150 @@ export class CodexProvider implements AgentProvider {
               : {}),
           })
         : new InMemoryCodexEventStore());
+  }
+
+  private readonly bridgeSides = new Map<
+    string,
+    { control: SideConversationSession; touched: number }
+  >();
+
+  hasBridgeSideConversation(sessionId: string): boolean {
+    return this.bridgeSides.has(sessionId);
+  }
+
+  async disposeBridgeSideConversations(): Promise<void> {
+    await Promise.all(
+      [...this.bridgeSides.values()].map((entry) =>
+        entry.control.dispose("Runtime stopped."),
+      ),
+    );
+    this.bridgeSides.clear();
+  }
+
+  /** Fork an observed bridge thread without resuming it or taking over its writer. */
+  async bridgeSideConversation(
+    sessionId: string,
+    request: import("@yep-anywhere/shared").SideConversationRequest,
+  ): Promise<import("@yep-anywhere/shared").SideConversationResponse> {
+    let entry = this.bridgeSides.get(sessionId);
+    if (!entry) {
+      const target = await this.resolveBridgeExecutionTarget({
+        resumeSessionId: sessionId,
+        cwd: process.cwd(),
+      });
+      if (!target) return { supported: false, reason: "not_ready" };
+      const concurrent = this.bridgeSides.get(sessionId);
+      if (concurrent) return concurrent.control.execute(request);
+      // A capability read must not connect a second client or start a provider.
+      if (request.action === "get") return { supported: true };
+      if (request.action !== "create")
+        return { supported: false, reason: "not_ready" };
+      for (const [id, retained] of this.bridgeSides) {
+        if (
+          !retained.control.isOpen ||
+          Date.now() - retained.touched > 30 * 60_000
+        ) {
+          void retained.control.dispose();
+          this.bridgeSides.delete(id);
+        }
+      }
+      if (this.bridgeSides.size >= 16)
+        return {
+          supported: true,
+          error:
+            "Too many retained side conversations. End an existing one first.",
+        };
+      const control = new SideConversationSession({
+        ready: () => true,
+        parentId: () => sessionId,
+        create: async (context, emit) => {
+          const currentTarget = await this.resolveBridgeExecutionTarget({
+            resumeSessionId: sessionId,
+            cwd: process.cwd(),
+          });
+          if (!currentTarget)
+            throw new Error("The main bridge session is no longer available.");
+          const client = new CodexAppServerClient(
+            "codex-bridge",
+            process.cwd(),
+            {},
+            [],
+            { kind: "websocket", ...currentTarget },
+          );
+          try {
+            client.useIsolatedNotificationsOnly();
+            await client.connect();
+            await client.requestIsolated("initialize", {
+              clientInfo: { name: "yep-side-chat", version: "1" },
+              capabilities: null,
+            });
+            client.notify("initialized");
+            const parent = await client.requestIsolated<{
+              thread: { id: string; cwd: string; modelProvider?: string };
+            }>("thread/read", { threadId: sessionId, includeTurns: false });
+            if (parent.thread.id !== sessionId || !parent.thread.cwd)
+              throw new Error(
+                "The bridge did not identify the parent workspace.",
+              );
+            const bridgeConfig = this.bridgeExecution;
+            if (!bridgeConfig) throw new Error("Bridge configuration changed.");
+            const viewResponse = await fetch(
+              `${bridgeConfig.controlUrl}/sessions/${encodeURIComponent(sessionId)}/view`,
+              {
+                headers: currentTarget.headers,
+                signal: AbortSignal.timeout(
+                  bridgeConfig.requestTimeoutMs ?? 3_000,
+                ),
+              },
+            );
+            if (!viewResponse.ok)
+              throw new Error("Cannot read the main thread's model settings.");
+            const view = (await viewResponse.json()) as {
+              sessionView?: {
+                session?: {
+                  model?: string;
+                  reasoningEffort?: string;
+                  serviceTier?: string;
+                };
+              };
+            };
+            const settings = view.sessionView?.session;
+            if (!settings?.model)
+              throw new Error(
+                "The bridge has not identified the main thread's model yet.",
+              );
+            const side = await createCodexSideConversation({
+              client,
+              parentId: sessionId,
+              cwd: parent.thread.cwd,
+              model: settings.model,
+              reasoningEffort: settings.reasoningEffort,
+              serviceTier: settings.serviceTier,
+              modelProvider: parent.thread.modelProvider,
+              context,
+              emit,
+            });
+            return {
+              ...side,
+              close: async () => {
+                try {
+                  await side.close();
+                } finally {
+                  await client.closeAndWait();
+                }
+              },
+            };
+          } catch (error) {
+            await client.closeAndWait();
+            throw error;
+          }
+        },
+      });
+      entry = { control, touched: Date.now() };
+      this.bridgeSides.set(sessionId, entry);
+    }
+    entry.touched = Date.now();
+    return entry.control.execute(request);
   }
 
   /** Configure the production singleton after environment config is loaded. */
@@ -2024,6 +2289,24 @@ export class CodexProvider implements AgentProvider {
     }
 
     let activeClient: CodexAppServerClient | null = null;
+    const sideConversations = new SideConversationSession({
+      ready: () => runtimeState.ready && (activeClient?.isAlive() ?? false),
+      parentId: () => runtimeState.threadId,
+      create: (context, emit) => {
+        if (!activeClient) throw new Error("Codex is not ready");
+        return createCodexSideConversation({
+          client: activeClient,
+          parentId: runtimeState.threadId,
+          cwd: options.cwd,
+          model: runtimeState.model,
+          modelProvider: runtimeState.modelProvider,
+          reasoningEffort: runtimeState.reasoningEffort,
+          serviceTier: runtimeState.serviceTier,
+          context,
+          emit,
+        });
+      },
+    });
     const iterator = this.runSession(
       options,
       queue,
@@ -2037,7 +2320,9 @@ export class CodexProvider implements AgentProvider {
     return {
       iterator,
       queue,
+      sideConversations,
       abort: () => {
+        void sideConversations.dispose("The parent provider stopped.");
         abortController.abort();
         activeClient?.close();
       },
@@ -3448,6 +3733,10 @@ export class CodexProvider implements AgentProvider {
         },
       });
 
+      runtimeState.model = threadResult.model;
+      runtimeState.modelProvider = threadResult.modelProvider;
+      runtimeState.reasoningEffort = threadResult.reasoningEffort ?? undefined;
+      runtimeState.serviceTier = threadResult.serviceTier ?? undefined;
       runtimeState.ready = true;
 
       // The app-server returns the provider it actually bound the thread to;

@@ -1,6 +1,6 @@
 # Codex / Pi 旁路聊天调研与 Yep 接入方案
 
-日期：2026-10-09。状态：源码调研与接入设计，尚未实现或部署。
+日期：2026-10-09；实现更新：2026-10-10。状态：首版已实现并完成聚焦验证，未部署。
 
 已确认的产品选择：**旁路默认读取创建时的主任务上下文快照；随后独立对话，不自动向主任务回传。**
 
@@ -247,4 +247,32 @@ agent 正在继续工作…                         上下文快照 14:32 · 只
 - 旁路存在时 idle timeout 不错误回收仍有工作的 provider；单 worker 配置不让旁路永远等待父任务结束。
 - 中英文文案、独立草稿和“带回仅填入草稿”的行为。
 
-浏览器验证与真实模型并发 smoke 留到实现后按用户授权执行。本轮只完成源码、CLI 版本和静态协议检查，未调用模型、未安装插件、未重启服务，也未改现有产品代码。
+浏览器验证与真实模型并发 smoke 留到实现后按用户授权执行。2026-10-09 调研阶段只完成源码、CLI 版本和静态协议检查，未调用模型、未安装插件、未重启服务，也未改产品代码；后续实现记录见第 8 节。
+
+
+## 8. 2026-10-10 实现与验证记录
+
+首版实现沿用上面的上下文选择与隔离边界，实际交付如下：
+
+- 新增共享请求 schema、独立 `SideConversationSession`、Codex/Pi adapter；每个父会话一个旁路，进程内最多四个存活旁路，不占主任务 worker queue。
+- 实际接口为 `POST /api/sessions/:sessionId/side-conversation`，以 `action=get/create/send/interrupt/close` 分发。embedded 与 external runtime 使用同一接口契约；旧 runtime 返回不支持，不触发主流程回退。
+- 首版使用独立、按版本读取的内存快照，回复中约 650ms 轮询、空闲 3s；面板隐藏后停止持续轮询，浏览器不可见时暂停读取。只有版本变化才传输 transcript。这样不需要改动主会话 WebSocket/SSE、display reducer 和重连协议。返回体、草稿和错误状态相互独立。
+- Codex 的请求/响应不进入父 provider journal；子线程通知与审批在 RPC 入口分流。结束后保留子线程识别信息，丢弃迟到事件。外部 bridge 会话用独立观察连接读取父信息后 fork，不 resume 或 steer 父线程；模型、reasoning 与 service tier 从 bridge 的会话视图读取。
+- bridge 对 `ephemeral + read-only + never` 的临时线程使用 clear MCP 配置，原连接的 profile 不变。MCP 的空工具 allowlist 提供第二层限制。Codex 同时禁用 shell、agents、插件、hooks、浏览器与外部工具；Pi 只提供 read/grep/find/ls。
+- 原生验证发现 `features.multi_agent=false` 并不足以关闭 Codex 0.161.0 的 agent 工具，已补 `agents.enabled=false`。本机实际模型请求工具清单已核对为 `request_user_input` / `view_image`；前者的 server request 被旁路通道拒绝，不转为主任务审批。Codex 首版主要用于快照问答，不开放 shell 文件探索。
+- Pi 扩展只在受管进程中随包加载，SDK 懒加载；使用独立 in-memory settings/session/model runtime；复制网关模型配置和凭据，不修改父 model/settings。私有命令先通过 `get_commands` 验证，再携带进程令牌调用；其 ACK 和流式输出不依赖父 `agent_settled`。
+- 主任务发送服务拒绝 `/side`、`/btw` 和内部控制命令，防止旧客户端把旁路请求当成普通消息。UI 在 optimistic 主消息创建之前分流。
+- 会话页顶部提供旁路入口，桌面右栏与详情栏共用位置，手机全屏；支持连续追问、收起、单独停止、结束后新建、主任务状态、完成后 Markdown 和“带回主输入框”。带回动作读取实时草稿并追加，不直接发送。
+- 单轮最长 10 分钟，无访问的空闲旁路 30 分钟释放；最多 100 条消息 / 512,000 字符，Pi 快照入口另有大小限制。真正 provider/runtime 退出、父会话替换或原有 idle preemption 会使子会话失效；没有为了旁路去修改主任务调度优先级。使用者须新建旁路，不能将临时线程当持久会话 resume。
+
+验证证据：
+
+1. 聚焦测试覆盖独立消息、创建/发送去重、取消范围、创建与关闭竞争、容量回收、超时、父发送入口保护、bridge profile、外置 runtime、草稿、IME 和关闭面板行为。
+2. 本机 Pi 1.1.0 使用真实安装的 SDK 创建、销毁子会话；使用测试模型配置，阻断 fetch，记录网络请求为 0。
+3. 本机 Codex 0.161.0 使用临时 CODEX_HOME 和本机模拟 Responses 服务：父请求保持未结束时创建快照 fork，子线程回答并关闭后父线程仍 active，随后父线程正常完成；共两个模拟请求，无真实模型用量。
+4. 原生并发探测已保留为 `pnpm exec tsx --conditions source scripts/smoke-side-conversations.ts`，包含父任务持续运行、快照/边界继承和子工具清单断言。
+5. TypeScript、改动文件 Biome、客户端临时目录构建和机械设计检查按实现范围执行；未进行浏览器自动化，未安装全局插件，未重启现有服务。
+
+模型选择器、选中文字后提问、多旁路列表和跨运行时重启的永久保存仍属于第二阶段；首版固定继承模型/思考等级，仅允许切换新建旁路是否携带主对话快照。
+
+旁路隔离的是任务指令、消息、权限和生命周期；它仍会产生额外模型用量，并与主任务共享对应账户的速率限制和机器资源。首版以独立并发上限约束这部分开销，不承诺资源层面的零竞争。

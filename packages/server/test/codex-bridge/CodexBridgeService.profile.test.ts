@@ -197,6 +197,42 @@ describe("CodexBridgeService managed upstream profiles", () => {
         },
       });
 
+      const sideRequest = await sendAndReceive(fullClient, {
+        jsonrpc: "2.0",
+        id: 1101,
+        method: "thread/fork",
+        params: {
+          threadId: "thread-existing",
+          ephemeral: true,
+          sandbox: "read-only",
+          approvalPolicy: "never",
+        },
+      });
+      expect(sideRequest.params).toMatchObject({
+        config: {
+          mcp_servers: {
+            lark: { enabled: false },
+            node_repl: { enabled: false },
+            web: { enabled: false },
+          },
+        },
+      });
+      const parentAfterSide = await sendAndReceive(fullClient, {
+        jsonrpc: "2.0",
+        id: 1102,
+        method: "thread/resume",
+        params: { threadId: "thread-existing" },
+      });
+      expect(parentAfterSide.params).toMatchObject({
+        config: {
+          mcp_servers: {
+            lark: { enabled: true },
+            node_repl: { enabled: true },
+            web: { enabled: true },
+          },
+        },
+      });
+
       const batchedRequest = await sendAndReceive(fallbackClient, [
         { method: "initialized" },
         {

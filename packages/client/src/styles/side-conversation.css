@@ -1,0 +1,160 @@
+.side-conversation {
+  display: flex;
+  flex-direction: column;
+  flex: 0 0 clamp(360px, 34vw, 480px);
+  width: clamp(360px, 34vw, 480px);
+  height: 100dvh;
+  min-width: 0;
+  color: var(--text-primary);
+  background: var(--bg-surface);
+  border-left: 1px solid var(--border-color);
+}
+.side-conversation[hidden] {
+  display: none;
+}
+.side-conversation--mobile {
+  position: fixed;
+  inset: 0;
+  width: 100%;
+  z-index: 100;
+  padding-top: env(safe-area-inset-top);
+  padding-bottom: env(safe-area-inset-bottom);
+  box-sizing: border-box;
+}
+.side-conversation-header,
+.side-conversation-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+}
+.side-conversation-header {
+  padding: var(--space-3);
+}
+.side-conversation-header h2 {
+  font-size: var(--font-size-lg);
+  margin: 0;
+}
+.side-conversation button,
+.side-conversation select {
+  color: var(--text-primary);
+  background: var(--bg-secondary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  padding: var(--space-2) var(--space-3);
+  font: inherit;
+  cursor: pointer;
+  min-height: 40px;
+}
+.side-conversation button:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+.side-conversation button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+.side-conversation :focus-visible {
+  outline: 2px solid var(--focus-border);
+  outline-offset: 2px;
+}
+.side-conversation .side-conversation-parent {
+  border-radius: 0;
+  border-width: 1px 0;
+  text-align: left;
+}
+.side-conversation-context {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+  overflow-wrap: anywhere;
+}
+.side-conversation-context p {
+  margin: 0;
+  line-height: 1.6;
+}
+.side-conversation-messages {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  padding: var(--space-3);
+  overscroll-behavior: contain;
+}
+.side-conversation-message {
+  margin-bottom: var(--space-4);
+  overflow-wrap: anywhere;
+}
+.side-conversation-role {
+  font-size: var(--font-size-sm);
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+.side-conversation-message--user {
+  padding: var(--space-3);
+  background: var(--bg-secondary);
+  border-radius: var(--radius-sm);
+}
+.side-conversation-message .text-block {
+  padding: var(--space-2) 0;
+}
+.side-conversation-message pre {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.side-conversation .side-conversation-handoff {
+  font-size: var(--font-size-sm);
+  background: transparent;
+}
+.side-conversation-status {
+  color: var(--text-secondary);
+}
+.side-conversation-error {
+  color: var(--error-color, var(--text-primary));
+  overflow-wrap: anywhere;
+}
+.side-conversation-composer {
+  padding: var(--space-3);
+  border-top: 1px solid var(--border-color);
+}
+.side-conversation-composer textarea {
+  box-sizing: border-box;
+  width: 100%;
+  min-height: 88px;
+  max-height: 28dvh;
+  resize: vertical;
+  padding: var(--space-3);
+  margin: var(--space-2) 0;
+  font: inherit;
+  line-height: 1.5;
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+.side-conversation-composer textarea::placeholder {
+  color: var(--text-secondary);
+}
+.side-conversation-setting {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-2);
+  font-size: var(--font-size-sm);
+}
+.side-conversation-actions {
+  justify-content: flex-end;
+}
+.side-conversation-actions > :first-child:not(:only-child) {
+  margin-right: auto;
+}
+@media (max-width: 1200px) {
+  .side-conversation:not(.side-conversation--mobile) {
+    position: fixed;
+    top: 0;
+    right: 0;
+    z-index: 50;
+    box-shadow: -8px 0 24px rgb(0 0 0 / 12%);
+  }
+}

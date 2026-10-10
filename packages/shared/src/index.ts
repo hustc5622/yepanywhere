@@ -871,3 +871,5 @@ export {
   type SessionFileContentRef,
   type SessionFileOperationStats,
 } from "./session-file-operation.js";
+
+export * from "./side-conversations.js";

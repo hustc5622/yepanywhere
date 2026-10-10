@@ -973,6 +973,14 @@ async function loadReportImageFile(
 }
 
 export const api = {
+  sideConversation: (
+    sessionId: string,
+    request: import("@yep-anywhere/shared").SideConversationRequest,
+  ) =>
+    fetchJSON<import("@yep-anywhere/shared").SideConversationResponse>(
+      `/sessions/${encodeURIComponent(sessionId)}/side-conversation`,
+      { method: "POST", body: JSON.stringify(request) },
+    ),
   // Version API
   getVersion: (options?: GetVersionOptions) =>
     fetchJSON<VersionInfo>(options?.fresh ? "/version?fresh=1" : "/version"),

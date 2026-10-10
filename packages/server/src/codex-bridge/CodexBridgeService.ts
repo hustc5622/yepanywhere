@@ -1908,8 +1908,17 @@ export class CodexBridgeService implements CodexBridgeController {
     if (!configReadResult || !("config" in configReadResult)) {
       throw new Error("Codex config/read returned no effective config");
     }
-    const mcpMode =
-      connection.profile === "light" ? "standard" : connection.profile;
+    // A disposable read-only fork may narrow its own tools without changing
+    // the connection profile (which still owns the active main thread).
+    const readOnlySide =
+      params.ephemeral === true &&
+      params.sandbox === "read-only" &&
+      params.approvalPolicy === "never";
+    const mcpMode = readOnlySide
+      ? "clear"
+      : connection.profile === "light"
+        ? "standard"
+        : connection.profile;
     const mcpProfile = resolveCodexMcpThreadProfile(
       mcpMode,
       configReadResult.config,

@@ -8,6 +8,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 ## [Unreleased]
 
 ### Added
+- Codex（含 bridge 外部会话）与 Pi 新增独立旁路聊天：默认读取主任务上下文快照，支持连续追问、单独停止、收起恢复和带回主输入框；旁路事件、权限、草稿与主消息链路隔离，兼容 embedded/external runtime，并限制并发、历史大小和存活时间。
 - 本地文件预览支持 `.json` 文件，点击项目目录外的 JSON 链接可在侧栏查看原始内容与行号。
 - 设置中的 CLI 更新支持本机 Codex／Pi 检查新版、后台更新、状态恢复和失败重试；识别 npm 全局安装位置及 Codex Homebrew cask，更新后复查原路径版本，保留已有会话和 bridge 进程，拒绝 Yep 中同一 harness 有活动任务时更新。
 

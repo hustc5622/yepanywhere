@@ -211,6 +211,10 @@ export interface RuntimeProviderSettings {
 }
 
 export interface RuntimeController {
+  sideConversation?(
+    sessionId: string,
+    request: import("@yep-anywhere/shared").SideConversationRequest,
+  ): Promise<import("@yep-anywhere/shared").SideConversationResponse>;
   readonly mode: RuntimeMode;
 
   start(): Promise<void>;

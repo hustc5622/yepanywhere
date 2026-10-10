@@ -300,6 +300,22 @@ export class HttpRuntimeController implements RuntimeController {
     });
   }
 
+  async sideConversation(
+    sessionId: string,
+    request: import("@yep-anywhere/shared").SideConversationRequest,
+  ): Promise<import("@yep-anywhere/shared").SideConversationResponse> {
+    try {
+      return await this.request(
+        `/sessions/${encode(sessionId)}/side-conversation`,
+        { method: "POST", body: JSON.stringify(request) },
+      );
+    } catch (error) {
+      if (error instanceof RuntimeHttpError && error.status === 404)
+        return { supported: false, reason: "unsupported" };
+      throw error;
+    }
+  }
+
   async executeCodexControl(
     input: RuntimeCodexControlRequest,
   ): Promise<CodexNativeControlResult> {

@@ -11,6 +11,7 @@ import type {
   SlashCommand,
 } from "@yep-anywhere/shared";
 import type { FeishuMcpConfig } from "../../channels/feishu/user-auth/mcp-gateway.js";
+import type { SideConversationControl } from "../../side-conversations/session.js";
 import type { MessageQueue } from "../messageQueue.js";
 import type { CanUseTool, SDKMessage, UserMessage } from "../types.js";
 import type { CodexSessionControls } from "./codex-controls.js";
@@ -123,6 +124,7 @@ export interface StartSessionOptions {
  * This is the common interface all providers must return.
  */
 export interface AgentSession {
+  sideConversations?: SideConversationControl;
   /** Async iterator yielding SDK messages */
   iterator: AsyncIterableIterator<SDKMessage>;
   /** Message queue for sending messages to the agent */

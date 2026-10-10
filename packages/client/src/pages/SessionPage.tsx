@@ -1,3 +1,4 @@
+import { parseSideConversationCommand } from "@yep-anywhere/shared";
 import type {
   ProviderName,
   SessionDisplayPage,
@@ -28,6 +29,7 @@ import { SessionInspector } from "../components/SessionInspector";
 import { SessionMenu } from "../components/SessionMenu";
 import { SessionSearchBar } from "../components/SessionSearchBar";
 import { SessionTitleGenerationStatus } from "../components/SessionTitleGenerationStatus";
+import { SideConversationPanel } from "../components/SideConversationPanel";
 import { SessionMessagesSkeleton } from "../components/Skeleton";
 import { SubagentDetailProvider } from "../components/SubagentDetailProvider";
 import { ToolApprovalPanel } from "../components/ToolApprovalPanel";
@@ -60,6 +62,7 @@ import {
 } from "../hooks/useSession";
 import { useSessionInspectorHistory } from "../hooks/useSessionInspectorHistory";
 import { useSessionInspectorPreference } from "../hooks/useSessionInspectorPreference";
+import { useSideConversation } from "../hooks/useSideConversation";
 import { useI18n } from "../i18n";
 import { useNavigationLayout } from "../layouts";
 import {
@@ -439,6 +442,12 @@ function SessionPageContent({
   const [targetMessageId, setTargetMessageId] = useState<string | null>(
     initialBranchFocus.messageId,
   );
+  const [sideVisible, setSideVisible] = useState(false);
+  const side = useSideConversation(
+    actualSessionId,
+    effectiveProvider === "codex" || effectiveProvider === "pi",
+    sideVisible,
+  );
   const [isInspectorDrawerOpen, setInspectorDrawerOpen] = useState(false);
   const {
     isExpanded: isInspectorExpanded,
@@ -447,7 +456,9 @@ function SessionPageContent({
   const [isSessionSearchOpen, setSessionSearchOpen] = useState(false);
   const pageVisible = useDocumentVisibility();
   const isInspectorVisible =
-    pageVisible && (isWideScreen ? isInspectorExpanded : isInspectorDrawerOpen);
+    pageVisible &&
+    !sideVisible &&
+    (isWideScreen ? isInspectorExpanded : isInspectorDrawerOpen);
   const {
     messages: legacyInspectorMessages,
     loading: legacyInspectorLoading,
@@ -749,8 +760,21 @@ function SessionPageContent({
         skills: t("codexSkillsLabel"),
         slashCommands: t("slashCommandsLabel"),
       },
+    ).map((group) =>
+      group.prefix !== "/"
+        ? group
+        : {
+            ...group,
+            commands: [
+              ...group.commands.filter(
+                (command) => command !== "side" && command !== "btw",
+              ),
+              ...(side.supported ? ["side", "btw"] : []),
+            ],
+          },
     );
   }, [
+    side.supported,
     allSlashCommands,
     codexSkills,
     effectiveProvider,
@@ -1055,6 +1079,32 @@ function SessionPageContent({
 
   const handleSend = async (text: string, interruptBeforeSend = false) => {
     if (isRestoringEdit) return;
+    const sideCommand = parseSideConversationCommand(text);
+    if (sideCommand) {
+      if (
+        editRewind ||
+        attachments.length > 0 ||
+        pendingUploadsRef.current.size > 0
+      ) {
+        draftControlsRef.current?.restoreFromStorage();
+        showToast(
+          t(editRewind ? "sideChatHistoricalEdit" : "sideChatAttachments"),
+          "error",
+        );
+        return;
+      }
+      if (!side.supported) {
+        draftControlsRef.current?.restoreFromStorage();
+        showToast(t("sideChatUnavailable"), "error");
+        return;
+      }
+      setSideVisible(true);
+      setInspectorDrawerOpen(false);
+      if (!sideCommand.text || (await side.send(sideCommand.text)))
+        draftControlsRef.current?.clearDraft();
+      else draftControlsRef.current?.restoreFromStorage();
+      return;
+    }
     if (effectiveProvider === "codex") {
       const command = parseCodexSlashCommand(text);
       if (command.kind === "invalid-compact-args") {
@@ -2231,6 +2281,7 @@ function SessionPageContent({
       }
     >
       <div
+        inert={sideVisible && !isWideScreen ? true : undefined}
         className={
           isWideScreen
             ? "main-content-constrained"
@@ -2378,11 +2429,39 @@ function SessionPageContent({
               >
                 <SessionSearchIcon />
               </button>
-              {(!isWideScreen || !isInspectorExpanded) && (
+              {side.supported && (
+                <button
+                  type="button"
+                  className="session-inspector-toggle"
+                  aria-label={t("sideChatTitle")}
+                  title={t("sideChatTitle")}
+                  aria-expanded={sideVisible}
+                  onClick={() => {
+                    setSideVisible(!sideVisible);
+                    setInspectorDrawerOpen(false);
+                  }}
+                >
+                  <svg
+                    width="20"
+                    height="20"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="1.8"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    aria-hidden="true"
+                  >
+                    <path d="M9 3h12v12H9zM3 9v12h12M12 7h6M12 11h4" />
+                  </svg>
+                </button>
+              )}
+              {(!isWideScreen || !isInspectorExpanded || sideVisible) && (
                 <button
                   type="button"
                   className="session-inspector-toggle"
                   onClick={() => {
+                    setSideVisible(false);
                     if (isWideScreen) {
                       setInspectorExpanded(true);
                     } else {
@@ -2835,8 +2914,35 @@ function SessionPageContent({
           </div>
         </footer>
       </div>
+      <SideConversationPanel
+        side={side}
+        sessionId={actualSessionId}
+        visible={sideVisible}
+        mobile={!isWideScreen}
+        parentStatus={t(
+          pendingInputRequest
+            ? "sideChatMainWaiting"
+            : processState === "in-turn"
+              ? "sideChatMainRunning"
+              : "sideChatMainIdle",
+        )}
+        onClose={() => setSideVisible(false)}
+        onBringBack={(text) => {
+          if (editRewind) {
+            showToast(t("sideChatHistoricalEdit"), "error");
+            return;
+          }
+          const existing = draftControlsRef.current?.getText?.() ?? "";
+          draftControlsRef.current?.setText(
+            [existing, t("sideChatHandoff", { content: text })]
+              .filter(Boolean)
+              .join("\n\n"),
+          );
+          setSideVisible(false);
+        }}
+      />
       {isWideScreen ? (
-        isInspectorExpanded ? (
+        isInspectorExpanded && !sideVisible ? (
           <SessionInspector
             branchId={selectedBranchId}
             presentation="sidebar"
@@ -2876,7 +2982,7 @@ function SessionPageContent({
         <SessionInspector
           branchId={selectedBranchId}
           presentation="drawer"
-          isOpen={isInspectorDrawerOpen}
+          isOpen={isInspectorDrawerOpen && !sideVisible}
           onClose={() => setInspectorDrawerOpen(false)}
           messages={inspectorMessages}
           userQuestions={

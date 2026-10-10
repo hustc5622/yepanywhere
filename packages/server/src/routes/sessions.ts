@@ -1,5 +1,6 @@
 import { stat } from "node:fs/promises";
 import { join, relative } from "node:path";
+import { SideConversationRequestSchema } from "@yep-anywhere/shared";
 import {
   ALL_PERMISSION_MODES,
   type ContextCompactEvent,
@@ -2524,6 +2525,21 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       body,
     });
     return c.json(result.body, result.status);
+  });
+
+  // Dedicated control endpoint: never resume, steer, queue, or acquire parent ownership.
+  routes.post("/sessions/:sessionId/side-conversation", async (c) => {
+    const parsed = SideConversationRequestSchema.safeParse(
+      await c.req.json().catch(() => null),
+    );
+    if (!parsed.success)
+      return c.json({ error: "Invalid side conversation request" }, 400);
+    return c.json(
+      (await runtimeController.sideConversation?.(
+        c.req.param("sessionId"),
+        parsed.data,
+      )) ?? { supported: false, reason: "unsupported" },
+    );
   });
 
   // POST /api/sessions/:sessionId/messages - Queue message

@@ -27,6 +27,7 @@ const SERVER_DIST = path.join(SERVER_PACKAGE, "dist");
 const SHARED_DIST = path.join(ROOT_DIR, "packages/shared/dist");
 const PI_EXTENSION_RESOURCES = [
   "resources/pi-yep-extension.mjs",
+  "resources/pi-side-conversation.mjs",
   "resources/pi-file-operations.mjs",
 ];
 

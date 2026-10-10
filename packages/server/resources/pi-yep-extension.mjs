@@ -2,6 +2,7 @@ import { constants } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import { isAbsolute, resolve } from "node:path";
 import { installPiFileOperationTools } from "./pi-file-operations.mjs";
+import { installPiSideConversations } from "./pi-side-conversation.mjs";
 
 /**
  * Yep's temporary, process-local Pi integration.
@@ -447,6 +448,7 @@ function serializeApproval(event) {
 }
 
 export default function yepPiExtension(pi) {
+  installPiSideConversations(pi);
   const config = parseProviderConfig();
   for (const provider of config.providers) {
     pi.registerProvider(provider.id, provider.config);

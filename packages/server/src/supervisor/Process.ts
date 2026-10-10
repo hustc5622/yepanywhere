@@ -36,6 +36,7 @@ import type {
   UserMessage,
 } from "../sdk/types.js";
 import { validateQuestionAnswers } from "../sessions/question-answers.js";
+import type { SideConversationControl } from "../side-conversations/session.js";
 import type {
   AgentActivity,
   InputRequest,
@@ -148,6 +149,7 @@ export interface ProcessConstructorOptions extends ProcessOptions {
   steerFn?: (message: UserMessage) => Promise<AgentSteerResult>;
   /** Capability-gated Codex app-server controls for this session. */
   codexControls?: CodexSessionControls;
+  sideConversations?: SideConversationControl;
   /** Function to get supported models (SDK 0.2.7+) */
   supportedModelsFn?: () => Promise<ModelInfo[]>;
   /** Function to get supported slash commands (SDK 0.2.7+) */
@@ -259,6 +261,7 @@ export class Process {
   private interruptFn: (() => Promise<void>) | null;
   /** Function to steer an active turn (provider-specific, currently Codex app-server) */
   private steerFn: ((message: UserMessage) => Promise<AgentSteerResult>) | null;
+  readonly sideConversations?: SideConversationControl;
   private codexControls: CodexSessionControls | null;
 
   /** Function to get supported models (SDK 0.2.7+) */
@@ -367,6 +370,7 @@ export class Process {
     this.interruptFn = options.interruptFn ?? null;
     this.steerFn = options.steerFn ?? null;
     this.codexControls = options.codexControls ?? null;
+    this.sideConversations = options.sideConversations;
     this.supportedModelsFn = options.supportedModelsFn ?? null;
     this.supportedCommandsFn = options.supportedCommandsFn ?? null;
     this._pidResolver = options.pid;

@@ -13,6 +13,19 @@ describe("useDraftPersistence", () => {
     vi.useRealTimers();
   });
 
+  it("reads the live draft when appending a side answer before storage debounce", () => {
+    localStorage.setItem("draft-main", "old text");
+    const { result } = renderHook(() => useDraftPersistence("draft-main"));
+    act(() => result.current[1]("unsaved main instructions"));
+    expect(localStorage.getItem("draft-main")).toBe("old text");
+    act(() =>
+      result.current[2].setText(
+        `${result.current[2].getText?.()}\n\nside answer`,
+      ),
+    );
+    expect(result.current[0]).toBe("unsaved main instructions\n\nside answer");
+  });
+
   it("recovers the complete message when an immediate send fails before the debounce", () => {
     localStorage.setItem("draft-a", "older text");
     const { result } = renderHook(() => useDraftPersistence("draft-a"));

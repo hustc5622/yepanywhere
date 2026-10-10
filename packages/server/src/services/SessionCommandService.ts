@@ -1,3 +1,4 @@
+import { parseSideConversationCommand } from "@yep-anywhere/shared";
 import {
   ALL_CODEX_MCP_MODES,
   ALL_PERMISSION_MODES,
@@ -804,6 +805,16 @@ export class SessionCommandService {
     input: StartSessionCommandInput,
   ): Promise<SessionCommandResult<Record<string, unknown>>> {
     const { projectId, body } = input;
+    if (
+      typeof body.message === "string" &&
+      (parseSideConversationCommand(body.message) ||
+        /^\/yep:side-v1(?:\s|$)/u.test(body.message.trim()))
+    ) {
+      return commandFailure(
+        "Open Side chat to send this question without changing the main task.",
+        400,
+      );
+    }
     const providerFailure = this.validateRequestedProvider(body.provider);
     if (providerFailure) return providerFailure;
     if (!isUrlProjectId(projectId)) {
@@ -954,6 +965,16 @@ export class SessionCommandService {
     input: ResumeSessionCommandInput,
   ): Promise<SessionCommandResult<Record<string, unknown>>> {
     const { projectId, sessionId, body } = input;
+    if (
+      typeof body.message === "string" &&
+      (parseSideConversationCommand(body.message) ||
+        /^\/yep:side-v1(?:\s|$)/u.test(body.message.trim()))
+    ) {
+      return commandFailure(
+        "Open Side chat to send this question without changing the main task.",
+        400,
+      );
+    }
     const controlAfterResume = input.controlAfterResume;
     const persistedProvider =
       this.deps.sessionMetadataService?.getPersistedProvider?.(sessionId) ??
@@ -1579,6 +1600,16 @@ export class SessionCommandService {
     input: QueueSessionMessageCommandInput,
   ): Promise<SessionCommandResult<Record<string, unknown>>> {
     const { sessionId, body } = input;
+    if (
+      typeof body.message === "string" &&
+      (parseSideConversationCommand(body.message) ||
+        /^\/yep:side-v1(?:\s|$)/u.test(body.message.trim()))
+    ) {
+      return commandFailure(
+        "Open Side chat to send this question without changing the main task.",
+        400,
+      );
+    }
     if (
       body.interruptBeforeSend !== undefined &&
       typeof body.interruptBeforeSend !== "boolean"
