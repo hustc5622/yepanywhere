@@ -79,9 +79,30 @@ bundles_match() {
   fi
 }
 
+# A preserved runtime/bridge may still use its cwd or lazily load files from
+# an older bundle after several shell deployments. Never remove that tree.
+# lsof returns 1 with no output for no matches; diagnostics/other failures
+# cannot prove that a directory is unused, so retain it conservatively.
+cleanup_retired_bundles() {
+  local candidate probe result
+  for candidate in "$RUNTIME_PARENT/.${RUNTIME_NAME}.retired."*; do
+    [[ -d "$candidate" && ! -L "$candidate" ]] || continue
+    is_runtime_bundle "$candidate" || continue
+    result=0
+    # Do not use -t: it implies -w and would hide inspection warnings.
+    probe="$(lsof -nP -F p +D "$candidate" 2>&1)" || result=$?
+    if [[ "$result" == 1 && -z "$probe" ]]; then
+      rm -rf "$candidate"
+    else
+      printf 'Retaining runtime bundle (in use or usage could not be verified): %s\n' "$candidate" >&2
+    fi
+  done
+}
+
 if [[ -d "$RUNTIME_BUNDLE_DIR/node_modules" ]] &&
   bundles_match "$SOURCE_BUNDLE_DIR" "$RUNTIME_BUNDLE_DIR"; then
   chmod +x "$RUNTIME_BUNDLE_DIR/dist/cli.js"
+  cleanup_retired_bundles
   printf 'runtime=%s\n' "$RUNTIME_BUNDLE_DIR"
   printf 'unchanged=true\n'
   if [[ -d "$PREVIOUS_BUNDLE_DIR" ]]; then
@@ -132,12 +153,11 @@ fi
 PUBLISHED=true
 
 if [[ -n "$RETIRED_PREVIOUS_DIR" && -d "$RETIRED_PREVIOUS_DIR" ]]; then
-  if $CURRENT_MOVED; then
-    rm -rf "$RETIRED_PREVIOUS_DIR"
-  else
+  if ! $CURRENT_MOVED; then
     mv "$RETIRED_PREVIOUS_DIR" "$PREVIOUS_BUNDLE_DIR"
   fi
 fi
+cleanup_retired_bundles
 
 printf 'runtime=%s\n' "$RUNTIME_BUNDLE_DIR"
 if [[ -d "$PREVIOUS_BUNDLE_DIR" ]]; then

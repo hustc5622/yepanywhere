@@ -154,7 +154,7 @@ server_activity_state() {
     printf '%s' "stopped"
     return 0
   fi
-  if ! response="$(curl -fsS --max-time 3 "${SERVER_BASE_URL}/api/status/workers" 2>/dev/null)"; then
+  if ! response="$(curl -fsS --max-time 3 "${SERVER_BASE_URL}/api/status/workers")"; then
     printf '%s' "unknown"
     return 0
   fi
@@ -165,6 +165,12 @@ process.stdin.on("data", (chunk) => raw += chunk);
 process.stdin.on("end", () => {
   try {
     const data = JSON.parse(raw);
+    if (!data || typeof data.hasActiveWork !== "boolean" ||
+        !Number.isInteger(data.queueLength) || data.queueLength < 0 ||
+        (data.runtimeMode !== undefined &&
+         data.runtimeMode !== "external" && data.runtimeMode !== "embedded")) {
+      throw new Error("Invalid worker status");
+    }
     const active = data.runtimeMode !== "external" &&
       (data.hasActiveWork === true || Number(data.queueLength || 0) > 0);
     process.stdout.write(active ? "active" : "idle");
@@ -176,7 +182,7 @@ process.stdin.on("end", () => {
 }
 
 wait_for_yep_sessions_before_cutover() {
-  local state announced=false elapsed=0
+  local state announced=false elapsed=0 unknown_checks=0
 
   if $ALLOW_YEP_SESSION_INTERRUPT; then
     warn "Active Yep-managed work may be interrupted because --allow-yep-session-interrupt was provided."
@@ -193,6 +199,7 @@ wait_for_yep_sessions_before_cutover() {
         return 0
         ;;
       active)
+        unknown_checks=0
         if ! $announced; then
           log "Waiting for active Yep-managed work before replacing 8022 ..."
           echo "YEP_DEPLOY_WAITING_FOR_IDLE"
@@ -205,7 +212,13 @@ wait_for_yep_sessions_before_cutover() {
         elapsed=$((elapsed + 1))
         ;;
       *)
-        err "Port ${SERVER_PORT} is listening, but ${SERVER_BASE_URL}/api/status/workers could not be verified."
+        unknown_checks=$((unknown_checks + 1))
+        if (( unknown_checks < 10 )); then
+          warn "Worker status could not be verified (attempt ${unknown_checks}/10); retrying in 1s ..."
+          sleep 1
+          continue
+        fi
+        err "Port ${SERVER_PORT} is listening, but ${SERVER_BASE_URL}/api/status/workers could not be verified after 10 attempts."
         err "Refusing to stop an unverified service. Check the configured port/base path, or use --allow-yep-session-interrupt to force the cutover."
         return 1
         ;;
@@ -521,7 +534,7 @@ refresh_installed_bridge_launchagents() {
   fi
 
   log "Refreshing the installed Codex bridge LaunchAgent definition without restarting it ..."
-  "$SCRIPT_DIR/install-launchagents.sh" --bridge-only --no-start
+  "$SCRIPT_DIR/install-launchagents.sh" --bridge-only --no-start --skip-sync
 }
 
 # ----- external agent runtime -----
@@ -547,7 +560,7 @@ refresh_installed_runtime_launchagent() {
   [[ -f "$RUNTIME_LAUNCHD_PLIST" ]] || return 0
 
   log "Refreshing the installed agent runtime LaunchAgent definition without restarting it ..."
-  YEP_RUNTIME_EXTERNAL=true "$SCRIPT_DIR/install-launchagents.sh" --runtime-only --no-start
+  YEP_RUNTIME_EXTERNAL=true "$SCRIPT_DIR/install-launchagents.sh" --runtime-only --no-start --skip-sync
 }
 
 restart_runtime_worker() {
@@ -622,9 +635,8 @@ if $DO_BUILD; then
     warn "Bundle reports version '${ACTUAL_VERSION}' but expected 'v${NPM_VERSION}'."
   fi
 
-  # Running LaunchAgents are not restarted here; this updates what their next
-  # launch will execute and retains the former runtime as `.previous` for rollback.
-  sync_launchd_runtime_if_installed
+  # Build-only must leave the installed bundle (and live process cwd) alone.
+  # Publish only during the subsequent cutover, including --restart-only runs.
 fi
 
 if $DO_RESTART || $RESTART_CODEX_BRIDGE || $RESTART_RUNTIME; then
@@ -632,14 +644,21 @@ if $DO_RESTART || $RESTART_CODEX_BRIDGE || $RESTART_RUNTIME; then
 fi
 # Build-only runs can precede a second invocation for the actual cutover.
 # Refresh launch definitions once, when a process is actually being restarted.
+if $DO_RESTART; then
+  wait_for_yep_sessions_before_cutover
+fi
 if $DO_RESTART || $RESTART_CODEX_BRIDGE || $RESTART_RUNTIME; then
   refresh_installed_bridge_launchagents
   refresh_installed_runtime_launchagent
 fi
 
 # ----- restart -----
-if $DO_RESTART; then
-  wait_for_yep_sessions_before_cutover
+# Sidecar-only cutovers preserve the web process. Sync retains any older tree
+# still used by the web, runtime, or bridge instead of deleting it.
+if ! $DO_RESTART && { $RESTART_CODEX_BRIDGE || $RESTART_RUNTIME; }; then
+  sync_launchd_runtime_if_installed
+elif ! $DO_RESTART; then
+  dim "Build-only: installed LaunchAgent bundle unchanged; publish with the next restart."
 fi
 
 if $DO_RESTART || $RESTART_CODEX_BRIDGE; then
@@ -770,6 +789,10 @@ if $DO_RESTART; then
     err "Yep Anywhere server process(es) for port ${SERVER_PORT} are still running after stop: ${SERVER_PROCESS_PIDS//$'\n'/, }"
     exit 1
   fi
+
+  # The shell is stopped and its status was checked before any bundle rename.
+  # Preserved sidecars can keep using their old tree across this publication.
+  sync_launchd_runtime_if_installed
 
   if $USE_CODEX_BRIDGE_SIDECAR && $START_CODEX_BRIDGE_AFTER_STOP; then
     wait_port_released "$CODEX_BRIDGE_PORT" || true

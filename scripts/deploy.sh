@@ -758,7 +758,7 @@ sync_server_launchagent_env_if_needed() {
   # bridge sidecars. Starting here as well creates a start → immediate stop →
   # start race, and can leave launchd reporting a running job before the server
   # is actually ready.
-  scripts/install-launchagents.sh --server-only --no-start
+  scripts/install-launchagents.sh --server-only --no-start --skip-sync
 }
 
 # Write the agent runtime LaunchAgent and rewrite the 8022 plist so the shell
@@ -777,8 +777,8 @@ install_external_runtime_if_requested() {
 
   log "Installing the external agent runtime LaunchAgent ..."
   dim "the 8022 plist is rewritten with YEP_RUNTIME_MODE=external"
-  YEP_RUNTIME_EXTERNAL=true scripts/install-launchagents.sh --runtime-only --no-start
-  YEP_RUNTIME_EXTERNAL=true scripts/install-launchagents.sh --server-only --no-start
+  YEP_RUNTIME_EXTERNAL=true scripts/install-launchagents.sh --runtime-only --no-start --skip-sync
+  YEP_RUNTIME_EXTERNAL=true scripts/install-launchagents.sh --server-only --no-start --skip-sync
 
   if [[ "$(runtime_mode_before)" == "external" ]]; then
     # Already split: the refreshed plist is picked up on the next intentional

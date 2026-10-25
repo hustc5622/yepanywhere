@@ -87,6 +87,7 @@ LAUNCH_AGENTS_DIR="$HOME/Library/LaunchAgents"
 LOG_DIR="${YEP_LAUNCHD_LOG_DIR:-$HOME/.yep-anywhere/logs}"
 USER_DOMAIN="gui/$(id -u)"
 START_NOW=true
+SKIP_SYNC=false
 INSTALL_SERVER=true
 INSTALL_CODEX_BRIDGE=true
 INSTALL_RUNTIME_EXPLICIT=false
@@ -108,6 +109,8 @@ Options:
   --external-runtime           Install the agent runtime LaunchAgent alongside the
                                server and point the server at it
   --no-start                   Write plist file(s) without unloading or starting LaunchAgents
+  --skip-sync                  With --no-start, only write definitions; the caller
+                               publishes the bundle during the later cutover
 
 Environment overrides:
   YEP_DEPLOY_PORT              Main server port (default: 8022)
@@ -174,6 +177,10 @@ while [[ $# -gt 0 ]]; do
       START_NOW=false
       shift
       ;;
+    --skip-sync)
+      SKIP_SYNC=true
+      shift
+      ;;
     --server-only)
       INSTALL_SERVER=true
       INSTALL_CODEX_BRIDGE=false
@@ -208,6 +215,11 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
+
+if $SKIP_SYNC && $START_NOW; then
+  err "--skip-sync requires --no-start; publish the bundle before starting LaunchAgents."
+  exit 2
+fi
 
 # --server-only / --bridge-only refresh only the selected service. Preserving
 # external wiring does not authorize installing or starting its worker.
@@ -310,11 +322,13 @@ if $INSTALL_RUNTIME; then
   prepare_private_log "$LOG_DIR/runtime-launchd.err.log"
 fi
 
-log "Syncing LaunchAgent runtime outside the repository ..."
-YEP_LAUNCHD_RUNTIME_DIR="$LAUNCHD_RUNTIME_DIR" "$SCRIPT_DIR/sync-launchd-runtime.sh"
-if [[ ! -x "$CLI_JS" ]]; then
-  err "LaunchAgent runtime sync did not produce an executable CLI at $CLI_JS."
-  exit 1
+if ! $SKIP_SYNC; then
+  log "Syncing LaunchAgent runtime outside the repository ..."
+  YEP_LAUNCHD_RUNTIME_DIR="$LAUNCHD_RUNTIME_DIR" "$SCRIPT_DIR/sync-launchd-runtime.sh"
+  if [[ ! -x "$CLI_JS" ]]; then
+    err "LaunchAgent runtime sync did not produce an executable CLI at $CLI_JS."
+    exit 1
+  fi
 fi
 
 NODE_DIR="$(dirname "$NODE_BIN")"

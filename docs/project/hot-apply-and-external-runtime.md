@@ -124,6 +124,8 @@ echo 'YEP_RUNTIME_EXTERNAL=true' >> .env.deploy.local
 - runtime 日志：`~/.yep-anywhere/logs/runtime-launchd.{out,err}.log`。
 - `redeploy-server.sh` 的 idle 等待逻辑对 external 模式自动放行，因为 shell 重启不再影响活跃 turn。
 
+部署时先验证 `/api/status/workers`，探测失败最多尝试 10 次（每次最多 3 秒，间隔 1 秒），仍无法验证就拒绝切服。`--no-restart` 只构建仓库内产物，不替换 LaunchAgent 使用的目录；后续 `--restart` 在停止旧 web shell 后发布 bundle。部署入口刷新 plist 使用 `--no-start --skip-sync`，避免配置刷新提前发布。保留的 runtime／bridge 仍可使用旧目录：同步脚本保留 `.previous`，更早的 `.retired.*` 只有在确认没有进程以其为工作目录或打开其中的文件时才删除；探测失败也保留，下次同步（包括产物未变化时）再尝试清理。单独运行安装脚本仍默认同步 bundle。
+
 ### 回到 embedded
 
 ```bash

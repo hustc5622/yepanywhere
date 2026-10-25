@@ -1,4 +1,5 @@
-import { spawnSync } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
+import { once } from "node:events";
 import {
   chmodSync,
   copyFileSync,
@@ -53,6 +54,7 @@ describe("LaunchAgent runtime isolation", () => {
       join(fakeBin, "ditto"),
       '#!/usr/bin/env bash\n/bin/cp -R "$1/." "$2"\n',
     );
+    executable(join(fakeBin, "lsof"), "#!/bin/sh\nexit 1\n");
     writeBundle("first");
   });
 
@@ -127,6 +129,107 @@ describe("LaunchAgent runtime isolation", () => {
 
     expect(failed.status).not.toBe(0);
     expect(readFileSync(join(runtimeDir, "marker.txt"), "utf8")).toBe("first");
+  });
+
+  it.each(["cwd", "file"])(
+    "retains a real process's %s through repeated syncs and cleans up after exit",
+    async (held) => {
+      expect(runSync().status).toBe(0);
+      // Use a real lsof and an isolated child, never a running service.
+      const lsof =
+        process.platform === "darwin" ? "/usr/sbin/lsof" : "/usr/bin/lsof";
+      executable(join(fakeBin, "lsof"), `#!/bin/sh\nexec ${lsof} "$@"\n`);
+      const child = spawn(
+        process.execPath,
+        [
+          "-e",
+          `if (process.argv[1] === "file") require("node:fs").openSync(process.argv[2], "r");
+           process.stdout.write("ready"); process.stdin.resume();`,
+          held,
+          join(runtimeDir, "marker.txt"),
+        ],
+        { cwd: held === "cwd" ? runtimeDir : testDir, stdio: "pipe" },
+      );
+      const exited = once(child, "exit");
+      try {
+        await once(child.stdout, "data");
+        for (const marker of ["second", "third", "fourth"]) {
+          writeBundle(marker);
+          const result = runSync();
+          expect(result.status, result.stderr).toBe(0);
+        }
+        const retired = readdirSync(dirname(runtimeDir)).filter((name) =>
+          name.includes(".retired."),
+        );
+        expect(retired).toHaveLength(1);
+        const retained = retired[0];
+        if (!retained) throw new Error("Missing retained runtime bundle");
+        expect(
+          readFileSync(
+            join(dirname(runtimeDir), retained, "marker.txt"),
+            "utf8",
+          ),
+        ).toBe("first");
+      } finally {
+        child.stdin.end();
+        await exited;
+      }
+      const result = runSync();
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toContain("unchanged=true");
+      expect(
+        readdirSync(dirname(runtimeDir)).filter((name) =>
+          name.includes(".retired."),
+        ),
+      ).toEqual([]);
+    },
+    15_000,
+  );
+
+  it.each([
+    'echo "lsof: cannot inspect directory" >&2; exit 1',
+    "exit 127",
+    "exit 0",
+  ])("retains old bundles when usage is uncertain: %s", (probe) => {
+    executable(join(fakeBin, "lsof"), `#!/bin/sh\n${probe}\n`);
+    expect(runSync().status).toBe(0);
+    writeBundle("second");
+    expect(runSync().status).toBe(0);
+    writeBundle("third");
+    const result = runSync();
+    expect(result.status).toBe(0);
+    expect(result.stderr).toContain("usage could not be verified");
+    const retired = readdirSync(dirname(runtimeDir)).filter((name) =>
+      name.includes(".retired."),
+    );
+    expect(retired).toHaveLength(1);
+    const retained = retired[0];
+    if (!retained) throw new Error("Missing retained runtime bundle");
+    expect(
+      readFileSync(join(dirname(runtimeDir), retained, "marker.txt"), "utf8"),
+    ).toBe("first");
+  });
+
+  it("restores current and previous bundles when publication fails", () => {
+    expect(runSync().status).toBe(0);
+    writeBundle("second");
+    expect(runSync().status).toBe(0);
+    writeBundle("third");
+    executable(
+      join(fakeBin, "mv"),
+      `#!/bin/sh
+case "$1" in *.sync.*) exit 42 ;; esac
+exec /bin/mv "$@"
+`,
+    );
+    expect(runSync().status).not.toBe(0);
+    expect(readFileSync(join(runtimeDir, "marker.txt"), "utf8")).toBe("second");
+    expect(
+      readFileSync(join(`${runtimeDir}.previous`, "marker.txt"), "utf8"),
+    ).toBe("first");
+    expect(
+      readdirSync(dirname(runtimeDir)).filter((name) => name.startsWith(".")),
+    ).toEqual([]);
   });
 
   it("refuses a runtime target inside the repository", () => {
@@ -328,9 +431,10 @@ describe("LaunchAgent runtime isolation", () => {
       );
 
       const configuredReportsDir = "fixtures/custom-reports";
+      writeBundle("unpublished");
       const overrideResult = spawnSync(
         "/bin/bash",
-        [installScript, "--server-only", "--no-start"],
+        [installScript, "--server-only", "--no-start", "--skip-sync"],
         {
           encoding: "utf8",
           env: {
@@ -340,10 +444,42 @@ describe("LaunchAgent runtime isolation", () => {
         },
       );
       expect(overrideResult.status).toBe(0);
+      expect(readFileSync(join(runtimeDir, "marker.txt"), "utf8")).toBe(
+        "first",
+      );
+      const unsafeSkip = spawnSync(
+        "/bin/bash",
+        [installScript, "--skip-sync"],
+        {
+          encoding: "utf8",
+          env: installEnv,
+        },
+      );
+      expect(unsafeSkip.status).toBe(2);
+      expect(unsafeSkip.stderr).toContain("--skip-sync requires --no-start");
       const overriddenPlist = readFileSync(plistPath, "utf8");
       expect(overriddenPlist).toContain(
         `<string>${repoRoot}/${configuredReportsDir}</string>`,
       );
+      // First-time external setup can write definitions before any runtime
+      // exists; only the later redeploy is allowed to publish/start it.
+      rmSync(runtimeDir, { recursive: true });
+      const firstInstall = spawnSync(
+        "/bin/bash",
+        [installScript, "--runtime-only", "--no-start", "--skip-sync"],
+        { encoding: "utf8", env: installEnv },
+      );
+      expect(firstInstall.status, firstInstall.stderr).toBe(0);
+      expect(firstInstall.stdout).not.toContain("runtime=");
+      expect(
+        readFileSync(
+          join(
+            homeDir,
+            "Library/LaunchAgents/com.yueyuan.yepanywhere.runtime.plist",
+          ),
+          "utf8",
+        ),
+      ).toContain(`<string>${runtimeDir}</string>`);
     },
   );
 });

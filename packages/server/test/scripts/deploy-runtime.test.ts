@@ -97,13 +97,218 @@ DO_BUILD=true
 DO_RESTART=${server}
 RESTART_CODEX_BRIDGE=${bridge}
 RESTART_RUNTIME=${runtime}
+wait_for_yep_sessions_before_cutover() { echo probe; }
 refresh_installed_bridge_launchagents() { echo bridge; }
 refresh_installed_runtime_launchagent() { echo runtime; }
 ${branch}
 `);
       expect(result.status, result.stderr).toBe(0);
       expect(result.stdout).toBe(
-        server || bridge || runtime ? "bridge\nruntime\n" : "",
+        `${server ? "probe\n" : ""}${server || bridge || runtime ? "bridge\nruntime\n" : ""}`,
+      );
+    },
+  );
+
+  it.each([
+    {
+      response:
+        '{"hasActiveWork":true,"queueLength":0,"runtimeMode":"external"}',
+      state: "idle",
+    },
+    {
+      response:
+        '{"hasActiveWork":true,"queueLength":0,"runtimeMode":"embedded"}',
+      state: "active",
+    },
+    { response: '{"hasActiveWork":false,"queueLength":1}', state: "active" },
+    { response: '{"hasActiveWork":false,"queueLength":0}', state: "idle" },
+    ...[
+      "{}",
+      "null",
+      "[]",
+      "<html>fallback</html>",
+      '{"hasActiveWork":false,"queueLength":-1}',
+      '{"hasActiveWork":false,"queueLength":0,"runtimeMode":"typo"}',
+    ].map((response) => ({ response, state: "unknown" })),
+  ])("classifies worker status safely: $response", ({ response, state }) => {
+    const source = readFileSync(
+      join(root, "scripts/redeploy-server.sh"),
+      "utf8",
+    );
+    const probe = source.slice(
+      source.indexOf("server_activity_state() {"),
+      source.indexOf("\nwait_port_released()"),
+    );
+    const result = run(
+      `
+SERVER_PORT=8022
+SERVER_BASE_URL=http://unused/yep
+lsof() { return 0; }
+curl() { printf '%s' "$TEST_RESPONSE"; }
+${probe}
+server_activity_state
+`,
+      {},
+      { TEST_RESPONSE: response },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout).toBe(state);
+  });
+
+  it.each([false, true])(
+    "retries transient failures and refuses persistent failures: %s",
+    (persistent) => {
+      const source = readFileSync(
+        join(root, "scripts/redeploy-server.sh"),
+        "utf8",
+      );
+      const probe = source.slice(
+        source.indexOf("server_activity_state() {"),
+        source.indexOf("\nwait_port_released()"),
+      );
+      const result = run(`
+SERVER_PORT=8022
+SERVER_BASE_URL=http://unused/yep
+ALLOW_YEP_SESSION_INTERRUPT=false
+warn() { echo "$*" >&2; }
+err() { echo "$*" >&2; }
+log() { :; }
+sleep() { :; }
+lsof() { return 0; }
+curl() {
+  local count=0
+  [[ ! -f "$TEST_LOG" ]] || count="$(cat "$TEST_LOG")"
+  count=$((count + 1))
+  echo "$count" > "$TEST_LOG"
+  if ${persistent} || (( count < 3 )); then return 28; fi
+  printf '%s' '{"hasActiveWork":false,"queueLength":0}'
+}
+${probe}
+wait_for_yep_sessions_before_cutover
+`);
+      expect(result.status === 0).toBe(!persistent);
+      expect(
+        readFileSync(join(result.dir, "fallback.log"), "utf8").trim(),
+      ).toBe(persistent ? "10" : "3");
+      if (persistent)
+        expect(result.stderr).toContain(
+          "Refusing to stop an unverified service",
+        );
+    },
+  );
+
+  it.each([
+    {
+      server: false,
+      bridge: false,
+      runtime: false,
+      verified: true,
+      expected: [],
+    },
+    {
+      server: true,
+      bridge: false,
+      runtime: false,
+      verified: false,
+      expected: ["probe"],
+    },
+    {
+      server: true,
+      bridge: false,
+      runtime: false,
+      verified: true,
+      expected: [
+        "probe",
+        "refresh-bridge",
+        "refresh-runtime",
+        "stop",
+        "publish",
+      ],
+    },
+    {
+      server: false,
+      bridge: true,
+      runtime: false,
+      verified: true,
+      expected: ["refresh-bridge", "refresh-runtime", "publish"],
+    },
+    {
+      server: false,
+      bridge: false,
+      runtime: true,
+      verified: true,
+      expected: ["refresh-bridge", "refresh-runtime", "publish"],
+    },
+    {
+      build: false,
+      server: true,
+      bridge: false,
+      runtime: false,
+      verified: true,
+      expected: [
+        "probe",
+        "refresh-bridge",
+        "refresh-runtime",
+        "stop",
+        "publish",
+      ],
+    },
+  ])(
+    "publishes only during a verified cutover: $server/$bridge/$runtime/$verified",
+    ({ build = true, server, bridge, runtime, verified, expected }) => {
+      const source = readFileSync(
+        join(root, "scripts/redeploy-server.sh"),
+        "utf8",
+      );
+      // Execute the real build/cutover branches with all process and build
+      // operations stubbed. Stop before any startup code can run.
+      const flow = `${source.slice(
+        source.indexOf("# ----- build -----"),
+        source.indexOf('  log "Starting yepanywhere ..."'),
+      )}\nfi\n`;
+      const result = run(`
+DO_BUILD=${build}
+DO_RESTART=${server}
+RESTART_CODEX_BRIDGE=${bridge}
+RESTART_RUNTIME=${runtime}
+USE_CODEX_BRIDGE_SIDECAR=true
+NPM_VERSION=fixture
+SERVER_BASE_PATH=/yep
+SERVER_PORT=8022
+SERVER_LAUNCHD_PLIST="$TEST_PLIST"
+SERVER_CLI_JS="$TEST_PLIST"
+ensure_pnpm() { :; }
+pnpm() { :; }
+install_runtime_dependencies() { :; }
+ensure_bundle_ready() { :; }
+node() { echo fixture; }
+log() { :; }
+warn() { :; }
+dim() { :; }
+wait_for_yep_sessions_before_cutover() { echo probe; ${verified}; }
+refresh_installed_bridge_launchagents() { echo refresh-bridge; }
+refresh_installed_runtime_launchagent() { echo refresh-runtime; }
+sync_launchd_runtime_if_installed() { echo publish; }
+lsof() {
+  case "$*" in
+    *4510*) echo 99999992 ;;
+    *8022*) [[ -f "$TEST_LOG" ]] && return 1; echo 99999991 ;;
+    *) return 1 ;;
+  esac
+}
+server_process_pids() { :; }
+dev_supervisor_pids_for_server_listeners() { :; }
+pid_sets_overlap() { return 1; }
+external_runtime_installed() { return 1; }
+resolve_deploy_runtime() { DEPLOY_RUNTIME_PORT=8025; }
+kill() { echo stop; touch "$TEST_LOG"; }
+wait_port_released() { :; }
+wait_server_processes_stopped() { :; }
+${flow}
+`);
+      expect(result.status === 0, result.stderr).toBe(verified);
+      expect(result.stdout.trim().split("\n").filter(Boolean)).toEqual(
+        expected,
       );
     },
   );

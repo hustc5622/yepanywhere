@@ -11,6 +11,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - 新增会话打开耗时诊断：`display/view` 返回分阶段 `Server-Timing`（attach、resolve、stamp、read、reduce、replay、wait、total）和缓存命中状态 `displayCache`（hit／miss／wait），只含耗时与固定标记，不含路径或会话内容；服务端冷读达到 500 ms 或失败时写入 `session_display_cold_read` 日志；客户端每次打开会话记录一行 `[SessionLoad]`（是否命中缓存、连接状态、首个新快照到达及其来源、HTTP 往返和服务端阶段），开启开发者模式远程日志后可在客户端日志中查看。
 
 ### Fixed
+- 修复本地部署在切服检查前替换 LaunchAgent bundle、连续部署删除仍被 external runtime／bridge 占用的旧目录：仅构建不再发布运行目录，web 切服先验证 workers 并在停止旧 shell 后发布；旧目录仅在确认无进程占用后清理，无法确认时保留。workers 探测失败最多尝试 10 次，并拒绝把无效状态 JSON 当作空闲。
 - 加快 Cursor 会话的冷打开（及服务重启后多个页面同时重连）：runtime 事件日志按会话建立增量索引，查找会话对应的进程不再每次读取并解析全部日志（本机 266 MB 日志上从约 0.8 s 降至约 1.5 ms，多个会话同时打开不再各扫一遍）；未变化的文件直接复用，追加只读新增部分，轮转与清理自动跟进；索引在 runtime 启动后于后台预热，冷建约 0.24 s。
 - 减少 Codex 等会话活跃时打开会话的等待：任意 provider 文件变化都会让项目快照失效，打开会话时不再同步等待一次完整的项目扫描（约 0.3 s，服务重启后可达数秒），已知项目直接使用上一份快照并在后台刷新，找不到会话时再用最新快照重试；同一次冷读中只查询一次运行状态（此前 external runtime 下会经 HTTP 重复查询 4–5 次）。
 - 减少服务重启后重新打开会话的等待：服务端把最近一次项目列表保存到 `indexes/project-snapshot.json`（24 小时内有效），重启后首次扫描完成前，打开会话可直接定位已知项目，不再等待数秒的首次全量扫描；首次扫描完成后即改用新结果，项目列表等需要最新数据的请求不使用该缓存。
