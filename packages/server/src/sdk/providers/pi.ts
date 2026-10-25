@@ -26,6 +26,7 @@ import { getLogger } from "../../logging/logger.js";
 import { getSessionFileOperationStore } from "../../session-files/codex-operations.js";
 import { importPiFileOperations } from "../../session-files/pi-operations.js";
 import {
+  PI_AGENT_DIR,
   PI_SESSIONS_DIR,
   PI_SESSION_DIR_IS_EXACT,
   findPiSessionFile,
@@ -60,6 +61,11 @@ import {
   type PiThinkingLevelMap,
   piAnthropicModelTraits,
 } from "./pi-model-compat.js";
+import {
+  isPiNativeConfigEnabled,
+  restorePiIsolatedAgentDir,
+  syncPiNativeAgentDir,
+} from "./pi-native-agent-dir.js";
 import type {
   AgentProvider,
   AgentSession,
@@ -105,8 +111,14 @@ export interface PiProviderConfig {
   piPath?: string;
   /** Pi native session root. */
   sessionsDir?: string;
-  /** Isolated Pi config/settings directory for Yep-owned processes. */
+  /**
+   * Pi config directory for Yep-owned processes. With native config (the
+   * default) it is an overlay of {@link userAgentDir}; see
+   * `pi-native-agent-dir.ts`.
+   */
   agentDir?: string;
+  /** The user's own Pi agent dir (default `PI_AGENT_DIR`, `~/.pi/agent`). */
+  userAgentDir?: string;
   /** Bundled Yep extension path (test seam). */
   extensionPath?: string;
   /** RPC command timeout. */
@@ -715,6 +727,7 @@ export class PiProvider implements AgentProvider {
   private readonly configuredPath?: string;
   private readonly sessionsDir: string;
   private readonly agentDir: string;
+  private readonly userAgentDir: string;
   private readonly extensionPath: string;
   private readonly timeout: number;
   private modelCache?: { catalog: PiModelCatalog; at: number };
@@ -727,6 +740,7 @@ export class PiProvider implements AgentProvider {
     this.configuredPath = config.piPath;
     this.sessionsDir = config.sessionsDir ?? PI_SESSIONS_DIR;
     this.agentDir = config.agentDir ?? join(getDataDir(), "pi-agent");
+    this.userAgentDir = config.userAgentDir ?? PI_AGENT_DIR;
     this.extensionPath =
       config.extensionPath ??
       resolve(import.meta.dirname, "../../../resources/pi-yep-extension.mjs");
@@ -1174,6 +1188,24 @@ export class PiProvider implements AgentProvider {
         : PI_SESSION_DIR_IS_EXACT
           ? this.sessionsDir
           : getPiProjectSessionDir(options.cwd, this.sessionsDir);
+      // Native config loads the user's Pi packages (MCP adapter, skills, ...)
+      // exactly like their terminal `pi`; Yep only adds its own extension.
+      // Synced per spawn so a restarted process picks up config changes.
+      const nativeConfig = isPiNativeConfigEnabled();
+      try {
+        if (nativeConfig)
+          await syncPiNativeAgentDir(this.userAgentDir, this.agentDir);
+        else await restorePiIsolatedAgentDir(this.userAgentDir, this.agentDir);
+      } catch (error) {
+        getLogger().warn(
+          {
+            event: "pi_agent_dir_sync_failed",
+            nativeConfig,
+            error: error instanceof Error ? error.message : String(error),
+          },
+          "Failed to prepare Pi agent dir; starting with its current contents",
+        );
+      }
       const args = [
         "--mode",
         "rpc",
@@ -1185,7 +1217,7 @@ export class PiProvider implements AgentProvider {
         requestedRoute.bareModelId,
         "--session-dir",
         activeSessionDir,
-        "--no-extensions",
+        ...(nativeConfig ? [] : ["--no-extensions"]),
         "--extension",
         this.extensionPath,
       ];
@@ -1262,8 +1294,8 @@ export class PiProvider implements AgentProvider {
       );
       childEnv.YEP_PI_PROVIDER_CONFIG = JSON.stringify(extensionConfig);
       // Pi persists every RPC set_model/set_thinking_level call to its global
-      // settings.json. Keep that managed state out of the user's ~/.pi tree;
-      // sessions still use the explicit native session directory above.
+      // settings.json. The overlay keeps that write out of the user's ~/.pi
+      // tree; sessions still use the explicit native session directory above.
       childEnv.PI_CODING_AGENT_DIR = this.agentDir;
       childEnv.PI_SKIP_VERSION_CHECK = "1";
 

@@ -11,6 +11,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - 新增会话打开耗时诊断：`display/view` 返回分阶段 `Server-Timing`（attach、resolve、stamp、read、reduce、replay、wait、total）和缓存命中状态 `displayCache`（hit／miss／wait），只含耗时与固定标记，不含路径或会话内容；服务端冷读达到 500 ms 或失败时写入 `session_display_cold_read` 日志；客户端每次打开会话记录一行 `[SessionLoad]`（是否命中缓存、连接状态、首个新快照到达及其来源、HTTP 往返和服务端阶段），开启开发者模式远程日志后可在客户端日志中查看。
 
 ### Fixed
+- Yep 中的 Pi 会话改为直接使用本机 Pi 的原生配置：此前 Yep 以 `--no-extensions` 和隔离的 `PI_CODING_AGENT_DIR` 启动 Pi，`~/.pi/agent` 中安装的扩展包（如 `pi-mcp-adapter`）、`mcp.json` 中的 MCP（如飞书 `feishu-mcp`）、技能等都不会加载。现在 Yep 只额外挂载自己的扩展，其余与终端 `pi` 一致；Yep 的数据目录 `pi-agent` 变为覆盖层，以符号链接指向 `~/.pi/agent`，仅 `settings.json` 每次启动时复制一份，Yep 的模型／思考等级切换不会改写终端 `pi` 的默认设置。每次启动 Pi 进程都会重新同步，终止会话后继续发消息即可加载最新配置。设置 `YEP_PI_NATIVE_CONFIG=false` 可恢复原隔离模式（原有隔离文件保存在 `pi-agent/.yep-isolated-backup/` 并在回退时还原）。
 - 修复本地部署在切服检查前替换 LaunchAgent bundle、连续部署删除仍被 external runtime／bridge 占用的旧目录：仅构建不再发布运行目录，web 切服先验证 workers 并在停止旧 shell 后发布；旧目录仅在确认无进程占用后清理，无法确认时保留。workers 探测失败最多尝试 10 次，并拒绝把无效状态 JSON 当作空闲。
 - 加快 Cursor 会话的冷打开（及服务重启后多个页面同时重连）：runtime 事件日志按会话建立增量索引，查找会话对应的进程不再每次读取并解析全部日志（本机 266 MB 日志上从约 0.8 s 降至约 1.5 ms，多个会话同时打开不再各扫一遍）；未变化的文件直接复用，追加只读新增部分，轮转与清理自动跟进；索引在 runtime 启动后于后台预热，冷建约 0.24 s。
 - 减少 Codex 等会话活跃时打开会话的等待：任意 provider 文件变化都会让项目快照失效，打开会话时不再同步等待一次完整的项目扫描（约 0.3 s，服务重启后可达数秒），已知项目直接使用上一份快照并在后台刷新，找不到会话时再用最新快照重试；同一次冷读中只查询一次运行状态（此前 external runtime 下会经 HTTP 重复查询 4–5 次）。

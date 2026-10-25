@@ -24,9 +24,11 @@ Yep 启动受管 Pi 进程时使用：
 
 ```text
 pi --mode rpc --provider <generated-provider> --model <model> \
-  --session-dir <project-session-dir> --no-extensions \
+  --session-dir <project-session-dir> \
   --extension <yep-bundled-extension>
 ```
+
+（`YEP_PI_NATIVE_CONFIG=false` 时额外带 `--no-extensions`，见下文“配置来源”。）
 
 Pi RPC 是严格的一行一个 JSON 对象的 stdin/stdout 协议。Yep 使用原生
 `prompt`、`steer`、`abort`、`set_model`、`set_thinking_level`、`compact`、
@@ -79,16 +81,36 @@ acceptEdits、plan 和 bypassPermissions 仍由 Yep 的 permission mode 决定�
 gateway 配置和 key 只在启动时通过临时环境变量交给扩展。扩展捕获后立即
 从 `process.env` 删除，避免 Pi 的 bash 工具继承；Pi 在 native fork 后会
 重建 AgentSession 并重新加载扩展，所以捕获值只保留在该子进程的
-`globalThis` symbol 中。Yep 启动参数使用 `--no-extensions` 禁止自动加载
-用户扩展，显式加载的 Yep 扩展仍生效；不会在 `~/.pi` 下安装扩展或改写
-models/settings。原生 session JSONL 仍按下文写入 Pi 的正常 session tree。
+`globalThis` symbol 中。原生 session JSONL 仍按下文写入 Pi 的正常 session tree。
 
-此外，Pi 的 RPC `set_model` / `set_thinking_level` 会把选择写回全局
-`settings.json`。Yep 因此把受管子进程的 `PI_CODING_AGENT_DIR` 固定到
-`<YEP_ANYWHERE_DATA_DIR>/pi-agent/`（profile 也自然隔离），避免临时的
-`yep-*` provider 成为用户终端 Pi 的默认模型。session 仍显式写在 Pi 的原生
-session tree 中，项目内的 context 文件仍按 Pi 的正常规则发现；用户
-`~/.pi/agent` 下的全局 settings/extensions/skills 不会注入 Yep 受管进程。
+## 配置来源
+
+Yep 是拉起 Pi 的中间层：受管进程与终端 `pi` 使用同一份 `~/.pi/agent`
+配置（扩展包如 `pi-mcp-adapter`、`mcp.json` 中的 MCP、skills、`auth.json`、
+`models.json`、trust 等），Yep 只额外 `--extension` 挂载自己的扩展。
+
+唯一的例外是 `settings.json`：Pi 的 RPC `set_model` / `set_thinking_level`
+会写回全局 settings，而 Yep 的 `yep-*` provider 只存在于 Yep 扩展中，写进
+用户文件会让终端 `pi` 的默认模型失效。因此受管子进程的
+`PI_CODING_AGENT_DIR` 指向 `<YEP_ANYWHERE_DATA_DIR>/pi-agent/` 覆盖层
+（`pi-native-agent-dir.ts`）：
+
+- 用户 agent dir（`PI_CODING_AGENT_DIR`，默认 `~/.pi/agent`）的每个顶层条目
+  都以符号链接接入覆盖层；
+- `settings.json` 每次启动复制一份普通文件，Pi 改写只落在覆盖层；
+- 覆盖层原有的真实文件（旧隔离模式数据）首次冲突时移到
+  `.yep-isolated-backup/`；Pi 以原子 rename 覆盖链接产生的缓存文件下次启动
+  时丢弃并重新链接；
+- 每次启动 Pi 进程都会重新同步，所以终止会话进程后继续发消息即可加载最新
+  配置，不需要新开会话。
+
+用户扩展中需要交互的 RPC UI 请求（`select` / `input` / `editor`）当前由 Yep
+自动取消，`confirm` 只放行 Yep 自己的审批前缀；`notify` / `setStatus` 等
+fire-and-forget 请求被忽略。
+
+`YEP_PI_NATIVE_CONFIG=false` 恢复旧隔离模式：去掉覆盖层中的链接、还原备份，
+并以 `--no-extensions` 启动，用户 `~/.pi/agent` 下的全局 settings/extensions/
+skills 不会注入 Yep 受管进程。
 
 ## Session 语义
 
