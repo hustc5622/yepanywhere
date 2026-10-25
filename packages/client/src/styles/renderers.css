@@ -560,6 +560,10 @@
 .text-block a {
   color: var(--link-color);
   text-decoration: none;
+  /* Dragging across a link selects its text instead of starting a link drag. */
+  -webkit-user-drag: none;
+  -webkit-user-select: text;
+  user-select: text;
 }
 
 .text-block a:hover {

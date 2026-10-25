@@ -83,6 +83,23 @@ function isModifiedClick(e: React.MouseEvent): boolean {
   return e.metaKey || e.ctrlKey || e.shiftKey || e.altKey;
 }
 
+/**
+ * A drag that selects text inside a link ends with a click on that link.
+ * Treat it as a selection gesture so the user can copy the text instead of
+ * being navigated away.
+ */
+function isSelectingWithin(element: Element): boolean {
+  const selection = window.getSelection?.();
+  if (!selection || selection.isCollapsed || selection.rangeCount === 0) {
+    return false;
+  }
+  if (!selection.toString().trim()) return false;
+  for (let i = 0; i < selection.rangeCount; i++) {
+    if (selection.getRangeAt(i).intersectsNode(element)) return true;
+  }
+  return false;
+}
+
 function parseOptionalNumber(value: string | undefined): number | undefined {
   if (!value) return undefined;
   const parsed = Number.parseInt(value, 10);
@@ -242,9 +259,26 @@ export const TextBlock = memo(function TextBlock({
     closeModal,
   } = useLocalMediaClick();
 
+  // Firefox ignores `-webkit-user-drag`; mark links non-draggable on press so
+  // a drag starting on link text extends a selection there too.
+  const handleMouseDown = useCallback((e: React.MouseEvent) => {
+    const anchor = (e.target as HTMLElement).closest?.("a[href]");
+    if (anchor && anchor.getAttribute("draggable") !== "false") {
+      anchor.setAttribute("draggable", "false");
+    }
+  }, []);
+
   const handleClick = useCallback(
     (e: React.MouseEvent) => {
       if (handleCodeBlockCopyClick(e)) return;
+
+      const anchor = (e.target as HTMLElement).closest?.("a[href]");
+      if (anchor && isSelectingWithin(anchor)) {
+        e.preventDefault();
+        e.stopPropagation();
+        return;
+      }
+
       if (handleLocalMediaClick(e)) return;
 
       const target = (e.target as HTMLElement).closest?.(
@@ -370,6 +404,7 @@ export const TextBlock = memo(function TextBlock({
       ref={blockRef}
       className={`text-block timeline-item${isStreaming ? " streaming" : ""}${asyncMessage ? " text-block-async" : phase === "commentary" ? " text-block-commentary" : ""}`}
       onClick={handleClick}
+      onMouseDown={handleMouseDown}
     >
       {asyncMessage && (
         <div className="text-block-async-header">

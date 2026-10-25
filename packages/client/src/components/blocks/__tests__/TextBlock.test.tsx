@@ -145,6 +145,43 @@ describe("TextBlock", () => {
     },
   );
 
+  it("keeps a text selection inside a link instead of navigating", () => {
+    renderWithSessionMetadata(
+      <TextBlock
+        text=""
+        augmentHtml='<p>See <a href="/api/local-file?path=docs%2Freport.md" class="local-file-link" data-file-path="docs/report.md">[报告](docs/report.md)</a> and <a href="https://example.com/x">[外链](https://example.com/x)</a></p>'
+      />,
+    );
+
+    for (const name of [
+      "[报告](docs/report.md)",
+      "[外链](https://example.com/x)",
+    ]) {
+      const link = screen.getByRole("link", { name });
+      fireEvent.mouseDown(link);
+      expect(link.getAttribute("draggable")).toBe("false");
+
+      const textNode = link.firstChild as Text;
+      const range = document.createRange();
+      range.setStart(textNode, 1);
+      range.setEnd(textNode, 5);
+      const selection = window.getSelection();
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+
+      const event = new MouseEvent("click", {
+        bubbles: true,
+        cancelable: true,
+      });
+      link.dispatchEvent(event);
+      expect(event.defaultPrevented).toBe(true);
+      selection?.removeAllRanges();
+    }
+
+    expect(api.getFile).not.toHaveBeenCalled();
+    expect(screen.queryByText("验收报告原文")).toBeNull();
+  });
+
   it("opens modified clicks on relative links in the project file route", () => {
     const open = vi.spyOn(window, "open").mockImplementation(() => null);
     try {
