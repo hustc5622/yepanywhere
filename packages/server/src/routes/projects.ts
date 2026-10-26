@@ -35,7 +35,10 @@ import type { DshSessionReader } from "../sessions/dsh-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import type { McodeSessionReader } from "../sessions/mcode-reader.js";
 import type { PiSessionReader } from "../sessions/pi-reader.js";
-import { listSessionsAcrossProviders } from "../sessions/provider-resolution.js";
+import {
+  hydrateCodexSessionUsage,
+  listSessionsAcrossProviders,
+} from "../sessions/provider-resolution.js";
 import { pendingInputTypeFromRequest } from "../sessions/session-runtime.js";
 import type { ISessionReader } from "../sessions/types.js";
 import type { ExternalSessionTracker } from "../supervisor/ExternalSessionTracker.js";
@@ -54,6 +57,7 @@ const PROJECT_LIST_TIMING_NAMES = [
   "bridgeView",
   "catalog",
   "sessionScan",
+  "usage",
   "total",
 ] as const;
 
@@ -742,6 +746,14 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
       },
     );
 
+    await serverTiming.measure("usage", () =>
+      hydrateCodexSessionUsage(
+        publicSessions,
+        [project],
+        deps,
+        providerCatalog.codexUnknownMessageCountIds,
+      ),
+    );
     serverTiming.set("total", performance.now() - requestStartedAt);
     c.header("Server-Timing", serverTiming.headerValue());
     return c.json({ sessions: publicSessions });

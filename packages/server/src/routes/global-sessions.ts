@@ -43,7 +43,10 @@ import type { DshSessionReader } from "../sessions/dsh-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import type { McodeSessionReader } from "../sessions/mcode-reader.js";
 import type { PiSessionReader } from "../sessions/pi-reader.js";
-import { listSessionsAcrossProviders } from "../sessions/provider-resolution.js";
+import {
+  hydrateCodexSessionUsage,
+  listSessionsAcrossProviders,
+} from "../sessions/provider-resolution.js";
 import {
   type SessionRuntimeProcess,
   deriveSessionRuntime,
@@ -70,6 +73,7 @@ const SESSION_LIST_TIMING_NAMES = [
   "bridgeView",
   "catalog",
   "sessionScan",
+  "usage",
   "total",
 ] as const;
 
@@ -1020,6 +1024,15 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
         .slice(0, MAX_PROJECT_COVERAGE_EXTRAS);
       sessions.push(...extras);
     }
+
+    await serverTiming.measure("usage", () =>
+      hydrateCodexSessionUsage(
+        sessions,
+        projects,
+        deps,
+        providerCatalog.codexUnknownMessageCountIds,
+      ),
+    );
 
     if (shouldCollectStats) {
       cachedStats = { value: stats, timestamp: Date.now() };

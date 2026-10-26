@@ -28,6 +28,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - 移除 ZCode provider 及其全部逻辑：app-server 接入、`~/.zcode` SQLite 会话读取与变更监视（每 15 秒轮询）、会话归档写回、ZCode TUI hook bridge（`/api/zcode-bridge` 与「全部会话」页的审批卡片）、新建会话页的 MCP 状态面板，以及 `test:zcode-app-server-smoke` 脚本。旧数据中的 `zcode` 会话不再出现在列表中，按已退役 provider 处理（相关接口返回 410）；Yep 从未修改的 ZCode 原始数据仍保留在 `~/.zcode`。曾安装 hook 插件的用户可删除 `~/.zcode/plugins/yep-bridge` 与 `~/.zcode/yep-bridge.json`。仅被 ZCode 使用的 SQLite 查询 worker 一并删除；Pi 与 Codex 共用的编辑分支推导迁至 `sessions/copied-prefix-branch.ts`，行为不变。
 
 ### Fixed
+- 修复 Codex 会话切换到轻量目录后，侧栏及项目会话列表不再显示累计 token 用量的问题。只为实际返回的会话补齐用量，复用按文件变化校验的摘要缓存，并保留压缩、回退后的统计口径。
 - 修复外置 agent runtime（`YEP_RUNTIME_EXTERNAL=true`）下会话中途切换思考等级与上下文压缩请求返回 404：runtime 控制端口补上 `/processes/:id/reasoning-effort` 与 `/processes/:id/compact`。
 - 修复 Pi 等 provider 读取图片后侧边预览只显示 `Read image file [image/png]`／`[Image]` 两行文本：这类图片字节在转录中被压成占位文本的 Read 结果，现在按文件路径打开图片——项目内文件走项目文件预览，其他路径（如 `/tmp`）走本地图片接口，摘要显示为“(image)”而不是“2 lines”。
 - Yep 中的 Pi 会话改为直接使用本机 Pi 的原生配置：此前 Yep 以 `--no-extensions` 和隔离的 `PI_CODING_AGENT_DIR` 启动 Pi，`~/.pi/agent` 中安装的扩展包（如 `pi-mcp-adapter`）、`mcp.json` 中的 MCP（如飞书 `feishu-mcp`）、技能等都不会加载。现在 Yep 只额外挂载自己的扩展，其余与终端 `pi` 一致；Yep 的数据目录 `pi-agent` 变为覆盖层，以符号链接指向 `~/.pi/agent`，仅 `settings.json` 每次启动时复制一份，Yep 的模型／思考等级切换不会改写终端 `pi` 的默认设置。每次启动 Pi 进程都会重新同步，终止会话后继续发消息即可加载最新配置。设置 `YEP_PI_NATIVE_CONFIG=false` 可恢复原隔离模式（原有隔离文件保存在 `pi-agent/.yep-isolated-backup/` 并在回退时还原）。

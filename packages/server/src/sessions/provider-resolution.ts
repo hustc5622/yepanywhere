@@ -476,6 +476,67 @@ export async function listSessionsAcrossProviders(
   return collapseEditForkFamilies(applyForkLineageMetadata(sessions, deps));
 }
 
+/**
+ * The Codex thread/list catalog omits usage. Enrich only rows selected for the
+ * response, after pagination/pins/project coverage, rather than scanning every
+ * rollout during project discovery. The shared index validates each file's
+ * revision and persists the result; the existing reader retains compaction and
+ * rollback accounting instead of treating a tail window as the whole session.
+ */
+export async function hydrateCodexSessionUsage(
+  sessions: (Pick<
+    SessionSummary,
+    "id" | "provider" | "contextUsage" | "cumulativeUsage"
+  > & { projectId: string })[],
+  projects: readonly Project[],
+  deps: ProviderResolutionDeps,
+  catalogSessionIds: ReadonlySet<string> | undefined,
+): Promise<void> {
+  if (!catalogSessionIds?.size) return;
+  const pending = sessions.filter(
+    (session) =>
+      catalogSessionIds.has(session.id) &&
+      (session.provider === "codex" || session.provider === "codex-oss") &&
+      (!session.cumulativeUsage || !session.contextUsage),
+  );
+  const projectsById = new Map<string, Project>(
+    projects.map((project) => [project.id, project]),
+  );
+  const sources = new Map<string, SessionSource | null>();
+  let index = 0;
+  await Promise.all(
+    Array.from({ length: Math.min(4, pending.length) }, async () => {
+      while (index < pending.length) {
+        const session = pending[index++];
+        if (!session) continue;
+        const project = projectsById.get(session.projectId);
+        if (!project) continue;
+        try {
+          if (!sources.has(project.id)) {
+            sources.set(project.id, createCodexSource(project, deps));
+          }
+          const source = sources.get(project.id);
+          if (!source) continue;
+          const summary = deps.sessionIndexService
+            ? await deps.sessionIndexService.getSessionSummaryWithCache(
+                source.sessionDir,
+                project.id,
+                session.id,
+                source.reader,
+              )
+            : await source.reader.getSessionSummary(session.id, project.id);
+          if (!summary) continue;
+          // Keep any live bridge values, titles, timestamps and ownership.
+          session.contextUsage ??= summary.contextUsage;
+          session.cumulativeUsage ??= summary.cumulativeUsage;
+        } catch {
+          // An unavailable rollout must not hide the catalog row or fail a page.
+        }
+      }
+    }),
+  );
+}
+
 export async function findSessionSummaryAcrossProviders(
   project: Project,
   sessionId: string,
