@@ -8,11 +8,13 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 ## [Unreleased]
 
 ### Added
+- Pi 会话支持上下文压缩：输入框发送 `/compact` 即调用 Pi 原生压缩，`/compact <说明>` 把说明作为摘要指引（与终端 Pi 的用法一致，最多 4000 字符），不再把这段文字当作普通消息发给模型；会话菜单中的「压缩上下文」对 Pi 会话同样可用，`/compact` 也出现在 Pi 的命令补全中（Pi 的命令列表不再混入 Claude 专属命令）。压缩在回合之间执行：当前回合进行中时会等它结束再压缩，不会像终端 Pi 那样中断回合；压缩期间显示「正在压缩上下文…」，完成后时间线出现「上下文已压缩」标记（与刷新后读取的记录一致），失败时提示 Pi 给出的原因。Pi 达到阈值或上下文溢出时的自动压缩也会实时显示同样的状态和标记。目前只能压缩正在运行的 Pi 会话。
 - 新增统一文件预览接口 `/api/fs/preview` 与 `/api/fs/raw`：同一套实现处理项目内与项目外文件，`path` 可为绝对路径，或配合 `projectId` 相对项目根解析（允许 `../` 离开项目），可带 `:行[:列]` 后缀；预览返回文件元数据、预览类型 `kind`、1 MB 内的文本内容、可选语法高亮与 Markdown 渲染。原有 `/api/projects/:id/files`、`/files/raw`、`/api/local-file`、`/api/local-image` 地址与响应保持兼容，内部改为调用同一实现。原始文件下载改为流式传输并支持 `Range`（视频拖动、PDF 分段加载），不再整文件读入内存；HTML／SVG／XML 以原始内容打开时附加沙箱 CSP 与 `nosniff`，避免在 Yep 域名下执行文件中的脚本。
 - 新增 DeepSeek Harness（`dsh`）只读接入：侧栏项目与「全部会话」列出 `~/.dsh`（或 `DSH_HOME`）中的 dsh 会话，支持查看完整对话、思考和工具调用（Bash／Read／Edit 等沿用现有渲染），显示标题、模型、上下文用量与未读状态；dsh Web 或 dsh CLI 正在运行时显示「运行中」，等待工具审批或提问回答时显示「等待输入」。会话页底部以「在 dsh 中打开」按钮代替输入框，直接打开内嵌 dsh 页面中的同一会话继续对话；Yep 不写入 dsh 文件、不启动或续接 dsh 会话，归档只隐藏不移动文件，子 agent 会话暂不关联。可用 `ENABLED_PROVIDERS` 中的 `dsh` 控制开关。
 - 新增会话打开耗时诊断：`display/view` 返回分阶段 `Server-Timing`（attach、resolve、stamp、read、reduce、replay、wait、total）和缓存命中状态 `displayCache`（hit／miss／wait），只含耗时与固定标记，不含路径或会话内容；服务端冷读达到 500 ms 或失败时写入 `session_display_cold_read` 日志；客户端每次打开会话记录一行 `[SessionLoad]`（是否命中缓存、连接状态、首个新快照到达及其来源、HTTP 往返和服务端阶段），开启开发者模式远程日志后可在客户端日志中查看。
 
 ### Changed
+- Pi 会话的 `/` 补全改为动态读取 Pi 的命令：Pi 进程启动时通过 RPC `get_commands` 读取扩展命令、提示模板和技能（`/skill:xxx`），随会话初始化消息推送到已打开的页面，新建会话或进程重启后不必刷新页面就能看到；补全菜单和工具栏 `/` 菜单显示命令说明与来源（扩展／提示模板／技能，Yep 自己处理的 `/model`、`/compact` 标注为 Yep），Claude 会话的命令说明和 Codex 技能说明也一并显示。选中后原样发给 Pi，由 Pi 执行。Pi 进程尚未就绪时读取命令失败不再导致整个会话加载失败。Pi 最近一次报告的命令列表按工作目录记录在数据目录的 `pi-commands.json`，会话空闲、没有 Pi 进程时（如服务重启或部署后）输入 `/` 仍会显示该列表，发送命令即恢复会话并由 Pi 执行。Pi 自带的终端命令（`/tree`、`/fork`、`/settings` 等）在 RPC 中不存在，仍不显示。
 - 侧边预览打不开相对路径时说明原因：回复中的相对路径（如 `src/app.ts`）按当前会话的项目解析，找不到时提示“按 某项目 解析，未找到，可能属于其他项目”，并提供“在其他项目中查找该文件”按钮；点击后才在其他本地项目里查找同一路径（新接口 `GET /api/fs/locate`），列出找到的项目，点选即在面板内打开。绝对路径或非“不存在”类错误不显示该按钮。
 - 文件侧边预览新增类型：CSV／TSV 默认以表格显示（可切回源码）；Word（docx）、Excel（xlsx）、PowerPoint（pptx）在服务端提取文字后预览——文档显示标题、段落、列表与表格，表格按工作表分页签显示（每表最多 500 行 × 50 列），演示文稿逐页显示文字；不含格式、图片和图表，加密或损坏的文件会说明原因并提供下载。转换不引入新依赖。
 - 更多路径可以直接点开预览：助手回复中纯文本出现的文件路径、只包含一个路径的行内代码（如 `` `src/app.ts:12` ``）都会变成链接（相对路径需包含目录且是已知文件类型，避免把 `src/utils`、`and/or` 之类误判为文件）；Glob／Grep 结果的每个文件、Grep 匹配行的 `文件:行号` 可点开并定位；`cat`、`sed -n '1,80p'`、`nl -ba … | sed -n …`、`head -n` 等只读单个文件的 shell 命令在展开后显示“读取文件”链接并定位到对应行，所有 provider 通用；包含变量展开或无法确定原文件行号的管道不会误生成链接。Pi、MiniMax Code、Cursor 的文件工具参数统一补齐 `file_path`，由同一个共享函数处理。
@@ -26,6 +28,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - 移除 ZCode provider 及其全部逻辑：app-server 接入、`~/.zcode` SQLite 会话读取与变更监视（每 15 秒轮询）、会话归档写回、ZCode TUI hook bridge（`/api/zcode-bridge` 与「全部会话」页的审批卡片）、新建会话页的 MCP 状态面板，以及 `test:zcode-app-server-smoke` 脚本。旧数据中的 `zcode` 会话不再出现在列表中，按已退役 provider 处理（相关接口返回 410）；Yep 从未修改的 ZCode 原始数据仍保留在 `~/.zcode`。曾安装 hook 插件的用户可删除 `~/.zcode/plugins/yep-bridge` 与 `~/.zcode/yep-bridge.json`。仅被 ZCode 使用的 SQLite 查询 worker 一并删除；Pi 与 Codex 共用的编辑分支推导迁至 `sessions/copied-prefix-branch.ts`，行为不变。
 
 ### Fixed
+- 修复外置 agent runtime（`YEP_RUNTIME_EXTERNAL=true`）下会话中途切换思考等级与上下文压缩请求返回 404：runtime 控制端口补上 `/processes/:id/reasoning-effort` 与 `/processes/:id/compact`。
 - 修复 Pi 等 provider 读取图片后侧边预览只显示 `Read image file [image/png]`／`[Image]` 两行文本：这类图片字节在转录中被压成占位文本的 Read 结果，现在按文件路径打开图片——项目内文件走项目文件预览，其他路径（如 `/tmp`）走本地图片接口，摘要显示为“(image)”而不是“2 lines”。
 - Yep 中的 Pi 会话改为直接使用本机 Pi 的原生配置：此前 Yep 以 `--no-extensions` 和隔离的 `PI_CODING_AGENT_DIR` 启动 Pi，`~/.pi/agent` 中安装的扩展包（如 `pi-mcp-adapter`）、`mcp.json` 中的 MCP（如飞书 `feishu-mcp`）、技能等都不会加载。现在 Yep 只额外挂载自己的扩展，其余与终端 `pi` 一致；Yep 的数据目录 `pi-agent` 变为覆盖层，以符号链接指向 `~/.pi/agent`，仅 `settings.json` 每次启动时复制一份，Yep 的模型／思考等级切换不会改写终端 `pi` 的默认设置。每次启动 Pi 进程都会重新同步，终止会话后继续发消息即可加载最新配置。设置 `YEP_PI_NATIVE_CONFIG=false` 可恢复原隔离模式（原有隔离文件保存在 `pi-agent/.yep-isolated-backup/` 并在回退时还原）。
 - 会话消息里的链接（Markdown 链接、本地文件链接、外链）现在可以拖动选中文字并复制：链接不再被当作可拖拽对象，选中文本后松开鼠标也不会触发跳转或打开文件预览；普通单击仍照常打开。

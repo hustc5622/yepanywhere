@@ -3,6 +3,7 @@ import { SideConversationRequestSchema } from "@yep-anywhere/shared";
 import { type Context, Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { pendingInputTypeFromRequest } from "../sessions/session-runtime.js";
+import { parseCompactRequestBody } from "./compact-request.js";
 import type {
   CreateRuntimeSessionRequest,
   QueueRuntimeMessageRequest,
@@ -111,6 +112,51 @@ export function createRuntimeControlApp(
     return c.json(
       await controller.setModel(c.req.param("processId"), body.model),
     );
+  });
+
+  app.post("/processes/:processId/compact", async (c) => {
+    const parsed = parseCompactRequestBody(
+      await c.req.json().catch(() => ({})),
+    );
+    if (!parsed.ok) return c.json({ error: parsed.error }, 400);
+    try {
+      return c.json(
+        await controller.compact(c.req.param("processId"), parsed.options),
+      );
+    } catch (error) {
+      // Surface the provider's reason (e.g. nothing to compact) instead of
+      // the generic onError text so the shell can show it to the user.
+      return c.json(
+        { error: error instanceof Error ? error.message : "Compact failed" },
+        502,
+      );
+    }
+  });
+  app.post("/processes/:processId/reasoning-effort", async (c) => {
+    const body = await c.req
+      .json<{ effort?: unknown }>()
+      .catch(() => ({}) as { effort?: unknown });
+    if (typeof body.effort !== "string" || !body.effort.trim()) {
+      return c.json({ error: "effort is required" }, 400);
+    }
+    try {
+      return c.json(
+        await controller.setReasoningEffort(
+          c.req.param("processId"),
+          body.effort,
+        ),
+      );
+    } catch (error) {
+      return c.json(
+        {
+          error:
+            error instanceof Error
+              ? error.message
+              : "Reasoning effort change failed",
+        },
+        502,
+      );
+    }
   });
 
   app.post("/sessions", async (c) => {

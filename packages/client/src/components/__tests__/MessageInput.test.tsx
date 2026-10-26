@@ -404,6 +404,42 @@ describe("MessageInput", () => {
     ).toBeDefined();
   });
 
+  it("shows provider descriptions and origins in both command menus", () => {
+    const { composer } = renderMessageInput({
+      commandPrefix: "/",
+      commandLabel: "Slash commands",
+      commands: ["review", "skill:imagegen"],
+      commandButtons: [
+        {
+          prefix: "/",
+          label: "Slash commands",
+          showButton: true,
+          commands: ["review", "skill:imagegen"],
+          details: {
+            review: { description: "Review the diff", source: "extension" },
+            "skill:imagegen": { source: "skill" },
+          },
+        },
+      ],
+    });
+
+    typeInComposer(composer, "/re");
+    const option = within(
+      screen.getByRole("listbox", { name: "Slash commands" }),
+    ).getByRole("option");
+    expect(option.textContent).toContain("/review");
+    expect(option.textContent).toContain("Review the diff");
+    expect(option.textContent).toContain("extension");
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "Show slash commands" }),
+    );
+    const menu = screen.getByRole("menu", { name: "Slash commands" });
+    const items = within(menu).getAllByRole("menuitem");
+    expect(items[0]?.textContent).toContain("Review the diff");
+    expect(items[1]?.textContent).toContain("skill");
+  });
+
   it("uses the active provider prefix in the toolbar command menu", () => {
     const { composer } = renderMessageInput({
       commandPrefix: "/",

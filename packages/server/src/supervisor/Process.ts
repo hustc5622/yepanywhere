@@ -26,7 +26,10 @@ import {
   type CodexSessionControls,
   codexControlFailure,
 } from "../sdk/providers/codex-controls.js";
-import type { AgentSteerResult } from "../sdk/providers/types.js";
+import type {
+  AgentSteerResult,
+  CompactOptions,
+} from "../sdk/providers/types.js";
 import type {
   PermissionMode,
   ProviderApprovalDecision,
@@ -166,7 +169,7 @@ export interface ProcessConstructorOptions extends ProcessOptions {
   /** Function to change the provider-native permission/session mode */
   setPermissionModeFn?: (mode: PermissionMode) => Promise<void>;
   /** Function to trigger a provider-native context compaction mid-session */
-  compactFn?: () => Promise<void>;
+  compactFn?: (options?: CompactOptions) => Promise<void>;
   /** Function to change the provider-native reasoning effort mid-session */
   setReasoningEffortFn?: (effort: string) => Promise<void>;
   /** Function to read the provider-native session goal status */
@@ -280,7 +283,7 @@ export class Process {
 
   /** Function to change model mid-session (SDK 0.2.7+) */
   private setModelFn: ((model?: string) => Promise<void>) | null;
-  private compactFn: (() => Promise<void>) | null;
+  private compactFn: ((options?: CompactOptions) => Promise<void>) | null;
   private setReasoningEffortFn: ((effort: string) => Promise<void>) | null;
   private getGoalFn:
     | (() => Promise<import("@yep-anywhere/shared").ProviderGoalState>)
@@ -723,17 +726,19 @@ export class Process {
    * Trigger a provider-native context compaction. Returns false when the
    * provider does not support it, so the route can surface a 4xx.
    */
-  async compact(): Promise<boolean> {
+  async compact(options: CompactOptions = {}): Promise<boolean> {
     if (!this.compactFn) return false;
+    const customInstructions = options.customInstructions?.trim();
     getLogger().info(
       {
         event: "session_compact",
         sessionId: this._sessionId,
         processId: this.id,
+        hasCustomInstructions: Boolean(customInstructions),
       },
       "Compacting session context",
     );
-    await this.compactFn();
+    await this.compactFn(customInstructions ? { customInstructions } : {});
     return true;
   }
 
@@ -2380,8 +2385,11 @@ export class Process {
           }
         }
 
+        // Codex and Pi compact between turns: the provider reports the
+        // compaction as a status message while Yep still considers the
+        // session idle, so mark it busy until the closing result arrives.
         if (
-          this.provider === "codex" &&
+          (this.provider === "codex" || this.provider === "pi") &&
           message.type === "system" &&
           message.subtype === "status" &&
           message.status === "compacting" &&

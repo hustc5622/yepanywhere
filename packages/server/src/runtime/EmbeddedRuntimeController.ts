@@ -31,6 +31,7 @@ import type { EventBus } from "../watcher/index.js";
 import type { RuntimeEventStore } from "./RuntimeEventStore.js";
 import { CURSOR_RUNTIME_VERSION } from "./cursor-availability.js";
 import {
+  type CompactOptions,
   type CreateRuntimeSessionRequest,
   type QueueRuntimeMessageRequest,
   RUNTIME_CONTROLLER_PROTOCOL_VERSION,
@@ -581,9 +582,12 @@ export class EmbeddedRuntimeController implements RuntimeController {
     return { success: process ? await process.setModel(model) : false };
   }
 
-  async compact(processId: string): Promise<{ success: boolean }> {
+  async compact(
+    processId: string,
+    options?: CompactOptions,
+  ): Promise<{ success: boolean }> {
     const process = this.supervisor.getProcess(processId);
-    return { success: process ? await process.compact() : false };
+    return { success: process ? await process.compact(options) : false };
   }
 
   async setReasoningEffort(

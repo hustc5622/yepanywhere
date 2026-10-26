@@ -456,6 +456,30 @@ describe("Codex native controls", () => {
     );
   });
 
+  it("sends Pi compaction instructions only when provided", async () => {
+    fetchMock.mockResolvedValue({
+      ok: true,
+      json: async () => ({ success: true }),
+    } as Response);
+
+    await api.compactProcess("process-1", {
+      customInstructions: "keep the API plan",
+    });
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/processes/process-1/compact",
+      expect.objectContaining({
+        method: "POST",
+        body: JSON.stringify({ customInstructions: "keep the API plan" }),
+      }),
+    );
+
+    await api.compactProcess("process-1");
+    expect(fetchMock).toHaveBeenLastCalledWith(
+      "/api/processes/process-1/compact",
+      expect.objectContaining({ body: JSON.stringify({}) }),
+    );
+  });
+
   it("uses the project-scoped endpoint to resume before compaction", async () => {
     fetchMock.mockResolvedValue({
       ok: true,

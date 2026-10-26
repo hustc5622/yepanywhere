@@ -62,6 +62,7 @@ import { useSideConversation } from "../hooks/useSideConversation";
 import { useI18n } from "../i18n";
 import { useNavigationLayout } from "../layouts";
 import {
+  buildSlashCommandDetails,
   getAgentCommandConfig,
   getAgentCommandConfigs,
 } from "../lib/agentCommands";
@@ -75,6 +76,10 @@ import {
 import { normalizeExternalHttpUrl } from "../lib/externalUrl";
 import { getMessageId } from "../lib/mergeMessages";
 import { isStalePendingInputError } from "../lib/pendingInputError";
+import {
+  MAX_PI_COMPACT_INSTRUCTIONS_LENGTH,
+  parsePiSlashCommand,
+} from "../lib/piInputCommands";
 import {
   collapseCodexSubagentActivities,
   preprocessMessages,
@@ -353,6 +358,7 @@ function SessionPageContent({
     updatePendingMessage,
     deferredMessages,
     slashCommands,
+    slashCommandDetails,
     setSessionModel,
     sessionTools,
     mcpServers,
@@ -763,15 +769,20 @@ function SessionPageContent({
       allSlashCommands,
     );
   }, [allSlashCommands, effectiveProvider, supportsSlashCommands]);
-  const showCommandButton = status.owner === "self" && commandConfig.showButton;
+  // A Pi session without a live process still resumes when a message is
+  // sent, so its last known `/` list stays usable while idle.
+  const canUseCommands =
+    status.owner === "self" ||
+    (effectiveProvider === "pi" && status.owner === "none");
+  const showCommandButton = canUseCommands && commandConfig.showButton;
   const activeCommands = useMemo(() => {
-    if (status.owner !== "self") return [];
+    if (!canUseCommands) return [];
     return commandConfig.commands;
-  }, [commandConfig.commands, status.owner]);
+  }, [commandConfig.commands, canUseCommands]);
   const commandPrefix = commandConfig.prefix;
   const commandLabel = commandConfig.label;
   const commandButtons = useMemo(() => {
-    if (status.owner !== "self") return [];
+    if (!canUseCommands) return [];
     return getAgentCommandConfigs(
       effectiveProvider,
       supportsSlashCommands,
@@ -784,7 +795,16 @@ function SessionPageContent({
       },
     ).map((group) =>
       group.prefix !== "/"
-        ? group
+        ? {
+            ...group,
+            details: Object.fromEntries(
+              codexSkills.flatMap((skill) =>
+                skill.description
+                  ? [[skill.name, { description: skill.description }]]
+                  : [],
+              ),
+            ),
+          }
         : {
             ...group,
             commands: [
@@ -793,14 +813,32 @@ function SessionPageContent({
               ),
               ...(hasSideConversation ? ["side", "btw"] : []),
             ],
+            details: {
+              // Provider-reported descriptions win; Yep-handled commands get
+              // their own so the menu explains what Yep will do with them.
+              model: {
+                description: t("slashCommandModelDescription"),
+                source: "yep" as const,
+              },
+              ...(effectiveProvider === "pi"
+                ? {
+                    compact: {
+                      description: t("slashCommandCompactDescription"),
+                      source: "yep" as const,
+                    },
+                  }
+                : {}),
+              ...buildSlashCommandDetails(slashCommandDetails),
+            },
           },
     );
   }, [
     hasSideConversation,
     allSlashCommands,
+    slashCommandDetails,
     codexSkills,
     effectiveProvider,
-    status.owner,
+    canUseCommands,
     supportsSlashCommands,
     t,
   ]);
@@ -1011,6 +1049,8 @@ function SessionPageContent({
   // Model switch modal state
   const [showModelSwitchModal, setShowModelSwitchModal] = useState(false);
   const [showGoalModal, setShowGoalModal] = useState(false);
+  const [isRequestingPiCompaction, setIsRequestingPiCompaction] =
+    useState(false);
   const [isStartingCodexCompaction, setIsStartingCodexCompaction] =
     useState(false);
 
@@ -1045,6 +1085,38 @@ function SessionPageContent({
     hasUnread: session?.hasUnread,
     enabled: Boolean(session),
   });
+
+  /**
+   * Pi compacts between turns: the request is accepted right away (so the
+   * composer clears) and the live stream shows the compacting indicator. The
+   * HTTP call resolves when the compaction finishes or fails.
+   */
+  const requestPiCompaction = (customInstructions?: string): boolean => {
+    if (isCompacting || isRequestingPiCompaction) {
+      showToast(t("codexCompactAlreadyRunning"), "info");
+      return false;
+    }
+    if (status.owner !== "self" || !status.processId) {
+      showToast(t("piCompactSessionNotRunning"), "error");
+      return false;
+    }
+    const processId = status.processId;
+    if (processState !== "idle") {
+      showToast(t("piCompactQueuedAfterTurn"), "info");
+    }
+    setIsRequestingPiCompaction(true);
+    setScrollTrigger((prev) => prev + 1);
+    void api
+      .compactProcess(processId, { customInstructions })
+      .then(() => showToast(t("sessionCompacted"), "success"))
+      .catch((err: unknown) => {
+        console.error("Failed to compact Pi session:", err);
+        const errorMsg = err instanceof Error ? err.message : String(err);
+        showToast(t("sessionCompactFailed", { message: errorMsg }), "error");
+      })
+      .finally(() => setIsRequestingPiCompaction(false));
+    return true;
+  };
 
   const requestCodexCompaction = async (): Promise<boolean> => {
     if (isCompacting || isStartingCodexCompaction) {
@@ -1140,6 +1212,27 @@ function SessionPageContent({
       }
       if (command.kind === "compact") {
         if (await requestCodexCompaction()) {
+          draftControlsRef.current?.clearDraft();
+        } else {
+          draftControlsRef.current?.restoreFromStorage();
+        }
+        return;
+      }
+    }
+    if (effectiveProvider === "pi" && !editRewind) {
+      const command = parsePiSlashCommand(text);
+      if (command.kind === "compact-instructions-too-long") {
+        draftControlsRef.current?.restoreFromStorage();
+        showToast(
+          t("piCompactInstructionsTooLong", {
+            max: MAX_PI_COMPACT_INSTRUCTIONS_LENGTH,
+          }),
+          "error",
+        );
+        return;
+      }
+      if (command.kind === "compact") {
+        if (requestPiCompaction(command.customInstructions)) {
           draftControlsRef.current?.clearDraft();
         } else {
           draftControlsRef.current?.restoreFromStorage();
@@ -2206,6 +2299,10 @@ function SessionPageContent({
       await requestCodexCompaction();
       return;
     }
+    if (effectiveProvider === "pi") {
+      requestPiCompaction();
+      return;
+    }
     if (status.owner === "self" && status.processId) {
       try {
         await api.compactProcess(status.processId);
@@ -2428,7 +2525,8 @@ function SessionPageContent({
                     }}
                     onTerminate={handleTerminate}
                     onCompact={
-                      session?.provider === "codex" &&
+                      (session?.provider === "codex" ||
+                        session?.provider === "pi") &&
                       status.owner === "self" &&
                       status.processId
                         ? handleCompact

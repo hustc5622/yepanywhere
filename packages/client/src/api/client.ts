@@ -1763,11 +1763,21 @@ export const api = {
       body: JSON.stringify({ model }),
     }),
 
-  /** Trigger a provider-native context compaction (e.g. Pi compact). */
-  compactProcess: (processId: string) =>
+  /**
+   * Trigger a provider-native context compaction (e.g. Pi compact). Resolves
+   * once the compaction has finished.
+   */
+  compactProcess: (
+    processId: string,
+    options?: { customInstructions?: string },
+  ) =>
     fetchJSON<{ success: boolean }>(`/processes/${processId}/compact`, {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify(
+        options?.customInstructions
+          ? { customInstructions: options.customInstructions }
+          : {},
+      ),
     }),
 
   /** Change the provider-native reasoning effort mid-session. */

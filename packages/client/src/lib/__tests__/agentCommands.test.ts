@@ -1,10 +1,13 @@
 import { describe, expect, it } from "vitest";
 import {
   CODEX_SLASH_COMMANDS,
+  PI_SLASH_COMMANDS,
   STATIC_SLASH_COMMANDS,
+  buildSlashCommandDetails,
   getAgentCommandConfig,
   getAgentCommandConfigs,
   getStaticAgentCommandConfigs,
+  normalizeSlashCommands,
 } from "../agentCommands";
 
 describe("agent command config", () => {
@@ -55,6 +58,17 @@ describe("agent command config", () => {
     ]);
   });
 
+  it("offers Pi's handled built-ins plus its live commands", () => {
+    const config = getAgentCommandConfig("pi", true, [
+      "skill:review",
+      "compact",
+    ]);
+
+    expect(config.showButton).toBe(true);
+    expect(config.commands).toEqual([...PI_SLASH_COMMANDS, "skill:review"]);
+    expect(config.commands).not.toContain("help");
+  });
+
   it("hides commands for providers without command support", () => {
     const config = getAgentCommandConfig("gemini", false, ["ignored"]);
 
@@ -76,5 +90,36 @@ describe("agent command config", () => {
       ...STATIC_SLASH_COMMANDS,
       "deep-research",
     ]);
+  });
+
+  it("normalizes legacy names and full provider command entries", () => {
+    expect(
+      normalizeSlashCommands([
+        "review",
+        { name: "/fix-tests", description: " Fix tests ", source: "prompt" },
+        { name: "skill:x", source: "unknown" },
+        { name: "review", description: "duplicate" },
+        { description: "nameless" },
+        42,
+      ]),
+    ).toEqual([
+      { name: "review", description: "" },
+      { name: "fix-tests", description: "Fix tests", source: "prompt" },
+      { name: "skill:x", description: "" },
+    ]);
+    expect(normalizeSlashCommands(undefined)).toEqual([]);
+  });
+
+  it("keeps only commands that have something to show", () => {
+    expect(
+      buildSlashCommandDetails([
+        { name: "review", description: "Review", source: "extension" },
+        { name: "bare", description: "" },
+        { name: "skill:x", description: "", source: "skill" },
+      ]),
+    ).toEqual({
+      review: { description: "Review", source: "extension" },
+      "skill:x": { source: "skill" },
+    });
   });
 });

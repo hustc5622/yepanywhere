@@ -24,6 +24,7 @@ import {
   type AttachmentComposerHandle,
 } from "./AttachmentComposer";
 import { AttachmentPreviewModal } from "./AttachmentPreviewModal";
+import { CommandMenuItemContent } from "./CommandMenuItemContent";
 import { ComposerAttachmentCard } from "./ComposerAttachmentCard";
 import { MessageInputToolbar } from "./MessageInputToolbar";
 import type { VoiceInputButtonRef } from "./VoiceInputButton";
@@ -618,10 +619,11 @@ export function MessageInput({
                 role="option"
                 aria-selected={index === activeCommandIndex}
               >
-                <span className="command-completion-name">
-                  {activeCommandConfig?.prefix ?? commandPrefix}
-                  {command}
-                </span>
+                <CommandMenuItemContent
+                  prefix={activeCommandConfig?.prefix ?? commandPrefix}
+                  command={command}
+                  detail={activeCommandConfig?.details?.[command]}
+                />
               </button>
             ))}
           </div>

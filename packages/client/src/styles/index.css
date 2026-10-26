@@ -4698,7 +4698,10 @@ a.sidebar-nav-item {
 
 .command-completion-item {
   display: flex;
-  align-items: center;
+  flex-direction: column;
+  align-items: stretch;
+  justify-content: center;
+  gap: 2px;
   width: 100%;
   min-height: 32px;
   padding: var(--space-2) var(--space-3);
@@ -4721,6 +4724,34 @@ a.sidebar-nav-item {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.command-menu-item-header {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+
+.command-menu-item-source {
+  flex-shrink: 0;
+  margin-left: auto;
+  padding: 0 var(--space-1);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
+  line-height: 1.6;
+}
+
+.command-menu-item-description {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-secondary);
+  font-family: var(--font-sans);
+  font-size: var(--font-size-xs);
 }
 
 .message-input .attachment-composer {
@@ -5855,13 +5886,16 @@ a.sidebar-nav-item {
   border-radius: var(--radius-md);
   box-shadow: 0 4px 12px rgba(0, 0, 0, 0.3);
   min-width: 160px;
+  max-width: min(360px, 90vw);
   max-height: 240px;
   overflow-y: auto;
   z-index: 100;
 }
 
 .slash-command-item {
-  display: block;
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
   width: 100%;
   padding: var(--space-2) var(--space-3);
   background: transparent;

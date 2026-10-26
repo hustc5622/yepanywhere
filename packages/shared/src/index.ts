@@ -162,6 +162,7 @@ export type {
   LlmGatewayModelCapabilities,
   LlmGatewaySessionConfig,
   SlashCommand,
+  SlashCommandSource,
   PermissionMode,
   CodexMcpMode,
   CodexServiceTier,

@@ -268,6 +268,40 @@ describe("HttpRuntimeController", () => {
     });
   });
 
+  it("forwards compaction and reasoning-effort controls to an external runtime", async () => {
+    const compact = vi.fn(async () => ({ success: true }));
+    const setReasoningEffort = vi.fn(async () => ({ success: true }));
+    const app = createRuntimeControlApp({
+      controller: {
+        compact,
+        setReasoningEffort,
+      } as unknown as RuntimeController,
+      token: "runtime-test-token",
+    });
+    const controller = new HttpRuntimeController({
+      baseUrl: "http://runtime.test",
+      token: "runtime-test-token",
+      fetch: (input, init) =>
+        app.fetch(input instanceof Request ? input : new Request(input, init)),
+    });
+
+    await expect(
+      controller.compact("proc-1", { customInstructions: "keep notes" }),
+    ).resolves.toEqual({ success: true });
+    expect(compact).toHaveBeenCalledWith("proc-1", {
+      customInstructions: "keep notes",
+    });
+    await expect(
+      controller.setReasoningEffort("proc-1", "high"),
+    ).resolves.toEqual({ success: true });
+    expect(setReasoningEffort).toHaveBeenCalledWith("proc-1", "high");
+
+    compact.mockRejectedValueOnce(new Error("Nothing to compact"));
+    await expect(controller.compact("proc-1")).rejects.toThrow(
+      "Nothing to compact",
+    );
+  });
+
   it("runs Cursor prepare inside the resident runtime", async () => {
     const prepareCursorSession = vi.fn(async () => undefined);
     const discardCursorPrepare = vi.fn(async () => undefined);

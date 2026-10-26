@@ -1,4 +1,4 @@
-import type { UploadedFile } from "@yep-anywhere/shared";
+import type { SlashCommand, UploadedFile } from "@yep-anywhere/shared";
 import {
   type AgentActivity,
   type MarkdownAugment,
@@ -7,6 +7,7 @@ import {
 } from "@yep-anywhere/shared";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
+import { normalizeSlashCommands } from "../lib/agentCommands";
 import { getMessageId } from "../lib/mergeMessages";
 import { type AgentTask, findAgentTasks } from "../lib/pendingTasks";
 import { normalizeProviderPermissionMode } from "../lib/providerPermissionModes";
@@ -505,7 +506,13 @@ export function useSession(
   }, []);
 
   // Slash commands available for this session (from init message)
-  const [slashCommands, setSlashCommands] = useState<string[]>([]);
+  const [slashCommandDetails, setSlashCommandDetails] = useState<
+    SlashCommand[]
+  >([]);
+  const slashCommands = useMemo(
+    () => slashCommandDetails.map((command) => command.name),
+    [slashCommandDetails],
+  );
   // Tools available for this session (from init message)
   const [sessionTools, setSessionTools] = useState<string[]>([]);
   // MCP servers available for this session (from init message)
@@ -571,7 +578,7 @@ export function useSession(
       // Set slash commands from API response so the "/" button appears reliably
       // (the SSE init message that normally carries these is discarded after ~30s)
       if (result.slashCommands?.length) {
-        setSlashCommands(result.slashCommands.map((c) => c.name));
+        setSlashCommandDetails(normalizeSlashCommands(result.slashCommands));
       }
     },
     [applyServerModeUpdate, sessionId],
@@ -1695,7 +1702,9 @@ export function useSession(
             });
           }
           if (Array.isArray(sdkMessage.slash_commands)) {
-            setSlashCommands(sdkMessage.slash_commands as string[]);
+            setSlashCommandDetails(
+              normalizeSlashCommands(sdkMessage.slash_commands),
+            );
           }
           if (Array.isArray(sdkMessage.tools)) {
             setSessionTools(sdkMessage.tools as string[]);
@@ -2163,6 +2172,7 @@ export function useSession(
     updatePendingMessage, // Update pending message fields (e.g. status)
     deferredMessages, // Messages queued server-side waiting for agent turn to end
     slashCommands, // Available slash commands from init message
+    slashCommandDetails, // Same commands with description/source
     sessionTools, // Available tools from init message
     mcpServers, // Available MCP servers from init message
     pagination, // Compact-boundary pagination metadata

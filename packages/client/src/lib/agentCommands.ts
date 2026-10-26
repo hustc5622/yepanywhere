@@ -1,4 +1,8 @@
-import type { ProviderName } from "@yep-anywhere/shared";
+import type {
+  ProviderName,
+  SlashCommand,
+  SlashCommandSource,
+} from "@yep-anywhere/shared";
 
 export type AgentCommandPrefix = "/" | "$";
 
@@ -52,6 +56,13 @@ export const CODEX_SLASH_COMMANDS = [
   "theme",
 ];
 
+/**
+ * Pi built-ins Yep handles itself. Pi's other TUI commands do nothing over
+ * RPC, so they are not offered; extension commands, prompt templates and
+ * skills come from the live `get_commands` list.
+ */
+export const PI_SLASH_COMMANDS = ["compact"];
+
 export const STATIC_SLASH_COMMANDS = [
   "help",
   "status",
@@ -75,11 +86,74 @@ export const STATIC_SLASH_COMMANDS = [
   "vim",
 ];
 
+/** Extra text a command menu shows next to a command name. */
+export interface AgentCommandDetail {
+  description?: string;
+  /** Provider-reported origin, or "yep" for commands Yep handles itself. */
+  source?: SlashCommandSource | "yep";
+}
+
 export interface AgentCommandConfig {
   prefix: AgentCommandPrefix;
   label: string;
   showButton: boolean;
   commands: string[];
+  /** Optional per-command description/source, keyed by command name. */
+  details?: Record<string, AgentCommandDetail>;
+}
+
+/**
+ * Accept both the legacy init shape (`string[]`) and full provider entries
+ * (`{ name, description, source }`), dropping anything unusable.
+ */
+export function normalizeSlashCommands(value: unknown): SlashCommand[] {
+  if (!Array.isArray(value)) return [];
+  const seen = new Set<string>();
+  const commands: SlashCommand[] = [];
+  for (const item of value) {
+    const record =
+      typeof item === "string"
+        ? { name: item }
+        : item && typeof item === "object"
+          ? (item as Record<string, unknown>)
+          : null;
+    const name =
+      typeof record?.name === "string"
+        ? record.name.trim().replace(/^\//u, "")
+        : "";
+    if (!name || seen.has(name)) continue;
+    seen.add(name);
+    const source =
+      record?.source === "extension" ||
+      record?.source === "prompt" ||
+      record?.source === "skill"
+        ? record.source
+        : undefined;
+    commands.push({
+      name,
+      description:
+        typeof record?.description === "string"
+          ? record.description.trim()
+          : "",
+      ...(source ? { source } : {}),
+    });
+  }
+  return commands;
+}
+
+/** Description/source lookup for the command menus. */
+export function buildSlashCommandDetails(
+  commands: readonly SlashCommand[],
+): Record<string, AgentCommandDetail> {
+  const details: Record<string, AgentCommandDetail> = {};
+  for (const command of commands) {
+    if (!command.description && !command.source) continue;
+    details[command.name] = {
+      ...(command.description ? { description: command.description } : {}),
+      ...(command.source ? { source: command.source } : {}),
+    };
+  }
+  return details;
 }
 
 export interface AgentCommandLabels {
@@ -130,6 +204,17 @@ export function getAgentCommandConfigs(
         label: labels.skills,
         showButton: true,
         commands: mergeCommands(codexSkills),
+      },
+    ];
+  }
+
+  if (provider === "pi") {
+    return [
+      {
+        prefix: "/",
+        label: labels.slashCommands,
+        showButton: true,
+        commands: mergeCommands(PI_SLASH_COMMANDS, slashCommands),
       },
     ];
   }

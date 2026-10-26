@@ -248,7 +248,14 @@ export interface SlashCommand {
   description: string;
   /** Hint for command arguments (e.g., "<file>") */
   argumentHint?: string;
+  /**
+   * Where the command comes from, when the provider reports it (Pi:
+   * extension command, prompt template, or skill).
+   */
+  source?: SlashCommandSource;
 }
+
+export type SlashCommandSource = "extension" | "prompt" | "skill";
 
 /**
  * A selectable Codex model source (Codex `model_provider`) surfaced to the UI.

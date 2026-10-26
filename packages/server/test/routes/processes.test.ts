@@ -291,7 +291,7 @@ describe("Processes Routes", () => {
 
     expect(response.status).toBe(200);
     await expect(response.json()).resolves.toEqual({ success: true });
-    expect(compact).toHaveBeenCalledWith("proc-1");
+    expect(compact).toHaveBeenCalledWith("proc-1", {});
   });
 
   it("rejects compact for a process that does not support it", async () => {
@@ -383,6 +383,72 @@ describe("Processes Routes", () => {
     expect(response.status).toBe(400);
     await expect(response.json()).resolves.toMatchObject({
       error: expect.stringContaining("not supported"),
+    });
+  });
+
+  it("forwards trimmed compaction instructions to the runtime controller", async () => {
+    const compact = vi.fn(async () => ({ success: true }));
+    const routes = createProcessesRoutes({
+      runtimeController: {
+        getProcess: vi.fn(async () => ({ provider: "pi" })),
+        compact,
+      } as unknown as RuntimeController,
+      supervisor: {} as Supervisor,
+      scanner: {} as ProjectScanner,
+      readerFactory: vi.fn(),
+    });
+
+    const response = await routes.request("/proc-1/compact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ customInstructions: "  keep API notes " }),
+    });
+
+    expect(response.status).toBe(200);
+    expect(compact).toHaveBeenCalledWith("proc-1", {
+      customInstructions: "keep API notes",
+    });
+
+    const bare = await routes.request("/proc-1/compact", { method: "POST" });
+    expect(bare.status).toBe(200);
+    expect(compact).toHaveBeenLastCalledWith("proc-1", {});
+  });
+
+  it("validates compaction instructions and surfaces provider failures", async () => {
+    const routes = createProcessesRoutes({
+      runtimeController: {
+        getProcess: vi.fn(async () => ({ provider: "pi" })),
+        compact: vi.fn(async () => {
+          throw new Error("Nothing to compact");
+        }),
+      } as unknown as RuntimeController,
+      supervisor: {} as Supervisor,
+      scanner: {} as ProjectScanner,
+      readerFactory: vi.fn(),
+    });
+
+    const invalid = await routes.request("/proc-1/compact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ customInstructions: 42 }),
+    });
+    expect(invalid.status).toBe(400);
+
+    const tooLong = await routes.request("/proc-1/compact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ customInstructions: "x".repeat(4001) }),
+    });
+    expect(tooLong.status).toBe(400);
+
+    const failed = await routes.request("/proc-1/compact", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    expect(failed.status).toBe(502);
+    await expect(failed.json()).resolves.toEqual({
+      error: "Nothing to compact",
     });
   });
 

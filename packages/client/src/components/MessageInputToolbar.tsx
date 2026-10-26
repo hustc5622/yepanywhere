@@ -240,6 +240,7 @@ export function MessageInputToolbar({
             <SlashCommandButton
               key={button.prefix}
               commands={button.commands}
+              details={button.details}
               onSelectCommand={onSelectCommand}
               disabled={voiceDisabled}
               prefix={button.prefix}

@@ -13,6 +13,7 @@ import type { BusEvent } from "../watcher/index.js";
 import { ensureRuntimeToken } from "./token.js";
 import { RUNTIME_CONTROLLER_PROTOCOL_VERSION } from "./types.js";
 import type {
+  CompactOptions,
   CreateRuntimeSessionRequest,
   QueueRuntimeMessageRequest,
   ResumeRuntimeSessionRequest,
@@ -416,10 +417,13 @@ export class HttpRuntimeController implements RuntimeController {
     });
   }
 
-  async compact(processId: string): Promise<{ success: boolean }> {
+  async compact(
+    processId: string,
+    options?: CompactOptions,
+  ): Promise<{ success: boolean }> {
     return this.request(`/processes/${encode(processId)}/compact`, {
       method: "POST",
-      body: JSON.stringify({}),
+      body: JSON.stringify(options ?? {}),
     });
   }
 

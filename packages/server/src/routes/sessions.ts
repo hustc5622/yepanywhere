@@ -11,6 +11,7 @@ import {
   PI_THINKING_PREVIEW_MAX_LENGTH,
   type ProviderName,
   type SessionBranchState,
+  type SlashCommand,
   type UrlProjectId,
   escalateContextWindow,
   getModelContextWindow,
@@ -75,6 +76,7 @@ import {
   type CodexNativeControlRequest,
   isCodexNativeControlMethod,
 } from "../sdk/providers/codex-controls.js";
+import { readPiCommandCache } from "../sdk/providers/pi-command-cache.js";
 import type { PermissionMode, SDKMessage, UserMessage } from "../sdk/types.js";
 import type { ModelInfoService } from "../services/ModelInfoService.js";
 import type { ServerSettingsService } from "../services/ServerSettingsService.js";
@@ -832,6 +834,31 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     deps.generatedArtifactUploadManager ?? new UploadManager();
   const runtimeController =
     deps.runtimeController ?? new EmbeddedRuntimeController(deps.supervisor);
+
+  /**
+   * The `/` list for the input. Live from the provider when a process runs;
+   * for Pi, the last list Pi reported for this directory otherwise, so an idle
+   * session still offers its commands (sending one resumes the session).
+   */
+  const loadSlashCommands = async (
+    process:
+      | { id: string; supportsDynamicCommands?: boolean }
+      | null
+      | undefined,
+    provider: string | undefined,
+    projectPath: string,
+  ): Promise<SlashCommand[] | null> => {
+    if (process?.supportsDynamicCommands) {
+      const live = await runtimeController
+        .getSupportedCommands(process.id)
+        // A provider that is still starting (Pi before its RPC is ready)
+        // must not fail the whole session load; init carries the list.
+        .catch(() => null);
+      if (live) return live;
+    }
+    if (provider !== "pi") return null;
+    return readPiCommandCache(projectPath).catch(() => null);
+  };
   const sessionInteractionService =
     deps.sessionInteractionService ??
     new SessionInteractionService({
@@ -1194,15 +1221,17 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
           : "user-question"
         : undefined);
 
-    // Get available slash commands from active process
-    const slashCommands = process?.supportsDynamicCommands
-      ? await runtimeController.getSupportedCommands(process.id)
-      : null;
-
     // Read minimal session info from disk (just for title/timestamps, no messages)
     const metadataProvider = deps.sessionMetadataService?.getProvider(
       sessionId,
     ) as ProviderName | undefined;
+
+    // Available slash commands (live process, or Pi's last known list)
+    const slashCommands = await loadSlashCommands(
+      process,
+      process?.provider ?? metadataProvider,
+      project.path,
+    );
     const catalogSummary = bridgedSession
       ? null
       : await deps.codexSessionCatalog
@@ -2171,9 +2200,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     // Get available slash commands from active process (for "/" button in toolbar)
     // The init message that normally carries these gets discarded from the SSE buffer
     // after ~30s, so we attach them to the REST response for reliable delivery.
-    const slashCommands = process?.supportsDynamicCommands
-      ? await runtimeController.getSupportedCommands(process.id)
-      : null;
+    const slashCommands = await loadSlashCommands(
+      process,
+      process?.provider ??
+        session?.provider ??
+        deps.sessionMetadataService?.getProvider(sessionId),
+      project.path,
+    );
 
     if (!session) {
       // Session file doesn't exist yet - only valid if we own the process

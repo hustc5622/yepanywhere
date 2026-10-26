@@ -121,6 +121,12 @@ export interface StartSessionOptions {
  * Result of starting an agent session.
  * This is the common interface all providers must return.
  */
+/** Options for a provider-native manual context compaction. */
+export interface CompactOptions {
+  /** Extra guidance for the compaction summary (Pi `customInstructions`). */
+  customInstructions?: string;
+}
+
 export interface AgentSession {
   sideConversations?: SideConversationControl;
   /** Async iterator yielding SDK messages */
@@ -179,9 +185,9 @@ export interface AgentSession {
   /**
    * Trigger a provider-native context compaction for this session
    * (e.g. Pi `compact`). Providers without a compact capability
-   * omit this.
+   * omit this. Resolves once the compaction has finished.
    */
-  compact?: () => Promise<void>;
+  compact?: (options?: CompactOptions) => Promise<void>;
   /**
    * Change the provider-native reasoning effort / thought level mid-session
    * (e.g. Pi `set_thinking_level`). Providers without a mid-session

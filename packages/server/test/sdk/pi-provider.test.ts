@@ -3,6 +3,7 @@ import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitForPiCommandCacheWrites } from "../../src/sdk/providers/pi-command-cache.js";
 import { PiProvider } from "../../src/sdk/providers/pi.js";
 import { SessionFileStore } from "../../src/session-files/store.js";
 
@@ -67,6 +68,8 @@ process.stdin.on("data", (chunk) => {
       output({ type: "agent_settled" });
     } else if (command.type === "abort") {
       output({ type: "response", id: command.id, command: "abort", success: true });
+    } else if (command.type === "get_commands") {
+      output({ type: "response", id: command.id, command: "get_commands", success: true, data: { commands: [] } });
     }
   }
 });
@@ -95,6 +98,7 @@ describe("PiProvider RPC integration", () => {
   const tempDirs: string[] = [];
 
   afterEach(async () => {
+    await waitForPiCommandCacheWrites();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
     delete (globalThis as Record<PropertyKey, unknown>)[

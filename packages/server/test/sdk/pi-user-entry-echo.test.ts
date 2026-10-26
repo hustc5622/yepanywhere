@@ -3,6 +3,7 @@ import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitForPiCommandCacheWrites } from "../../src/sdk/providers/pi-command-cache.js";
 import { PiProvider } from "../../src/sdk/providers/pi.js";
 import { SessionFileStore } from "../../src/session-files/store.js";
 
@@ -85,6 +86,7 @@ describe("PiProvider persisted user entry echo", () => {
   const tempDirs: string[] = [];
 
   afterEach(async () => {
+    await waitForPiCommandCacheWrites();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
     delete (globalThis as Record<PropertyKey, unknown>)[

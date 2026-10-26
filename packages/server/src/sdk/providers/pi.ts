@@ -56,6 +56,7 @@ import type {
   UserMessage,
 } from "../types.js";
 import { filterEnvForChildProcess } from "./env-filter.js";
+import { piCommandCachePath, writePiCommandCache } from "./pi-command-cache.js";
 import {
   type PiAnthropicModelTraits,
   type PiThinkingLevelMap,
@@ -174,7 +175,35 @@ interface PiRuntimeRef {
    * `since` cursor so a turn only transfers the entries it appended.
    */
   leafEntryId?: string;
+  /**
+   * Manual compactions waiting for the session loop. They run between turns
+   * so Pi never receives a prompt while it is compacting (Pi rejects that).
+   */
+  controlJobs: AsyncEventQueue<PiCompactJob>;
+  /** A manual compaction is running; new input must wait for the next turn. */
+  compacting?: boolean;
+  /**
+   * Newest compaction entry seen by `get_entries` and not yet reported. A
+   * user-echo read can move the cursor past the entry before the matching
+   * `compaction_end` is processed, so the entry is remembered here.
+   */
+  pendingCompactionEntry?: JsonRecord;
 }
+
+interface PiCompactJob {
+  customInstructions?: string;
+  resolve: () => void;
+  reject: (error: Error) => void;
+}
+
+/**
+ * Pi summarizes the whole context with the active model; a long session on a
+ * slow model can take far longer than an ordinary RPC command.
+ */
+const PI_COMPACT_TIMEOUT_MS = 30 * 60_000;
+
+/** `get_commands` is answered from memory; startup never waits long on it. */
+const PI_STARTUP_COMMANDS_TIMEOUT_MS = 3_000;
 
 /** The prompt Yep has handed to Pi whose persisted entry id is still unknown. */
 interface PiPendingUserPrompt {
@@ -549,6 +578,81 @@ class AsyncEventQueue<T> {
     if (this.ended) return Promise.resolve(null);
     return new Promise((resolve) => this.waiters.push(resolve));
   }
+
+  get isEnded(): boolean {
+    return this.ended;
+  }
+
+  /** Synchronously take an already-queued value without waiting. */
+  tryNext(): T | undefined {
+    return this.values.shift();
+  }
+
+  /**
+   * Wait for the next value or for `other` to settle, whichever is first.
+   * When `other` wins, the pending waiter is withdrawn so no later value is
+   * swallowed by an abandoned read. `other` must never reject.
+   */
+  nextOr<U>(other: Promise<U>): Promise<{ value: T | null } | { other: U }> {
+    const value = this.values.shift();
+    if (value !== undefined) return Promise.resolve({ value });
+    if (this.ended) return Promise.resolve({ value: null });
+    return new Promise((resolve) => {
+      let done = false;
+      const waiter = (next: T | null) => {
+        if (done) return;
+        done = true;
+        resolve({ value: next });
+      };
+      this.waiters.push(waiter);
+      void other.then((result) => {
+        if (done) return;
+        done = true;
+        const index = this.waiters.indexOf(waiter);
+        if (index >= 0) this.waiters.splice(index, 1);
+        resolve({ other: result });
+      });
+    });
+  }
+
+  /** End the queue and return values nobody consumed. */
+  drain(): T[] {
+    this.end();
+    return this.values.splice(0);
+  }
+}
+
+/**
+ * Pi's live `/` list over RPC: extension commands, prompt templates and
+ * skills, exactly as `get_commands` reports them. Built-in TUI commands are
+ * not part of RPC. Yep's own side-conversation command stays hidden.
+ */
+export function piSlashCommands(response: PiRpcResponse): SlashCommand[] {
+  const data = isRecord(response.data) ? response.data : {};
+  const commands = Array.isArray(data.commands) ? data.commands : [];
+  const seen = new Set<string>();
+  return commands.flatMap((command): SlashCommand[] => {
+    if (!isRecord(command) || typeof command.name !== "string") return [];
+    const name = command.name.trim();
+    if (!name || name === PI_SIDE_COMMAND || seen.has(name)) return [];
+    seen.add(name);
+    const source =
+      command.source === "extension" ||
+      command.source === "prompt" ||
+      command.source === "skill"
+        ? command.source
+        : undefined;
+    return [
+      {
+        name,
+        description:
+          typeof command.description === "string"
+            ? command.description.trim()
+            : "",
+        ...(source ? { source } : {}),
+      },
+    ];
+  });
 }
 
 /** Minimal strict-LF client for Pi's documented JSONL RPC protocol. */
@@ -618,7 +722,10 @@ class PiRpcClient {
     );
   }
 
-  async send(command: JsonRecord): Promise<PiRpcResponse> {
+  async send(
+    command: JsonRecord,
+    options: { timeoutMs?: number } = {},
+  ): Promise<PiRpcResponse> {
     const id = `yep-pi-${this.nextId++}`;
     const type = stringValue(command.type) ?? "unknown";
     const child = this.child;
@@ -630,7 +737,7 @@ class PiRpcClient {
       const timer = setTimeout(() => {
         this.pending.delete(id);
         reject(new Error(`Pi RPC command "${type}" timed out`));
-      }, this.timeoutMs);
+      }, options.timeoutMs ?? this.timeoutMs);
       timer.unref?.();
       this.pending.set(id, { command: type, resolve, reject, timer });
     });
@@ -646,6 +753,18 @@ class PiRpcClient {
 
   nextEvent(): Promise<JsonRecord | null> {
     return this.events.next();
+  }
+
+  /** Next event, or `other`'s result if it settles first (never swallows). */
+  nextEventOr<U>(
+    other: Promise<U>,
+  ): Promise<{ value: JsonRecord | null } | { other: U }> {
+    return this.events.nextOr(other);
+  }
+
+  /** An event that has already arrived, without waiting for more. */
+  tryNextEvent(): JsonRecord | undefined {
+    return this.events.tryNext();
   }
 
   close(): void {
@@ -727,6 +846,7 @@ export class PiProvider implements AgentProvider {
   private readonly configuredPath?: string;
   private readonly sessionsDir: string;
   private readonly agentDir: string;
+  private readonly commandCachePath: string;
   private readonly userAgentDir: string;
   private readonly extensionPath: string;
   private readonly timeout: number;
@@ -740,6 +860,9 @@ export class PiProvider implements AgentProvider {
     this.configuredPath = config.piPath;
     this.sessionsDir = config.sessionsDir ?? PI_SESSIONS_DIR;
     this.agentDir = config.agentDir ?? join(getDataDir(), "pi-agent");
+    // Resolved now, not at write time: a late write must land in the data
+    // dir this provider was created for.
+    this.commandCachePath = piCommandCachePath();
     this.userAgentDir = config.userAgentDir ?? PI_AGENT_DIR;
     this.extensionPath =
       config.extensionPath ??
@@ -930,7 +1053,11 @@ export class PiProvider implements AgentProvider {
     if (options.initialMessage) queue.push(options.initialMessage);
 
     const abortController = new AbortController();
-    const runtime: PiRuntimeRef = { models: [], routes: new Map() };
+    const runtime: PiRuntimeRef = {
+      models: [],
+      routes: new Map(),
+      controlJobs: new AsyncEventQueue<PiCompactJob>(),
+    };
     const iterator = this.runSession(
       options,
       queue,
@@ -1002,6 +1129,9 @@ export class PiProvider implements AgentProvider {
         return runtime.client?.pid;
       },
       steer: async (message) => {
+        // Pi rejects input while compacting; let Process queue it for the
+        // turn that starts once the compaction finishes.
+        if (runtime.compacting) return false;
         const projection = buildUserPromptProjection(message);
         await requireClient().send({
           type: "steer",
@@ -1015,26 +1145,11 @@ export class PiProvider implements AgentProvider {
       },
       supportedModels: async () => this.getAvailableModels(),
       supportedCommands: async (): Promise<SlashCommand[]> => {
-        const response = await requireClient().send({ type: "get_commands" });
-        const data = isRecord(response.data) ? response.data : {};
-        const commands = Array.isArray(data.commands) ? data.commands : [];
-        return commands.flatMap((command): SlashCommand[] => {
-          if (
-            !isRecord(command) ||
-            typeof command.name !== "string" ||
-            command.name === PI_SIDE_COMMAND
-          )
-            return [];
-          return [
-            {
-              name: command.name,
-              description:
-                typeof command.description === "string"
-                  ? command.description
-                  : "",
-            },
-          ];
-        });
+        const commands = piSlashCommands(
+          await requireClient().send({ type: "get_commands" }),
+        );
+        void writePiCommandCache(options.cwd, commands, this.commandCachePath);
+        return commands;
       },
       setModel: async (model) => {
         if (!model) throw new Error("Pi requires an explicit model");
@@ -1050,8 +1165,21 @@ export class PiProvider implements AgentProvider {
           level: normalizePiThinkingLevel(effort),
         });
       },
-      compact: async () => {
-        await requireClient().send({ type: "compact" });
+      compact: async (compactOptions) => {
+        requireClient();
+        if (runtime.controlJobs.isEnded) {
+          throw new Error("Pi session is no longer running");
+        }
+        const customInstructions = compactOptions?.customInstructions?.trim();
+        // Queued behind any active turn instead of aborting it: Pi's own
+        // manual compaction would discard the in-flight turn.
+        await new Promise<void>((resolve, reject) => {
+          runtime.controlJobs.push({
+            ...(customInstructions ? { customInstructions } : {}),
+            resolve,
+            reject,
+          });
+        });
       },
       getContextUsage: async (): Promise<ContextStatusSdkPayload | null> => {
         const response = await requireClient().send({
@@ -1344,6 +1472,29 @@ export class PiProvider implements AgentProvider {
         stringValue(state.thinkingLevel) ?? thinkingLevel;
       runtime.sessionId = sessionId;
 
+      // Pi loads extensions, prompts and skills at startup, so its `/` list
+      // is fixed for this process. Announce it with init so a viewer that is
+      // already open gets the list without reloading the session.
+      let slashCommands: SlashCommand[] | undefined;
+      try {
+        // Bounded: a missing list must not hold up the session start.
+        slashCommands = piSlashCommands(
+          await client.send(
+            { type: "get_commands" },
+            { timeoutMs: PI_STARTUP_COMMANDS_TIMEOUT_MS },
+          ),
+        );
+        if (!signal.aborted) {
+          void writePiCommandCache(
+            options.cwd,
+            slashCommands,
+            this.commandCachePath,
+          );
+        }
+      } catch (error) {
+        getLogger().debug({ error }, "Pi get_commands failed at startup");
+      }
+
       yield {
         type: "system",
         subtype: "init",
@@ -1351,9 +1502,32 @@ export class PiProvider implements AgentProvider {
         cwd: options.cwd,
         model: requestedModel,
         reasoningEffort: activeThinkingLevel,
+        ...(slashCommands ? { slash_commands: slashCommands } : {}),
       };
 
-      for await (const message of queue.generator()) {
+      // Wait on user input and manual compactions together. A compaction is
+      // only picked up here, between turns, so Pi never sees a prompt while it
+      // is compacting; a pending user read survives the compaction.
+      const userMessages = queue.generator();
+      let pendingUser: ReturnType<typeof userMessages.next> | undefined;
+      while (!signal.aborted) {
+        pendingUser ??= userMessages.next();
+        const next = await runtime.controlJobs.nextOr(pendingUser);
+        if ("value" in next) {
+          if (!next.value) break;
+          yield* this.runCompactJob(
+            next.value,
+            client,
+            runtime,
+            sessionId,
+            options,
+            signal,
+          );
+          continue;
+        }
+        pendingUser = undefined;
+        if (next.other.done) break;
+        const message = next.other.value;
         if (signal.aborted) break;
         const projection = getUserPromptProjection(message);
         const userId = message.uuid ?? `pi-user-${Date.now()}`;
@@ -1426,7 +1600,222 @@ export class PiProvider implements AgentProvider {
       }
     } finally {
       queue.close();
+      for (const job of runtime.controlJobs.drain()) {
+        job.reject(new Error("Pi session closed before compaction started"));
+      }
       runtime.client?.close();
+    }
+  }
+
+  /**
+   * Run one manual compaction between turns. Pi emits `compaction_start` /
+   * `compaction_end` before answering the `compact` command, so the events
+   * are consumed here (extension UI requests included) rather than leaking
+   * into the next turn. The compaction is framed as its own short busy period
+   * that ends with a `result`, which returns the process to idle.
+   */
+  private async *runCompactJob(
+    job: PiCompactJob,
+    client: PiRpcClient,
+    runtime: PiRuntimeRef,
+    fallbackSessionId: string,
+    options: StartSessionOptions,
+    signal: AbortSignal,
+  ): AsyncGenerator<SDKMessage> {
+    const sessionId = () => runtime.sessionId ?? fallbackSessionId;
+    const stream: PiStreamState = {
+      assistantId: null,
+      blocks: new Map(),
+      sequence: 0,
+      toolCallOwners: new Map(),
+      toolOutputSnapshots: new Map(),
+    };
+    let failure: Error | undefined;
+    let settled = false;
+    const settle = () => {
+      if (settled) return;
+      settled = true;
+      if (failure) job.reject(failure);
+      else job.resolve();
+    };
+    runtime.compacting = true;
+    try {
+      try {
+        yield {
+          type: "system",
+          subtype: "status",
+          status: "compacting",
+          session_id: sessionId(),
+        };
+        const response = client
+          .send(
+            {
+              type: "compact",
+              ...(job.customInstructions
+                ? { customInstructions: job.customInstructions }
+                : {}),
+            },
+            { timeoutMs: PI_COMPACT_TIMEOUT_MS },
+          )
+          .then(
+            (): Error | undefined => undefined,
+            (error: unknown): Error =>
+              error instanceof Error ? error : new Error(String(error)),
+          );
+        let endEvent: JsonRecord | undefined;
+        let responseError: Error | undefined;
+        let responded = false;
+        while (!endEvent) {
+          let event: JsonRecord | undefined;
+          if (responded) {
+            // Pi writes compaction_end before the response; anything still
+            // queued after the response belongs to this compaction or earlier.
+            event = client.tryNextEvent();
+            if (!event) break;
+          } else {
+            const next = await client.nextEventOr(response);
+            if ("other" in next) {
+              responded = true;
+              responseError = next.other;
+              continue;
+            }
+            if (!next.value) throw new Error("Pi RPC exited during compaction");
+            event = next.value;
+          }
+          if (event.type === "compaction_start") continue;
+          if (event.type === "compaction_end") {
+            endEvent = event;
+            continue;
+          }
+          const emitted = await this.convertEvent(
+            event,
+            sessionId(),
+            stream,
+            options,
+            client,
+            signal,
+            runtime,
+          );
+          for (const sdkMessage of emitted) yield sdkMessage;
+        }
+        if (!responded) responseError = await response;
+        failure = responseError;
+        if (!failure && endEvent?.aborted === true) {
+          failure = new Error("Compaction cancelled");
+        }
+        if (!failure) {
+          yield await this.compactionBoundarySdkMessage(
+            client,
+            runtime,
+            sessionId(),
+            endEvent,
+          );
+        }
+      } catch (error) {
+        failure = error instanceof Error ? error : new Error(String(error));
+      }
+      runtime.compacting = false;
+      // Settle before the closing messages: the caller must not depend on the
+      // consumer pulling past the final result.
+      settle();
+      if (failure) {
+        getLogger().warn(
+          {
+            event: "pi_compact_failed",
+            sessionId: sessionId(),
+            error: failure.message,
+          },
+          "Pi manual compaction failed",
+        );
+      }
+      yield {
+        type: "system",
+        subtype: "status",
+        status: null,
+        session_id: sessionId(),
+      };
+      yield { type: "result", session_id: sessionId() };
+    } finally {
+      runtime.compacting = false;
+      // Settle the caller even when the session loop is torn down mid-way.
+      if (!settled) {
+        failure ??= new Error("Pi session closed during compaction");
+        settle();
+      }
+    }
+  }
+
+  /**
+   * The compaction marker under Pi's persisted entry id, so the live row and
+   * the session-file row (`compact_boundary` from normalization) coincide.
+   */
+  private async compactionBoundarySdkMessage(
+    client: PiRpcClient,
+    runtime: PiRuntimeRef | undefined,
+    sessionId: string,
+    endEvent: JsonRecord | undefined,
+  ): Promise<SDKMessage> {
+    let entry: JsonRecord | undefined;
+    if (runtime) {
+      await this.fetchNewPiEntries(client, runtime);
+      entry = runtime.pendingCompactionEntry;
+      runtime.pendingCompactionEntry = undefined;
+    }
+    const result =
+      endEvent && isRecord(endEvent.result) ? endEvent.result : undefined;
+    const summary = stringValue(entry?.summary) ?? stringValue(result?.summary);
+    const timestamp = stringValue(entry?.timestamp);
+    const parentUuid = stringValue(entry?.parentId);
+    return {
+      type: "system",
+      subtype: "compact_boundary",
+      uuid: stringValue(entry?.id) ?? `pi-compaction-${Date.now()}`,
+      ...(parentUuid ? { parentUuid } : {}),
+      session_id: sessionId,
+      content: summary || "Context compacted",
+      ...(timestamp ? { timestamp } : {}),
+    } as SDKMessage;
+  }
+
+  /** Session entries appended since the last `get_entries` cursor. */
+  private async fetchNewPiEntries(
+    client: PiRpcClient,
+    runtime: PiRuntimeRef,
+  ): Promise<JsonRecord[] | undefined> {
+    const fetchEntries = async (
+      since: string | undefined,
+    ): Promise<{ entries: JsonRecord[]; leafId?: string } | undefined> => {
+      const response = await client.send({
+        type: "get_entries",
+        ...(since ? { since } : {}),
+      });
+      const data = isRecord(response.data) ? response.data : {};
+      if (!Array.isArray(data.entries)) return undefined;
+      return {
+        entries: data.entries.filter(isRecord),
+        leafId: stringValue(data.leafId),
+      };
+    };
+    try {
+      let result: { entries: JsonRecord[]; leafId?: string } | undefined;
+      try {
+        result = await fetchEntries(runtime.leafEntryId);
+      } catch (error) {
+        // A native fork/resume replaces the entry chain; the cursor Yep held
+        // may no longer exist. Retry from the beginning of the session.
+        if (!runtime.leafEntryId) throw error;
+        runtime.leafEntryId = undefined;
+        result = await fetchEntries(undefined);
+      }
+      if (!result) return undefined;
+      if (result.leafId) runtime.leafEntryId = result.leafId;
+      for (const entry of result.entries) {
+        if (entry.type === "compaction") runtime.pendingCompactionEntry = entry;
+      }
+      return result.entries;
+    } catch (error) {
+      getLogger().debug({ error }, "Pi get_entries failed");
+      return undefined;
     }
   }
 
@@ -1509,6 +1898,47 @@ export class PiProvider implements AgentProvider {
     if (event.type === "auto_retry_end") {
       options.onRetryStatus?.(undefined);
       return [];
+    }
+    // Automatic (threshold/overflow) compaction runs inside a turn; manual
+    // compaction events are consumed by runCompactJob.
+    if (event.type === "compaction_start") {
+      return [
+        {
+          type: "system",
+          subtype: "status",
+          status: "compacting",
+          session_id: sessionId,
+        },
+      ];
+    }
+    if (event.type === "compaction_end") {
+      const messages: SDKMessage[] = [];
+      if (event.aborted !== true && isRecord(event.result)) {
+        messages.push(
+          await this.compactionBoundarySdkMessage(
+            client,
+            runtime,
+            sessionId,
+            event,
+          ),
+        );
+      }
+      messages.push({
+        type: "system",
+        subtype: "status",
+        status: null,
+        session_id: sessionId,
+      });
+      const errorMessage = stringValue(event.errorMessage);
+      if (errorMessage) {
+        messages.push({
+          type: "system",
+          subtype: "warning",
+          session_id: sessionId,
+          content: errorMessage,
+        } as SDKMessage);
+      }
+      return messages;
     }
     if (event.type === "message_start") {
       const message = isRecord(event.message) ? event.message : {};
@@ -1612,61 +2042,28 @@ export class PiProvider implements AgentProvider {
     runtime: PiRuntimeRef,
     internalPrompt: string,
   ): Promise<string | undefined> {
-    const fetchEntries = async (
-      since: string | undefined,
-    ): Promise<{ entries: JsonRecord[]; leafId?: string } | undefined> => {
-      const response = await client.send({
-        type: "get_entries",
-        ...(since ? { since } : {}),
-      });
-      const data = isRecord(response.data) ? response.data : {};
-      if (!Array.isArray(data.entries)) return undefined;
-      return {
-        entries: data.entries.filter(isRecord),
-        leafId: stringValue(data.leafId),
-      };
-    };
+    const entries = await this.fetchNewPiEntries(client, runtime);
+    if (!entries) return undefined;
 
-    try {
-      let result: { entries: JsonRecord[]; leafId?: string } | undefined;
-      try {
-        result = await fetchEntries(runtime.leafEntryId);
-      } catch (error) {
-        // A native fork/resume replaces the entry chain; the cursor Yep held
-        // may no longer exist. Retry from the beginning of the session.
-        if (!runtime.leafEntryId) throw error;
-        runtime.leafEntryId = undefined;
-        result = await fetchEntries(undefined);
+    const userEntries = entries.filter((entry) => {
+      if (entry.type !== "message" || !isRecord(entry.message)) return false;
+      return entry.message.role === "user";
+    });
+    if (userEntries.length === 0) return undefined;
+
+    // Prefer the exact prompt text; Pi may expand templates or skills, in
+    // which case the only user entry appended in this window is still ours.
+    let exact: JsonRecord | undefined;
+    for (let index = userEntries.length - 1; index >= 0; index -= 1) {
+      const entry = userEntries[index];
+      if (entry && piUserEntryText(entry) === internalPrompt) {
+        exact = entry;
+        break;
       }
-      if (!result) return undefined;
-      if (result.leafId) runtime.leafEntryId = result.leafId;
-
-      const userEntries = result.entries.filter((entry) => {
-        if (entry.type !== "message" || !isRecord(entry.message)) return false;
-        return entry.message.role === "user";
-      });
-      if (userEntries.length === 0) return undefined;
-
-      // Prefer the exact prompt text; Pi may expand templates or skills, in
-      // which case the only user entry appended in this window is still ours.
-      let exact: JsonRecord | undefined;
-      for (let index = userEntries.length - 1; index >= 0; index -= 1) {
-        const entry = userEntries[index];
-        if (entry && piUserEntryText(entry) === internalPrompt) {
-          exact = entry;
-          break;
-        }
-      }
-      const match =
-        exact ?? (userEntries.length === 1 ? userEntries[0] : undefined);
-      return match ? stringValue(match.id) : undefined;
-    } catch (error) {
-      getLogger().debug(
-        { error },
-        "Pi get_entries failed; live prompt keeps its client id",
-      );
-      return undefined;
     }
+    const match =
+      exact ?? (userEntries.length === 1 ? userEntries[0] : undefined);
+    return match ? stringValue(match.id) : undefined;
   }
 
   private applyAssistantUpdate(

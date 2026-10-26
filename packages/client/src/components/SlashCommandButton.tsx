@@ -1,8 +1,12 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import type { AgentCommandDetail } from "../lib/agentCommands";
+import { CommandMenuItemContent } from "./CommandMenuItemContent";
 
 interface SlashCommandButtonProps {
   /** Available commands (without the prefix) */
   commands: string[];
+  /** Optional description/source per command name */
+  details?: Record<string, AgentCommandDetail>;
   /** Callback when a command is selected */
   onSelectCommand: (command: string) => void;
   /** Optional fallback when only the prefix is available to insert. */
@@ -21,6 +25,7 @@ interface SlashCommandButtonProps {
  */
 export function SlashCommandButton({
   commands,
+  details,
   onSelectCommand,
   onInsertPrefix,
   disabled,
@@ -121,8 +126,11 @@ export function SlashCommandButton({
               onClick={() => handleCommandClick(command)}
               role="menuitem"
             >
-              {prefix}
-              {command}
+              <CommandMenuItemContent
+                prefix={prefix}
+                command={command}
+                detail={details?.[command]}
+              />
             </button>
           ))}
         </div>

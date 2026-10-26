@@ -1,3 +1,7 @@
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 /**
  * Test environment hygiene.
  *
@@ -49,3 +53,10 @@ process.env.YEP_LLM_GATEWAYS_FILE =
 // MCP servers) into test agent dirs. Tests of the native overlay opt back in
 // with an explicit userAgentDir.
 process.env.YEP_PI_NATIVE_CONFIG = "false";
+
+// Code that falls back to the default data dir (caches, file-operation
+// imports) must never write into the developer's real ~/.yep-anywhere. Tests
+// that care about the location still stub YEP_ANYWHERE_DATA_DIR themselves.
+process.env.YEP_ANYWHERE_DATA_DIR = mkdtempSync(
+  join(tmpdir(), "yep-test-data-"),
+);

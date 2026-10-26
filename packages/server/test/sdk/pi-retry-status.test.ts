@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import type { SessionRetryStatus } from "@yep-anywhere/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitForPiCommandCacheWrites } from "../../src/sdk/providers/pi-command-cache.js";
 import { PiProvider } from "../../src/sdk/providers/pi.js";
 
 /**
@@ -59,6 +60,7 @@ describe("PiProvider retry status", () => {
   const tempDirs: string[] = [];
 
   afterEach(async () => {
+    await waitForPiCommandCacheWrites();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
     delete (globalThis as Record<PropertyKey, unknown>)[

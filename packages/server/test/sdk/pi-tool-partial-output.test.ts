@@ -3,6 +3,7 @@ import { chmod, mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { waitForPiCommandCacheWrites } from "../../src/sdk/providers/pi-command-cache.js";
 import { PiProvider } from "../../src/sdk/providers/pi.js";
 
 /**
@@ -241,6 +242,7 @@ describe("PiProvider live tool output", () => {
   const tempDirs: string[] = [];
 
   afterEach(async () => {
+    await waitForPiCommandCacheWrites();
     vi.unstubAllEnvs();
     vi.unstubAllGlobals();
     resetExtensionState();

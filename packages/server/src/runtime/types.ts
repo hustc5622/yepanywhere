@@ -13,6 +13,7 @@ import type {
   CodexNativeControlRequest,
   CodexNativeControlResult,
 } from "../sdk/providers/codex-controls.js";
+import type { CompactOptions } from "../sdk/providers/types.js";
 import type {
   ProviderApprovalDecision,
   SDKMessage,
@@ -29,6 +30,8 @@ import type {
 } from "../supervisor/WorkerQueue.js";
 import type { ProcessInfo } from "../supervisor/types.js";
 import type { BusEvent } from "../watcher/index.js";
+
+export type { CompactOptions };
 
 export const RUNTIME_CONTROLLER_PROTOCOL_VERSION = 6;
 
@@ -301,7 +304,10 @@ export interface RuntimeController {
   getSupportedCommands(processId: string): Promise<SlashCommand[] | null>;
   setModel(processId: string, model?: string): Promise<{ success: boolean }>;
   /** Trigger a provider-native context compaction for the process' session. */
-  compact(processId: string): Promise<{ success: boolean }>;
+  compact(
+    processId: string,
+    options?: CompactOptions,
+  ): Promise<{ success: boolean }>;
   /** Change the provider-native reasoning effort mid-session. */
   setReasoningEffort(
     processId: string,
