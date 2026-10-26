@@ -239,6 +239,7 @@
 
 .local-file-loading,
 .local-file-error {
+  flex-shrink: 0;
   padding: 1rem;
   color: var(--text-secondary);
 }
@@ -248,6 +249,9 @@
 }
 
 .local-file-meta {
+  /* Column-flex child with overflow:hidden has an automatic min-height of 0,
+     so a tall Markdown sibling would squash this single-line path row. */
+  flex-shrink: 0;
   overflow: hidden;
   color: var(--text-secondary);
   font-family: var(--font-mono);
