@@ -201,6 +201,7 @@ createRoot(rootElement).render(
                   path="/projects/:projectId/file"
                   element={<FilePage />}
                 />
+                <Route path="/file" element={<FilePage />} />
                 {/* Activity page has its own layout */}
                 <Route path="/activity" element={<ActivityPage />} />
               </Routes>

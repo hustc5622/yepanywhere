@@ -210,3 +210,45 @@ describe("document link style (file previews)", () => {
     );
   });
 });
+
+describe("file paths in prose and inline code (message style)", () => {
+  it("links absolute and project-relative paths in prose", () => {
+    const html = renderSafeMarkdown(
+      "Logs in /tmp/run.log and code in packages/client/src/a.ts:12 near src/utils and and/or",
+    );
+    expect(html).toContain(
+      '<a href="/api/local-file?path=%2Ftmp%2Frun.log" class="local-file-link" data-file-path="/tmp/run.log"',
+    );
+    expect(html).toContain(
+      'data-file-path="packages/client/src/a.ts" data-line="12"',
+    );
+    expect(html).toContain("near src/utils and and/or");
+  });
+
+  it("links inline code that is exactly one path and keeps the code styling", () => {
+    const html = renderSafeMarkdown(
+      "Open `packages/server/src/app.ts` or `/tmp/pw/c-1.png`, not `README.md` or `npm run build`.",
+    );
+    expect(html).toContain(
+      'data-file-path="packages/server/src/app.ts" title="packages/server/src/app.ts"><code>packages/server/src/app.ts</code></a>',
+    );
+    expect(html).toContain(
+      'class="local-media-link" data-media-type="image"><code>/tmp/pw/c-1.png</code>',
+    );
+    expect(html).toContain("<code>README.md</code>");
+    expect(html).toContain("<code>npm run build</code>");
+  });
+
+  it("escapes inline code that is not a path", () => {
+    expect(renderSafeMarkdown("`a<b & c`")).toContain(
+      "<code>a&lt;b &amp; c</code>",
+    );
+  });
+
+  it("does not link prose or code paths in document style", () => {
+    const html = renderSafeMarkdown("See /tmp/run.log and `src/a/b.ts`", {
+      linkStyle: "document",
+    });
+    expect(html).not.toContain("local-file-link");
+  });
+});

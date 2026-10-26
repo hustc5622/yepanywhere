@@ -1,4 +1,8 @@
-import { isManagedUploadDownloadUrl } from "@yep-anywhere/shared";
+import {
+  getFileMimeType,
+  getMediaPreviewKind,
+  isManagedUploadDownloadUrl,
+} from "@yep-anywhere/shared";
 import type { ContentBlock } from "../types";
 import {
   type ParsedUserPrompt,
@@ -111,15 +115,9 @@ export function formatFileSize(bytes?: number): string {
 }
 
 function getMimeTypeFromPath(path: string): string | undefined {
-  const lowerPath = path.toLowerCase();
-  if (lowerPath.endsWith(".png")) return "image/png";
-  if (lowerPath.endsWith(".jpg") || lowerPath.endsWith(".jpeg"))
-    return "image/jpeg";
-  if (lowerPath.endsWith(".gif")) return "image/gif";
-  if (lowerPath.endsWith(".webp")) return "image/webp";
-  if (lowerPath.endsWith(".bmp")) return "image/bmp";
-  if (lowerPath.endsWith(".svg")) return "image/svg+xml";
-  return undefined;
+  return getMediaPreviewKind(path) === "image"
+    ? getFileMimeType(path)
+    : undefined;
 }
 
 function extensionForMimeType(mimeType: string): string {

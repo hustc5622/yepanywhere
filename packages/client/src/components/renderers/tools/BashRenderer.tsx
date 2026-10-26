@@ -1,11 +1,16 @@
 import { useCallback, useEffect, useState } from "react";
 import type { ZodError } from "zod";
 import { useSchemaValidationContext } from "../../../contexts/SchemaValidationContext";
+import { useOptionalSessionMetadata } from "../../../contexts/SessionMetadataContext";
+import { useOptionalI18n } from "../../../i18n";
 import {
   getDisplayBashCommandFromInput,
   isCodexProvider,
 } from "../../../lib/bashCommand";
+import { fileRefFromPath } from "../../../lib/fileRef";
+import { detectShellFileRead } from "../../../lib/shellFileRead";
 import { validateToolResult } from "../../../lib/validateToolResult";
+import { FileOpenButton } from "../../FilePreviewPanel";
 import { SchemaWarning } from "../../SchemaWarning";
 import { Modal } from "../../ui/Modal";
 import {
@@ -172,6 +177,54 @@ function BashModalContent({
   );
 }
 
+/** Working directory recorded with the command, when the provider sends one. */
+function getCommandCwd(input: unknown): string | undefined {
+  if (!input || typeof input !== "object") return undefined;
+  const record = input as Record<string, unknown>;
+  const cwd = [record.workdir, record.cwd].find(
+    (value): value is string => typeof value === "string",
+  );
+  return cwd?.startsWith("/") ? cwd : undefined;
+}
+
+/**
+ * A command that only prints one file (`cat f`, `sed -n '1,80p' f`,
+ * `nl -ba f | sed -n …`) gets a link that opens the file at that range.
+ */
+function ShellFileReadLink({
+  command,
+  input,
+}: {
+  command: string;
+  input: unknown;
+}) {
+  const metadata = useOptionalSessionMetadata();
+  const i18n = useOptionalI18n();
+  const read = detectShellFileRead(command);
+  if (!read) return null;
+  const cwd = getCommandCwd(input);
+  const fileRef = fileRefFromPath(
+    read.path,
+    cwd ? { projectId: metadata?.projectId, projectPath: cwd } : metadata,
+    { lineNumber: read.lineNumber, lineEnd: read.lineEnd },
+  );
+  const range =
+    read.lineNumber !== undefined
+      ? `:${read.lineNumber}${read.lineEnd && read.lineEnd !== read.lineNumber ? `-${read.lineEnd}` : ""}`
+      : "";
+  return (
+    <div className="bash-file-read">
+      <span className="bash-file-read-label">
+        {i18n?.t("toolShellReadsFile" as never) ?? "Reads"}
+      </span>
+      <FileOpenButton fileRef={fileRef} className="file-link-inline">
+        {read.path.split("/").pop() || read.path}
+        {range && <span className="file-line-count-inline">{range}</span>}
+      </FileOpenButton>
+    </div>
+  );
+}
+
 /**
  * Bash tool use - shows command in code block with collapse for long commands
  */
@@ -190,6 +243,7 @@ function BashToolUse({ input }: { input: BashInput }) {
       <pre className="code-block">
         <code>{displayCommand}</code>
       </pre>
+      <ShellFileReadLink command={command} input={input} />
       {needsCollapse && (
         <button
           type="button"

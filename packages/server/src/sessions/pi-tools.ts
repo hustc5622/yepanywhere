@@ -1,3 +1,5 @@
+import { withCanonicalFilePath } from "@yep-anywhere/shared";
+
 interface JsonRecord {
   [key: string]: unknown;
 }
@@ -81,16 +83,12 @@ export function normalizePiToolInput(
   input: unknown,
   resultDetails?: unknown,
 ): Record<string, unknown> {
-  const normalized = isRecord(input) ? { ...input } : {};
   const name = nativeName.toLowerCase();
-
-  if (
-    (name === "read" || name === "write" || name === "edit") &&
-    typeof normalized.path === "string" &&
-    typeof normalized.file_path !== "string"
-  ) {
-    normalized.file_path = normalized.path;
-  }
+  const base = isRecord(input) ? { ...input } : {};
+  const normalized =
+    name === "read" || name === "write" || name === "edit"
+      ? withCanonicalFilePath(base)
+      : base;
 
   if (name === "ls" && typeof normalized.pattern !== "string") {
     normalized.pattern = "*";

@@ -913,7 +913,6 @@ async function startServer() {
     enabledProviders: config.enabledProviders,
     voiceInputEnabled: config.voiceInputEnabled,
     maxUploadSizeBytes: config.maxUploadSizeBytes,
-    allowedImagePaths: config.allowedImagePaths,
     basePath: config.basePath,
     runtimeController: configuredRuntimeController,
     interactionBroker,

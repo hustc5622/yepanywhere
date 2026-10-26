@@ -3,17 +3,11 @@ import type { ZodError } from "zod";
 import { useSchemaValidationContext } from "../../../contexts/SchemaValidationContext";
 import { validateToolResult } from "../../../lib/validateToolResult";
 import { SchemaWarning } from "../../SchemaWarning";
+import { FileListItem, GrepContentLine } from "./FileListItem";
 import type { GrepInput, GrepResult, ToolRenderer } from "./types";
 
 const MAX_FILES_COLLAPSED = 20;
 const MAX_LINES_COLLAPSED = 30;
-
-/**
- * Extract filename from path
- */
-function getFileName(filePath: string): string {
-  return filePath.split("/").pop() || filePath;
-}
 
 /**
  * Grep tool use - shows search pattern
@@ -33,10 +27,12 @@ function GrepToolUse({ input }: { input: GrepInput }) {
  */
 function FileListView({
   filenames,
+  searchRoot,
   isExpanded,
   setIsExpanded,
 }: {
   filenames: string[];
+  searchRoot?: string;
   isExpanded: boolean;
   setIsExpanded: (expanded: boolean) => void;
 }) {
@@ -50,10 +46,7 @@ function FileListView({
     <>
       <div className="file-list">
         {displayFiles.map((file) => (
-          <div key={file} className="file-list-item">
-            <span className="file-path">{getFileName(file)}</span>
-            <span className="file-dir">{file}</span>
-          </div>
+          <FileListItem key={file} path={file} searchRoot={searchRoot} />
         ))}
         {needsCollapse && !isExpanded && (
           <div className="file-list-more">
@@ -79,10 +72,12 @@ function FileListView({
  */
 function ContentView({
   content,
+  searchRoot,
   isExpanded,
   setIsExpanded,
 }: {
   content: string;
+  searchRoot?: string;
   isExpanded: boolean;
   setIsExpanded: (expanded: boolean) => void;
 }) {
@@ -94,7 +89,15 @@ function ContentView({
   return (
     <>
       <pre className="grep-content code-block">
-        <code>{displayLines.join("\n")}</code>
+        <code>
+          {displayLines.map((line, index) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: grep output lines are positional
+            <span key={index}>
+              <GrepContentLine line={line} searchRoot={searchRoot} />
+              {index < displayLines.length - 1 ? "\n" : null}
+            </span>
+          ))}
+        </code>
       </pre>
       {needsCollapse && (
         <button
@@ -115,9 +118,11 @@ function ContentView({
 function GrepToolResult({
   result,
   isError,
+  searchRoot,
 }: {
   result: GrepResult;
   isError: boolean;
+  searchRoot?: string;
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const { enabled, reportValidationError, isToolIgnored } =
@@ -197,6 +202,7 @@ function GrepToolResult({
         </div>
         <ContentView
           content={content}
+          searchRoot={searchRoot}
           isExpanded={isExpanded}
           setIsExpanded={setIsExpanded}
         />
@@ -226,6 +232,7 @@ function GrepToolResult({
       </div>
       <FileListView
         filenames={filenames}
+        searchRoot={searchRoot}
         isExpanded={isExpanded}
         setIsExpanded={setIsExpanded}
       />
@@ -240,8 +247,14 @@ export const grepRenderer: ToolRenderer<GrepInput, GrepResult> = {
     return <GrepToolUse input={input as GrepInput} />;
   },
 
-  renderToolResult(result, isError, _context) {
-    return <GrepToolResult result={result as GrepResult} isError={isError} />;
+  renderToolResult(result, isError, _context, input) {
+    return (
+      <GrepToolResult
+        result={result as GrepResult}
+        isError={isError}
+        searchRoot={(input as GrepInput | undefined)?.path}
+      />
+    );
   },
 
   getUseSummary(input) {

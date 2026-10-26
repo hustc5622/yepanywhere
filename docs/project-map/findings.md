@@ -23,7 +23,7 @@
 | C3 | [SessionMetadataService.doSave](../../packages/server/src/metadata/SessionMetadataService.ts)、[NotificationService.doSave](../../packages/server/src/notifications/NotificationService.ts) 直接 writeFile；NotificationService.recordSeen 在保存前已广播；index/broker 使用不同的原子写/锁策略 | 进程内串行减少竞态，但不等于崩溃原子性或跨进程单 writer；保存失败后的内存/磁盘一致性待确认，尚无数据丢失复现 | 将来在临时目录做中断/并发 writer 实验，并先确认实际部署是否共享 dataDir；不要动真实状态文件 |
 | C4 | 原生历史、runtime journal、Codex provider/bridge journal、server display、client snapshot 都可保存相关状态 | 分别服务历史、重连、生命周期、显示，不应武断合并；状态差异可能源于保留策略和时序 | 按 data 页逐层带上 ID/epoch/source/coverage 对齐；先找首次分歧，不通过清缓存掩盖原因 |
 | C5 | [GitStatusPage.tsx](../../packages/client/src/pages/GitStatusPage.tsx) 仍导出 `GitStatusContent`，主路由 `/git-status` 重定向到 `/settings/source-control`；[SourceControlSettings.tsx](../../packages/client/src/pages/settings/SourceControlSettings.tsx) 继续导入该符号。`EmulatorPage.tsx` 已删除 | Git 页面文件仍是设置内容的实现，不是死路由。模拟器页面不再是复用候选 | 整理 Git 入口时只统计 `GitStatusContent` 的引用。不要按旧地图恢复 `EmulatorPage` |
-| C6 | [routes/local-file.ts](../../packages/server/src/routes/local-file.ts) `createLocalFileRoutes` 接受绝对支持类型路径；uploads 有 containment，local-image 有 allowlist | 本地自托管管理界面可能有意提供广范围预览；不是已经证明的越权漏洞 | 明确实际部署认证和多用户信任模型，再测试权限边界，不能假定所有文件 API 都限制在当前 project |
+| C6 | [routes/local-file.ts](../../packages/server/src/routes/local-file.ts) 与 [routes/local-image.ts](../../packages/server/src/routes/local-image.ts) 接受任意可读绝对路径 | 已决策（2026-10-21）：项目外文件预览不限制路径，只依赖 API 认证，见 [文件侧边预览统一设计](../project/file-preview-unification.md) | 已关闭；若将来支持多用户或不可信访问，需重新评估 |
 
 ## 未知项与具体解除条件
 

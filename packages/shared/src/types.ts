@@ -660,6 +660,52 @@ export interface FileContentResponse {
   renderedMarkdownHtml?: string;
 }
 
+/**
+ * Response from the unified preview API (`GET /api/fs/preview`).
+ */
+export interface FilePreviewResponse extends FileContentResponse {
+  /** How the client should render the file. */
+  kind: import("./file-types.js").PreviewKind;
+  /** Parsed from a `:line[:column]` suffix on the requested path. */
+  lineNumber?: number;
+  columnNumber?: number;
+  /** Text/table extraction for docx/xlsx/pptx (kind `office`). */
+  office?: OfficeDocumentPreview;
+  /** Why an office document could not be converted. */
+  officeError?: string;
+}
+
+/** A project that contains a given relative path (`GET /api/fs/locate`). */
+export interface FileLocateCandidate {
+  projectId: string;
+  projectName: string;
+  projectPath: string;
+  absolutePath: string;
+}
+
+export interface FileLocateResponse {
+  candidates: FileLocateCandidate[];
+}
+
+export interface OfficeSheetPreview {
+  name: string;
+  /** Rectangular cell text, first rows only. */
+  rows: string[][];
+  totalRows: number;
+  truncatedRows: boolean;
+  truncatedColumns: boolean;
+}
+
+export interface OfficeSlidePreview {
+  /** Text paragraphs in slide order. */
+  paragraphs: string[];
+}
+
+export type OfficeDocumentPreview =
+  | { format: "docx"; html: string; truncated: boolean }
+  | { format: "xlsx"; sheets: OfficeSheetPreview[]; truncatedSheets: boolean }
+  | { format: "pptx"; slides: OfficeSlidePreview[]; truncated: boolean };
+
 export type ReportDocumentKind = "markdown" | "text" | "transcript";
 
 /**

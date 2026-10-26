@@ -1,5 +1,9 @@
 import {
+  detectFilePaths,
+  getMediaPreviewKind,
+  getPathBasename,
   isLikelyFilePath,
+  isPreviewLinkablePath,
   parseLineColumn,
   splitTextWithFilePaths,
 } from "@yep-anywhere/shared";
@@ -14,22 +18,6 @@ import sanitizeHtml from "sanitize-html";
 
 const ALLOWED_LINK_PROTOCOLS = new Set(["http:", "https:", "mailto:"]);
 const ALLOWED_IMAGE_PROTOCOLS = new Set(["http:", "https:"]);
-
-const IMAGE_EXTENSIONS = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "bmp",
-  "tiff",
-  "tif",
-  "svg",
-]);
-
-const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "avi", "mkv", "ogv"]);
-
-const MEDIA_EXTENSIONS = new Set([...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS]);
 
 export interface SafeMarkdownOptions {
   /** Resolve a non-HTTP image reference in a trusted, caller-specific scope. */
@@ -79,20 +67,6 @@ function getRelativeFilePath(href: string): string | null {
 }
 
 /**
- * Get the file extension from a path (lowercase, without the dot).
- */
-function getExtension(path: string): string {
-  return (path.split(".").pop() ?? "").toLowerCase();
-}
-
-/**
- * Get the filename from a path.
- */
-function getFileName(path: string): string {
-  return path.trim().split("/").pop() ?? path;
-}
-
-/**
  * Rewrite a local media path to the local-image API endpoint.
  */
 function localMediaApiUrl(path: string): string {
@@ -117,13 +91,14 @@ function localTextFileApiUrl(
 function renderLocalMediaLink(
   path: string,
   label: string,
-  ext: string,
+  mediaType: "image" | "video",
+  labelIsHtml = false,
 ): string {
   const apiUrl = escapeHtml(localMediaApiUrl(path));
-  const escapedLabel = escapeHtml(label || getFileName(path));
-  const mediaType = VIDEO_EXTENSIONS.has(ext) ? "video" : "image";
-  const typeLabel = VIDEO_EXTENSIONS.has(ext) ? "video" : "image";
-  return `<a href="${apiUrl}" class="local-media-link" data-media-type="${mediaType}">${escapedLabel}<span class="local-media-type">(${typeLabel})</span></a>`;
+  const escapedLabel = labelIsHtml
+    ? label
+    : escapeHtml(label || getPathBasename(path.trim()));
+  return `<a href="${apiUrl}" class="local-media-link" data-media-type="${mediaType}">${escapedLabel}<span class="local-media-type">(${mediaType})</span></a>`;
 }
 
 /**
@@ -151,26 +126,65 @@ function renderLocalTextFileLink(
   return `<a href="${apiUrl}" class="local-file-link" ${dataAttrs}${titleAttr}>${renderedText}</a>`;
 }
 
-function renderTextWithLocalMediaLinks(text: string): string {
+function renderDetectedPathLink(
+  match: string,
+  path: string,
+  labelHtml: string,
+): string {
+  const mediaType = isLocalFilePath(path) ? getMediaPreviewKind(path) : null;
+  if (mediaType) return renderLocalMediaLink(path, labelHtml, mediaType, true);
+  return renderLocalTextFileLink(match, labelHtml);
+}
+
+/**
+ * Prose text with file paths turned into preview links. In `document` style
+ * (file previews) only absolute media paths are linked: text tokens there can
+ * sit inside link labels, and relative paths belong to the document folder.
+ */
+function renderTextWithFileLinks(
+  text: string,
+  linkStyle: SafeMarkdownOptions["linkStyle"],
+): string {
   return splitTextWithFilePaths(text)
     .map((segment) => {
       if (segment.type === "text") {
         return escapeHtml(segment.content);
       }
 
-      const path = segment.detected.filePath;
-      if (!isLocalFilePath(path)) {
-        return escapeHtml(segment.detected.match);
+      const { match, filePath } = segment.detected;
+      if (linkStyle === "document") {
+        const mediaType = isLocalFilePath(filePath)
+          ? getMediaPreviewKind(filePath)
+          : null;
+        return mediaType
+          ? renderLocalMediaLink(filePath, match, mediaType)
+          : escapeHtml(match);
       }
-
-      const ext = getExtension(path);
-      if (!MEDIA_EXTENSIONS.has(ext)) {
-        return escapeHtml(segment.detected.match);
-      }
-
-      return renderLocalMediaLink(path, segment.detected.match, ext);
+      if (!isPreviewLinkablePath(filePath)) return escapeHtml(match);
+      return renderDetectedPathLink(match, filePath, escapeHtml(match));
     })
     .join("");
+}
+
+/** Inline code that is exactly one file path becomes a preview link. */
+function renderCodespan(
+  text: string,
+  linkStyle: SafeMarkdownOptions["linkStyle"],
+): string {
+  const code = `<code>${escapeHtml(text)}</code>`;
+  if (linkStyle === "document") return code;
+  const trimmed = text.trim();
+  const detected = detectFilePaths(trimmed);
+  const only = detected.length === 1 ? detected[0] : undefined;
+  if (
+    !only ||
+    only.startIndex !== 0 ||
+    only.endIndex !== trimmed.length ||
+    !isPreviewLinkablePath(only.filePath)
+  ) {
+    return code;
+  }
+  return renderDetectedPathLink(only.match, only.filePath, code);
 }
 
 const MARKDOWN_SANITIZE_OPTIONS = {
@@ -287,7 +301,10 @@ function createRenderer(
       if ("tokens" in token && token.tokens) {
         return this.parser.parseInline(token.tokens);
       }
-      return renderTextWithLocalMediaLinks(token.text);
+      return renderTextWithFileLinks(token.text, options.linkStyle);
+    },
+    codespan({ text }: Tokens.Codespan) {
+      return renderCodespan(text, options.linkStyle);
     },
     link(this: RendererThis<string, string>, token: Tokens.Link) {
       const { href, title } = token;
@@ -300,9 +317,9 @@ function createRenderer(
       const renderedText = escapeHtml(source);
       // Check for local file paths first — rewrite to clickable media placeholder
       if (isLocalFilePath(href)) {
-        const ext = getExtension(href);
-        if (MEDIA_EXTENSIONS.has(ext)) {
-          return renderLocalMediaLink(href, source, ext);
+        const mediaType = getMediaPreviewKind(href.trim());
+        if (mediaType) {
+          return renderLocalMediaLink(href, source, mediaType);
         }
         return renderLocalTextFileLink(href, renderedText, title);
       }
@@ -328,17 +345,18 @@ function createRenderer(
       const documentStyle = options.linkStyle === "document";
       // Check for local file paths first — rewrite to clickable media placeholder
       if (isLocalFilePath(href)) {
-        const ext = getExtension(href);
-
-        if (MEDIA_EXTENSIONS.has(ext)) {
+        const mediaType = getMediaPreviewKind(href.trim());
+        if (mediaType) {
           return renderLocalMediaLink(
             href,
             documentStyle ? text : getLinkSource(token),
-            ext,
+            mediaType,
           );
         }
         return escapeHtml(
-          documentStyle ? text || getFileName(href) : getLinkSource(token),
+          documentStyle
+            ? text || getPathBasename(href.trim())
+            : getLinkSource(token),
         );
       }
 
@@ -372,9 +390,9 @@ function createRenderer(
 function renderDocumentLink(renderedLabel: string, token: Tokens.Link): string {
   const { href, title } = token;
   if (isLocalFilePath(href)) {
-    const ext = getExtension(href);
-    if (MEDIA_EXTENSIONS.has(ext)) {
-      return renderLocalMediaLink(href, token.text, ext);
+    const mediaType = getMediaPreviewKind(href.trim());
+    if (mediaType) {
+      return renderLocalMediaLink(href, token.text, mediaType);
     }
     return renderLocalTextFileLink(href, renderedLabel, title);
   }
@@ -655,11 +673,4 @@ function escapeHtml(text: string): string {
     .replace(/'/g, "&#039;");
 }
 
-export {
-  IMAGE_EXTENSIONS,
-  MEDIA_EXTENSIONS,
-  VIDEO_EXTENSIONS,
-  isLocalFilePath,
-  localMediaApiUrl,
-  localTextFileApiUrl,
-};
+export { isLocalFilePath, localMediaApiUrl, localTextFileApiUrl };

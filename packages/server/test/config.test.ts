@@ -46,36 +46,6 @@ describe("loadConfig codex paths", () => {
     );
   });
 
-  it("always allows the managed uploads directory for local-image", async () => {
-    vi.stubEnv("CODEX_HOME", "/tmp/codex-home");
-    vi.stubEnv("YEP_ANYWHERE_DATA_DIR", "/tmp/yep-data");
-    vi.stubEnv("ALLOWED_IMAGE_PATHS", "");
-
-    const { loadConfig } = await import("../src/config.js");
-    const config = loadConfig();
-
-    expect(config.allowedImagePaths).toEqual([
-      "/tmp/yep-data/uploads",
-      "/tmp/codex-home/generated_images",
-    ]);
-  });
-
-  it("merges managed uploads with configured local-image paths", async () => {
-    vi.stubEnv("CODEX_HOME", "/tmp/codex-home");
-    vi.stubEnv("YEP_ANYWHERE_DATA_DIR", "/tmp/yep-data");
-    vi.stubEnv("ALLOWED_IMAGE_PATHS", "/tmp, /var/tmp, /tmp");
-
-    const { loadConfig } = await import("../src/config.js");
-    const config = loadConfig();
-
-    expect(config.allowedImagePaths).toEqual([
-      "/tmp/yep-data/uploads",
-      "/tmp/codex-home/generated_images",
-      "/tmp",
-      "/var/tmp",
-    ]);
-  });
-
   it("uses the standard, clear, and full Codex bridge profiles by default", async () => {
     vi.stubEnv("YEP_CODEX_BRIDGE_LIGHT_UPSTREAM_ARGS", undefined);
     vi.stubEnv("YEP_CODEX_BRIDGE_CLEAR_UPSTREAM_ARGS", undefined);

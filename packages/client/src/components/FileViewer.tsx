@@ -1,23 +1,45 @@
-import type { FileContentResponse } from "@yep-anywhere/shared";
-import { memo, useCallback, useEffect, useState } from "react";
+import {
+  type FileLocateCandidate,
+  type FilePreviewResponse,
+  getPathBasename,
+} from "@yep-anywhere/shared";
+import {
+  memo,
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 import { type ApiError, api } from "../api/client";
+import { useOptionalSessionMetadata } from "../contexts/SessionMetadataContext";
 import { useI18n } from "../i18n";
-import { appPath } from "../lib/apiPath";
 import { writeClipboardText } from "../lib/clipboard";
+import { delimiterForPath, parseDelimitedText } from "../lib/delimitedText";
+import {
+  type FileRef,
+  type FileSnapshot,
+  extractFileLinkTarget,
+  filePageUrl,
+  fileRawUrl,
+  fileRefFromPath,
+} from "../lib/fileRef";
+import { OfficeView } from "./OfficeView";
 
 interface FileViewerProps {
-  projectId: string;
-  filePath: string;
+  fileRef: FileRef;
+  /** What a tool saw when it read the file; offered next to the current file. */
+  snapshot?: FileSnapshot;
   onClose?: () => void;
-  /** If true, renders as standalone page layout instead of modal content */
+  /** If true, renders as standalone page layout instead of panel content */
   standalone?: boolean;
-  /** Line number to scroll to and highlight (1-indexed) */
-  lineNumber?: number;
-  /** End line for range highlighting (1-indexed). If not provided, only lineNumber is highlighted. */
-  lineEnd?: number;
+  /** Open another file from a link inside this preview (e.g. markdown). */
+  onNavigate?: (ref: FileRef) => void;
 }
 
 type CopyFeedback = "copied" | "failed" | null;
+type ViewSource = "current" | "snapshot";
 
 function FileViewerCopyAction({
   value,
@@ -87,74 +109,12 @@ function FileViewerCopyAction({
   );
 }
 
-/**
- * Format file size for display.
- */
 function formatFileSize(bytes: number): string {
   if (bytes < 1024) return `${bytes} B`;
   if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
   return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 
-/**
- * Get language hint from file extension for potential future syntax highlighting.
- */
-function getLanguageFromPath(filePath: string): string {
-  const ext = filePath.split(".").pop()?.toLowerCase() || "";
-  const langMap: Record<string, string> = {
-    ts: "typescript",
-    tsx: "typescript",
-    js: "javascript",
-    jsx: "javascript",
-    py: "python",
-    rb: "ruby",
-    go: "go",
-    rs: "rust",
-    java: "java",
-    kt: "kotlin",
-    c: "c",
-    cpp: "cpp",
-    h: "c",
-    hpp: "cpp",
-    cs: "csharp",
-    swift: "swift",
-    php: "php",
-    sql: "sql",
-    sh: "bash",
-    bash: "bash",
-    zsh: "bash",
-    json: "json",
-    yaml: "yaml",
-    yml: "yaml",
-    toml: "toml",
-    xml: "xml",
-    html: "html",
-    css: "css",
-    scss: "scss",
-    md: "markdown",
-    markdown: "markdown",
-  };
-  return langMap[ext] || "plaintext";
-}
-
-/**
- * Check if file is an image.
- */
-function isImageFile(mimeType: string): boolean {
-  return mimeType.startsWith("image/");
-}
-
-/**
- * Check if file is markdown.
- */
-function isMarkdownFile(filePath: string): boolean {
-  const ext = filePath.split(".").pop()?.toLowerCase() || "";
-  return ext === "md" || ext === "markdown";
-}
-
-/**
- * Get filename from path.
- */
 function getFilePathParts(filePath: string): {
   fileName: string;
   directory?: string;
@@ -174,8 +134,14 @@ function getFilePathParts(filePath: string): {
   };
 }
 
-function getFileName(filePath: string): string {
-  return getFilePathParts(filePath).fileName;
+/** Show project files relative to the session's project root. */
+function compactDisplayPath(
+  path: string,
+  projectPath: string | null | undefined,
+): string {
+  const root = projectPath?.replace(/\/+$/, "");
+  if (root && path.startsWith(`${root}/`)) return path.slice(root.length + 1);
+  return path;
 }
 
 /**
@@ -239,65 +205,427 @@ function FileViewerHeaderInfo({
   );
 }
 
-function FileViewerStateHeader({
-  filePath,
+function CloseAction({
   onClose,
-  closeLabel,
-}: {
-  filePath: string;
-  onClose?: () => void;
-  closeLabel: string;
-}) {
+  label,
+}: { onClose: () => void; label: string }) {
   return (
-    <div className="file-viewer-header">
-      <FileViewerHeaderInfo displayPath={filePath} />
-      {onClose && (
-        <div className="file-viewer-actions">
-          <button
-            type="button"
-            className="file-viewer-action file-viewer-close"
-            onClick={onClose}
-            title={closeLabel}
-            aria-label={closeLabel}
-          >
-            <CloseIcon />
-          </button>
+    <button
+      type="button"
+      className="file-viewer-action file-viewer-close"
+      onClick={onClose}
+      title={label}
+      aria-label={label}
+    >
+      <CloseIcon />
+    </button>
+  );
+}
+
+interface TextViewProps {
+  content: string;
+  /** Number of the first line in `content` (1 for whole files). */
+  startLine: number;
+  highlightedHtml?: string;
+  highlightedLanguage?: string;
+  highlightedTruncated?: boolean;
+  renderedMarkdownHtml?: string;
+  lineNumber?: number;
+  lineEnd?: number;
+  onLinkClick?: (event: React.MouseEvent) => void;
+  /** CSV/TSV files offer a table view. */
+  tableDelimiter?: "," | "\t" | null;
+}
+
+type TextMode = "source" | "preview" | "table";
+
+function DelimitedTableView({
+  content,
+  delimiter,
+}: {
+  content: string;
+  delimiter: "," | "\t";
+}) {
+  const { t } = useI18n();
+  const table = useMemo(
+    () => parseDelimitedText(content, delimiter),
+    [content, delimiter],
+  );
+  const [header, ...body] = table.rows;
+  return (
+    <div className="file-viewer-table">
+      <table>
+        {header && (
+          <thead>
+            <tr>
+              {header.map((cell, index) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: columns are positional
+                <th key={index}>{cell}</th>
+              ))}
+            </tr>
+          </thead>
+        )}
+        <tbody>
+          {body.map((row, rowIndex) => (
+            // biome-ignore lint/suspicious/noArrayIndexKey: rows are positional
+            <tr key={rowIndex}>
+              {row.map((cell, index) => (
+                // biome-ignore lint/suspicious/noArrayIndexKey: columns are positional
+                <td key={index}>{cell}</td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </table>
+      {table.truncated && (
+        <div className="file-viewer-truncated">
+          {t("fileViewerTableTruncated" as never, { count: table.rows.length })}
         </div>
       )}
     </div>
   );
 }
 
-/**
- * FileViewer component - displays file content with appropriate formatting.
- */
-export const FileViewer = memo(function FileViewer({
-  projectId,
-  filePath,
-  onClose,
-  standalone = false,
+/** Text body: shiki or plain lines, line targeting, md preview, CSV table. */
+function TextView({
+  content,
+  startLine,
+  highlightedHtml,
+  highlightedLanguage,
+  highlightedTruncated,
+  renderedMarkdownHtml,
   lineNumber,
   lineEnd,
+  onLinkClick,
+  tableDelimiter,
+}: TextViewProps) {
+  const { t } = useI18n();
+  const hasTarget = lineNumber !== undefined;
+  const modes: TextMode[] = [
+    "source",
+    ...(renderedMarkdownHtml ? (["preview"] as const) : []),
+    ...(tableDelimiter ? (["table"] as const) : []),
+  ];
+  const [mode, setMode] = useState<TextMode>(
+    hasTarget ? "source" : (modes[modes.length - 1] ?? "source"),
+  );
+  const showPreview = mode !== "source";
+  const codeRef = useRef<HTMLDivElement>(null);
+  const highlightStart = lineNumber ?? 0;
+  const highlightEnd = lineEnd ?? highlightStart;
+
+  // Mark and reveal the targeted lines in either rendering.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: re-run when the rendered body changes
+  useLayoutEffect(() => {
+    const root = codeRef.current;
+    if (!root || !hasTarget || showPreview) return;
+    const lines = root.querySelectorAll<HTMLElement>(
+      highlightedHtml ? ".shiki-container .line" : ".code-content [data-line]",
+    );
+    let first: HTMLElement | null = null;
+    lines.forEach((line, index) => {
+      const number = startLine + index;
+      const marked = number >= highlightStart && number <= highlightEnd;
+      line.classList.toggle("highlighted-line", marked);
+      if (marked && !first) first = line;
+    });
+    const target = first as HTMLElement | null;
+    if (target && typeof target.scrollIntoView === "function") {
+      requestAnimationFrame(() =>
+        target.scrollIntoView({ behavior: "smooth", block: "center" }),
+      );
+    }
+  }, [content, highlightedHtml, showPreview, highlightStart, highlightEnd]);
+
+  const modeLabels: Record<TextMode, string> = {
+    source: t("fileViewerSource" as never),
+    preview: t("fileViewerPreview" as never),
+    table: t("fileViewerTable" as never),
+  };
+  const toggle =
+    modes.length > 1 ? (
+      <div className="markdown-view-toggle">
+        {modes.map((item) => (
+          <button
+            key={item}
+            type="button"
+            className={`toggle-btn ${mode === item ? "active" : ""}`}
+            onClick={() => setMode(item)}
+          >
+            {modeLabels[item]}
+          </button>
+        ))}
+      </div>
+    ) : null;
+
+  if (mode === "table" && tableDelimiter) {
+    return (
+      <>
+        {toggle}
+        <DelimitedTableView content={content} delimiter={tableDelimiter} />
+      </>
+    );
+  }
+
+  if (mode === "preview" && renderedMarkdownHtml) {
+    return (
+      <>
+        {toggle}
+        {/* biome-ignore lint/a11y/useKeyWithClickEvents: intercepts file links inside the rendered document */}
+        <div className="markdown-preview" onClick={onLinkClick}>
+          <div
+            className="markdown-rendered"
+            // biome-ignore lint/security/noDangerouslySetInnerHtml: server-rendered sanitized HTML
+            dangerouslySetInnerHTML={{ __html: renderedMarkdownHtml }}
+          />
+        </div>
+      </>
+    );
+  }
+
+  if (highlightedHtml) {
+    return (
+      <>
+        {toggle}
+        <div
+          ref={codeRef}
+          className="file-viewer-code file-viewer-code-highlighted"
+          data-language={highlightedLanguage}
+        >
+          <div
+            className="shiki-container"
+            // biome-ignore lint/security/noDangerouslySetInnerHtml: server-rendered HTML
+            dangerouslySetInnerHTML={{ __html: highlightedHtml }}
+          />
+          {highlightedTruncated && (
+            <div className="file-viewer-truncated">
+              {t("fileViewerHighlightTruncated" as never)}
+            </div>
+          )}
+        </div>
+      </>
+    );
+  }
+
+  const lines = content.split("\n");
+  return (
+    <>
+      {toggle}
+      <div ref={codeRef} className="file-viewer-code">
+        <div className="code-highlighter-plain">
+          <div className="code-line-numbers">
+            {lines.map((_, i) => (
+              <div key={`ln-${startLine + i}`}>{startLine + i}</div>
+            ))}
+          </div>
+          <pre className="code-content">
+            <code>
+              {lines.map((line, i) => (
+                <div key={`line-${startLine + i}`} data-line={startLine + i}>
+                  {line || " "}
+                </div>
+              ))}
+            </code>
+          </pre>
+        </div>
+      </div>
+    </>
+  );
+}
+
+function SnapshotView({
+  snapshot,
+  fileRef,
+  alt,
+}: {
+  snapshot: FileSnapshot;
+  fileRef: FileRef;
+  alt: string;
+}) {
+  if (snapshot.kind === "image") {
+    return (
+      <div className="file-viewer-image">
+        <img src={snapshot.src} alt={alt} />
+      </div>
+    );
+  }
+  return (
+    <>
+      {(snapshot.startLine > 1 ||
+        (snapshot.totalLines !== undefined &&
+          snapshot.content.split("\n").length < snapshot.totalLines)) && (
+        <SnapshotRangeNotice snapshot={snapshot} />
+      )}
+      <TextView
+        content={snapshot.content}
+        startLine={snapshot.startLine}
+        highlightedHtml={snapshot.highlightedHtml}
+        highlightedTruncated={snapshot.highlightedTruncated}
+        renderedMarkdownHtml={snapshot.renderedMarkdownHtml}
+        lineNumber={fileRef.lineNumber}
+        lineEnd={fileRef.lineEnd}
+        tableDelimiter={delimiterForPath(fileRef.path)}
+      />
+    </>
+  );
+}
+
+function SnapshotRangeNotice({
+  snapshot,
+}: {
+  snapshot: Extract<FileSnapshot, { kind: "text" }>;
+}) {
+  const { t } = useI18n();
+  const count = snapshot.content.split("\n").length;
+  return (
+    <div className="file-content-range-notice">
+      {t("fileViewerSnapshotRange" as never, {
+        start: snapshot.startLine,
+        end: snapshot.startLine + count - 1,
+        total: snapshot.totalLines ?? snapshot.startLine + count - 1,
+      })}
+    </div>
+  );
+}
+
+type LocateState =
+  | { status: "idle" }
+  | { status: "loading" }
+  | { status: "done"; candidates: FileLocateCandidate[] }
+  | { status: "failed"; message: string };
+
+/**
+ * A relative path that is not in the directory it was resolved against
+ * (usually the session's project). Explains that, and on request looks the
+ * same relative path up in the other local projects.
+ */
+function RelativePathMiss({
+  fileRef,
+  relative,
+  onOpen,
+}: {
+  fileRef: FileRef;
+  relative: NonNullable<FileRef["relative"]>;
+  onOpen: (ref: FileRef) => void;
+}) {
+  const { t } = useI18n();
+  const [state, setState] = useState<LocateState>({ status: "idle" });
+  const baseName = getPathBasename(relative.baseDir) || relative.baseDir;
+
+  const search = () => {
+    setState({ status: "loading" });
+    api
+      .locateFile(relative.path)
+      .then(({ candidates }) =>
+        setState({
+          status: "done",
+          candidates: candidates.filter(
+            (candidate) => candidate.absolutePath !== fileRef.path,
+          ),
+        }),
+      )
+      .catch((err: unknown) =>
+        setState({
+          status: "failed",
+          message:
+            err instanceof Error && err.message
+              ? err.message
+              : t("fileViewerLoadFailed" as never),
+        }),
+      );
+  };
+
+  return (
+    <div className="file-viewer-relative-miss">
+      <p>
+        {t("fileViewerRelativeMiss" as never, {
+          path: relative.path,
+          project: baseName,
+        })}
+      </p>
+      {state.status === "idle" && (
+        <button
+          type="button"
+          className="file-viewer-download-btn"
+          onClick={search}
+        >
+          {t("fileViewerSearchOtherProjects" as never)}
+        </button>
+      )}
+      {state.status === "loading" && (
+        <p>{t("fileViewerSearchingOtherProjects" as never)}</p>
+      )}
+      {state.status === "failed" && (
+        <p className="file-viewer-relative-miss-error">{state.message}</p>
+      )}
+      {state.status === "done" &&
+        (state.candidates.length === 0 ? (
+          <p>{t("fileViewerNoOtherProjectMatch" as never)}</p>
+        ) : (
+          <ul className="file-viewer-candidates">
+            {state.candidates.map((candidate) => (
+              <li key={candidate.absolutePath}>
+                <button
+                  type="button"
+                  className="file-viewer-candidate"
+                  title={candidate.absolutePath}
+                  onClick={() =>
+                    onOpen({
+                      path: candidate.absolutePath,
+                      lineNumber: fileRef.lineNumber,
+                      lineEnd: fileRef.lineEnd,
+                    })
+                  }
+                >
+                  <span className="file-viewer-candidate-project">
+                    {candidate.projectName}
+                  </span>
+                  <span className="file-viewer-candidate-path">
+                    {candidate.projectPath}
+                  </span>
+                </button>
+              </li>
+            ))}
+          </ul>
+        ))}
+    </div>
+  );
+}
+
+/**
+ * FileViewer - the single file preview surface. Loads any readable file via
+ * `/api/fs/preview` and renders it by kind (text, markdown, image, video,
+ * audio, pdf, other).
+ */
+export const FileViewer = memo(function FileViewer({
+  fileRef,
+  snapshot,
+  onClose,
+  standalone = false,
+  onNavigate,
 }: FileViewerProps) {
   const { t } = useI18n();
-  const [fileData, setFileData] = useState<FileContentResponse | null>(null);
+  const sessionMetadata = useOptionalSessionMetadata();
+  const [fileData, setFileData] = useState<FilePreviewResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [errorFilePath, setErrorFilePath] = useState<string | null>(null);
+  const [notFound, setNotFound] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
-  const [showPreview, setShowPreview] = useState(false);
-  const [highlightedLineRef, setHighlightedLineRef] =
-    useState<HTMLElement | null>(null);
+  const [source, setSource] = useState<ViewSource>("current");
+  const { path, projectId } = fileRef;
 
   useEffect(() => {
     let cancelled = false;
     setLoading(true);
     setError(null);
     setErrorFilePath(null);
+    setNotFound(false);
+    setFileData(null);
+    setSource("current");
 
-    // Request highlighting for code files
     api
-      .getFile(projectId, filePath, true)
+      .getFilePreview({ path, projectId }, true)
       .then((data) => {
         if (!cancelled) {
           setFileData(data);
@@ -307,17 +635,19 @@ export const FileViewer = memo(function FileViewer({
       .catch((err) => {
         if (!cancelled) {
           setError(err.message || t("fileViewerLoadFailed" as never));
-          setErrorFilePath(getErrorFilePath(err, filePath));
+          setErrorFilePath(getErrorFilePath(err, path));
+          setNotFound((err as Partial<ApiError>)?.status === 404);
           setLoading(false);
+          // A tool snapshot is still worth showing when the file is gone.
+          setSource("snapshot");
         }
       });
 
     return () => {
       cancelled = true;
     };
-  }, [projectId, filePath, t]);
+  }, [path, projectId, t]);
 
-  // Handle Escape key to exit fullscreen
   useEffect(() => {
     if (!fullscreen) return;
     const handleKeyDown = (e: KeyboardEvent) => {
@@ -329,238 +659,179 @@ export const FileViewer = memo(function FileViewer({
     return () => window.removeEventListener("keydown", handleKeyDown);
   }, [fullscreen]);
 
-  // Scroll to highlighted line when it's rendered
-  useEffect(() => {
-    if (highlightedLineRef) {
-      // Small delay to ensure layout is complete
-      requestAnimationFrame(() => {
-        highlightedLineRef.scrollIntoView({
-          behavior: "smooth",
-          block: "center",
-        });
-      });
-    }
-  }, [highlightedLineRef]);
-
+  const fileName = getPathBasename(path) || path;
   const handleDownload = useCallback(() => {
-    const url = api.getFileRawUrl(projectId, filePath, true);
-    startFileDownload(url, getFileName(filePath));
-  }, [projectId, filePath]);
-
+    startFileDownload(fileRawUrl({ path, projectId }, true), fileName);
+  }, [path, projectId, fileName]);
   const handleOpenInNewTab = useCallback(() => {
-    const url = appPath(
-      `/projects/${projectId}/file?path=${encodeURIComponent(filePath)}`,
-    );
-    window.open(url, "_blank");
-  }, [projectId, filePath]);
+    window.open(filePageUrl(fileRef), "_blank");
+  }, [fileRef]);
 
-  const fileName = getFileName(filePath);
-  const language = getLanguageFromPath(filePath);
+  const handleLinkClick = useCallback(
+    (event: React.MouseEvent) => {
+      const anchor = (event.target as HTMLElement).closest?.(
+        "a.local-file-link, a.local-media-link",
+      ) as HTMLAnchorElement | null;
+      if (!anchor) return;
+      const target = extractFileLinkTarget(anchor);
+      if (!target) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const next = fileRefFromPath(
+        target.path,
+        { projectId, projectPath: null },
+        { lineNumber: target.lineNumber },
+      );
+      if (onNavigate) onNavigate(next);
+      else window.open(filePageUrl(next), "_blank");
+    },
+    [onNavigate, projectId],
+  );
 
-  // Render loading state
-  if (loading) {
-    return (
-      <div className="file-viewer">
-        <FileViewerStateHeader
-          filePath={filePath}
-          onClose={onClose}
-          closeLabel={t("modalClose")}
-        />
-        <div className="file-viewer-body">
-          <div className="file-viewer-loading">
-            {t("fileViewerLoading" as never, { name: fileName })}
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const showingSnapshot = !!snapshot && source === "snapshot";
+  const displayPath = fileData?.metadata.absolutePath ?? path;
+  const compactPath = compactDisplayPath(
+    displayPath,
+    sessionMetadata?.projectPath,
+  );
+  const textContent = showingSnapshot
+    ? snapshot.kind === "text"
+      ? snapshot.content
+      : undefined
+    : fileData?.content;
 
-  // Render error state
-  if (error || !fileData) {
-    return (
-      <div className="file-viewer">
-        <FileViewerStateHeader
-          filePath={filePath}
-          onClose={onClose}
-          closeLabel={t("modalClose")}
-        />
-        <div className="file-viewer-body">
-          <div className="file-viewer-error">
-            <div className="file-viewer-error-content">
-              <div>{error || t("fileViewerNotFound" as never)}</div>
-              {errorFilePath && (
-                <div className="file-viewer-error-path">
-                  <span>{t("fileViewerAttemptedPath" as never)}</span>
-                  <code>{errorFilePath}</code>
-                </div>
-              )}
-            </div>
-          </div>
-        </div>
-      </div>
-    );
-  }
+  const fileMeta = fileData
+    ? [
+        formatFileSize(fileData.metadata.size),
+        fileData.content !== undefined
+          ? t("fileViewerLines" as never, {
+              count: fileData.content.split("\n").length,
+            })
+          : null,
+      ]
+        .filter((item): item is string => item !== null)
+        .join(" • ")
+    : undefined;
 
-  const { metadata, content, rawUrl } = fileData;
-  const displayPath = metadata.absolutePath ?? filePath;
-  const isImage = isImageFile(metadata.mimeType);
-  const fileMeta = [
-    formatFileSize(metadata.size),
-    metadata.isText && content !== undefined
-      ? t("fileViewerLines" as never, {
-          count: content.split("\n").length,
-        })
-      : null,
-  ]
-    .filter((item): item is string => item !== null)
-    .join(" • ");
+  const sourceToggle = snapshot ? (
+    <div className="markdown-view-toggle file-viewer-source-toggle">
+      <button
+        type="button"
+        className={`toggle-btn ${source === "current" ? "active" : ""}`}
+        onClick={() => setSource("current")}
+      >
+        {t("fileViewerCurrentFile" as never)}
+      </button>
+      <button
+        type="button"
+        className={`toggle-btn ${source === "snapshot" ? "active" : ""}`}
+        onClick={() => setSource("snapshot")}
+      >
+        {t("fileViewerToolSnapshot" as never)}
+      </button>
+    </div>
+  ) : null;
 
-  // Render content based on file type
-  const renderContent = () => {
-    // Image files
-    if (isImage) {
+  const renderCurrent = () => {
+    if (loading) {
       return (
-        <div className="file-viewer-image">
-          <img src={rawUrl} alt={fileName} />
+        <div className="file-viewer-loading">
+          {t("fileViewerLoading" as never, { name: fileName })}
         </div>
       );
     }
-
-    // Text files
-    if (content !== undefined) {
-      const isMarkdown = isMarkdownFile(filePath);
-      const hasMarkdownPreview = isMarkdown && !!fileData.renderedMarkdownHtml;
-
-      // Toggle button for markdown files
-      const toggleButton = hasMarkdownPreview && (
-        <div className="markdown-view-toggle">
-          <button
-            type="button"
-            className={`toggle-btn ${!showPreview ? "active" : ""}`}
-            onClick={() => setShowPreview(false)}
-          >
-            {t("fileViewerSource" as never)}
-          </button>
-          <button
-            type="button"
-            className={`toggle-btn ${showPreview ? "active" : ""}`}
-            onClick={() => setShowPreview(true)}
-          >
-            {t("fileViewerPreview" as never)}
-          </button>
-        </div>
-      );
-
-      // Show rendered markdown preview
-      if (showPreview && fileData.renderedMarkdownHtml) {
-        return (
-          <>
-            {toggleButton}
-            <div className="markdown-preview">
-              <div
-                className="markdown-rendered"
-                // biome-ignore lint/security/noDangerouslySetInnerHtml: server-rendered HTML
-                dangerouslySetInnerHTML={{
-                  __html: fileData.renderedMarkdownHtml,
-                }}
-              />
-            </div>
-          </>
-        );
-      }
-
-      // Server-rendered syntax highlighting (preferred)
-      if (fileData.highlightedHtml) {
-        return (
-          <>
-            {toggleButton}
-            <div
-              className="file-viewer-code file-viewer-code-highlighted"
-              data-language={fileData.highlightedLanguage ?? language}
-            >
-              <div
-                className="shiki-container"
-                // biome-ignore lint/security/noDangerouslySetInnerHtml: server-rendered HTML
-                dangerouslySetInnerHTML={{ __html: fileData.highlightedHtml }}
-              />
-              {fileData.highlightedTruncated && (
-                <div className="file-viewer-truncated">
-                  {t("fileViewerHighlightTruncated" as never)}
-                </div>
-              )}
-            </div>
-          </>
-        );
-      }
-
-      // Fallback: plain code (no syntax highlighting available)
-      const lines = content.split("\n");
-      const highlightStart = lineNumber ?? 0;
-      const highlightEnd = lineEnd ?? highlightStart;
-
+    if (error || !fileData) {
       return (
-        <>
-          {toggleButton}
-          <div className="file-viewer-code" data-language={language}>
-            <div className="code-highlighter-plain">
-              <div className="code-line-numbers">
-                {lines.map((_, i) => (
-                  <div key={`ln-${i + 1}`}>{i + 1}</div>
-                ))}
+        <div className="file-viewer-error">
+          <div className="file-viewer-error-content">
+            <div>{error || t("fileViewerNotFound" as never)}</div>
+            {errorFilePath && (
+              <div className="file-viewer-error-path">
+                <span>{t("fileViewerAttemptedPath" as never)}</span>
+                <code>{errorFilePath}</code>
               </div>
-              <pre className="code-content">
-                <code>
-                  {lines.map((line, i) => {
-                    const num = i + 1;
-                    const isHighlighted =
-                      lineNumber &&
-                      num >= highlightStart &&
-                      num <= highlightEnd;
-                    return (
-                      <div
-                        key={`line-${i + 1}`}
-                        ref={
-                          lineNumber && num === highlightStart
-                            ? (el) => setHighlightedLineRef(el)
-                            : undefined
-                        }
-                        className={
-                          isHighlighted ? "highlighted-line" : undefined
-                        }
-                        style={
-                          isHighlighted
-                            ? {
-                                backgroundColor: "rgba(255, 255, 0, 0.15)",
-                                marginLeft: "-0.75rem",
-                                marginRight: "-0.75rem",
-                                paddingLeft: "0.75rem",
-                                paddingRight: "0.75rem",
-                              }
-                            : undefined
-                        }
-                      >
-                        {line || " "}
-                      </div>
-                    );
-                  })}
-                </code>
-              </pre>
-            </div>
+            )}
+            {notFound && fileRef.relative && (
+              <RelativePathMiss
+                fileRef={fileRef}
+                relative={fileRef.relative}
+                onOpen={(next) =>
+                  onNavigate
+                    ? onNavigate(next)
+                    : window.open(filePageUrl(next), "_blank")
+                }
+              />
+            )}
           </div>
-        </>
+        </div>
       );
     }
 
-    // Binary files or files too large
+    const rawUrl = fileRawUrl({ path, projectId });
+    switch (fileData.kind) {
+      case "image":
+        return (
+          <div className="file-viewer-image">
+            <img src={rawUrl} alt={fileName} />
+          </div>
+        );
+      case "video":
+        return (
+          <div className="file-viewer-image">
+            {/* biome-ignore lint/a11y/useMediaCaption: local files have no captions */}
+            <video className="file-viewer-media" controls src={rawUrl} />
+          </div>
+        );
+      case "audio":
+        return (
+          <div className="file-viewer-image">
+            {/* biome-ignore lint/a11y/useMediaCaption: local files have no captions */}
+            <audio className="file-viewer-audio" controls src={rawUrl} />
+          </div>
+        );
+      case "pdf":
+        return (
+          <iframe className="file-viewer-pdf" src={rawUrl} title={fileName} />
+        );
+    }
+
+    if (fileData.office) {
+      return <OfficeView document={fileData.office} />;
+    }
+
+    if (fileData.content !== undefined) {
+      return (
+        <TextView
+          content={fileData.content}
+          startLine={1}
+          highlightedHtml={fileData.highlightedHtml}
+          highlightedLanguage={fileData.highlightedLanguage}
+          highlightedTruncated={fileData.highlightedTruncated}
+          renderedMarkdownHtml={fileData.renderedMarkdownHtml}
+          lineNumber={fileRef.lineNumber ?? fileData.lineNumber}
+          lineEnd={fileRef.lineEnd}
+          onLinkClick={handleLinkClick}
+          tableDelimiter={delimiterForPath(path)}
+        />
+      );
+    }
+
     return (
       <div className="file-viewer-binary">
-        <p>{t("fileViewerBinary" as never)}</p>
         <p>
-          <strong>{t("fileViewerType" as never)}</strong> {metadata.mimeType}
+          {fileData.officeError
+            ? t("fileViewerOfficeFailed" as never, {
+                reason: fileData.officeError,
+              })
+            : t("fileViewerBinary" as never)}
+        </p>
+        <p>
+          <strong>{t("fileViewerType" as never)}</strong>{" "}
+          {fileData.metadata.mimeType}
         </p>
         <p>
           <strong>{t("fileViewerSize" as never)}</strong>{" "}
-          {formatFileSize(metadata.size)}
+          {formatFileSize(fileData.metadata.size)}
         </p>
         <button
           type="button"
@@ -573,13 +844,12 @@ export const FileViewer = memo(function FileViewer({
     );
   };
 
-  // Header with file info and actions
   const header = (
     <div className="file-viewer-header">
       <FileViewerHeaderInfo
         displayPath={displayPath}
-        compactPath={filePath}
-        meta={fileMeta}
+        compactPath={compactPath}
+        meta={showingSnapshot ? undefined : fileMeta}
       />
       <div className="file-viewer-actions">
         <FileViewerCopyAction
@@ -596,9 +866,9 @@ export const FileViewer = memo(function FileViewer({
           failedLabel={t("fileViewerPathCopyFailed" as never)}
           kind="path"
         />
-        {content !== undefined && (
+        {textContent !== undefined && (
           <FileViewerCopyAction
-            value={content}
+            value={textContent}
             label={t("fileViewerCopyFullText" as never)}
             copiedLabel={t("fileViewerFullTextCopied" as never)}
             failedLabel={t("fileViewerFullTextCopyFailed" as never)}
@@ -611,18 +881,22 @@ export const FileViewer = memo(function FileViewer({
             className="file-viewer-action"
             onClick={handleOpenInNewTab}
             title={t("fileViewerOpenNewTab" as never)}
+            aria-label={t("fileViewerOpenNewTab" as never)}
           >
             <ExternalLinkIcon />
           </button>
         )}
-        <button
-          type="button"
-          className="file-viewer-action"
-          onClick={handleDownload}
-          title={t("fileViewerDownload" as never)}
-        >
-          <DownloadIcon />
-        </button>
+        {fileData && (
+          <button
+            type="button"
+            className="file-viewer-action"
+            onClick={handleDownload}
+            title={t("fileViewerDownload" as never)}
+            aria-label={t("fileViewerDownload" as never)}
+          >
+            <DownloadIcon />
+          </button>
+        )}
         <button
           type="button"
           className="file-viewer-action"
@@ -635,16 +909,7 @@ export const FileViewer = memo(function FileViewer({
         >
           {fullscreen ? <ExitFullscreenIcon /> : <FullscreenIcon />}
         </button>
-        {onClose && (
-          <button
-            type="button"
-            className="file-viewer-action file-viewer-close"
-            onClick={onClose}
-            title={t("modalClose")}
-          >
-            <CloseIcon />
-          </button>
-        )}
+        {onClose && <CloseAction onClose={onClose} label={t("modalClose")} />}
       </div>
     </div>
   );
@@ -660,7 +925,19 @@ export const FileViewer = memo(function FileViewer({
   return (
     <div className={viewerClass}>
       {header}
-      <div className="file-viewer-body">{renderContent()}</div>
+      <div className="file-viewer-body">
+        {sourceToggle}
+        {showingSnapshot && error && (
+          <div className="file-content-range-notice">
+            {t("fileViewerSnapshotFallback" as never)}
+          </div>
+        )}
+        {showingSnapshot ? (
+          <SnapshotView snapshot={snapshot} fileRef={fileRef} alt={fileName} />
+        ) : (
+          renderCurrent()
+        )}
+      </div>
     </div>
   );
 });

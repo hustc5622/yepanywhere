@@ -227,115 +227,6 @@
   cursor: pointer;
 }
 
-.local-file-modal-content {
-  display: flex;
-  flex: 1 1 auto;
-  min-height: 0;
-  max-height: 72vh;
-  flex-direction: column;
-  gap: 0.75rem;
-  overflow: hidden;
-}
-
-.local-file-loading,
-.local-file-error {
-  flex-shrink: 0;
-  padding: 1rem;
-  color: var(--text-secondary);
-}
-
-.local-file-error {
-  color: var(--error-color);
-}
-
-.local-file-meta {
-  /* Column-flex child with overflow:hidden has an automatic min-height of 0,
-     so a tall Markdown sibling would squash this single-line path row. */
-  flex-shrink: 0;
-  overflow: hidden;
-  color: var(--text-secondary);
-  font-family: var(--font-mono);
-  font-size: var(--font-size-sm);
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.local-file-text {
-  flex: 1 1 auto;
-  min-height: 0;
-  overflow: auto;
-  margin: 0;
-  padding: 0.75rem 0;
-  border: 1px solid var(--border-color);
-  border-radius: var(--radius-sm);
-  background: var(--bg-secondary);
-  color: var(--text-primary);
-  font-family: var(--font-mono);
-  font-size: var(--font-size-base);
-  line-height: 1.5;
-}
-
-.local-file-line {
-  display: grid;
-  grid-template-columns: 3rem minmax(0, 1fr);
-  min-width: max-content;
-  padding-right: 0.75rem;
-}
-
-.local-file-line.highlighted-line {
-  background: color-mix(in srgb, var(--accent-color, #3b82f6) 16%, transparent);
-}
-
-.local-file-line-number {
-  padding: 0 0.75rem;
-  color: var(--text-muted);
-  text-align: right;
-  user-select: none;
-}
-
-.local-file-line-content {
-  min-width: 0;
-  padding-right: 0.75rem;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
-/* Local media modal content */
-.local-media-modal-content {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 1rem;
-}
-
-.local-media-image {
-  max-width: 100%;
-  max-height: 80vh;
-  object-fit: contain;
-  border-radius: var(--radius-md);
-}
-
-.local-media-player {
-  max-width: 100%;
-  max-height: 80vh;
-  border-radius: var(--radius-md);
-}
-
-.local-media-loading,
-.local-media-error {
-  padding: 2rem;
-  text-align: center;
-  color: var(--text-secondary);
-}
-
-.local-media-error {
-  color: var(--color-error);
-  min-width: 0;
-  max-width: 100%;
-  white-space: pre-wrap;
-  overflow-wrap: anywhere;
-}
-
 /* Blockquotes in streaming blocks */
 .streaming-blocks blockquote,
 .streaming-block blockquote {
@@ -2800,11 +2691,6 @@ body.detail-panel-resizing {
   overflow: hidden;
 }
 
-.detail-panel-host--docked .local-file-modal-content {
-  height: 100%;
-  max-height: none;
-}
-
 /* The file panel takes over the inspector's right-hand slot while it is open.
    Preserve the inspector state so it comes back exactly as it was on close. */
 .session-page:has(> .detail-panel-host--docked) .session-inspector--sidebar {
@@ -3418,6 +3304,38 @@ body.detail-panel-resizing {
 
 .file-list-item:hover {
   background: rgba(255, 255, 255, 0.05);
+}
+
+/* Glob/Grep rows open the file in the side panel. */
+button.file-list-link {
+  width: 100%;
+  border: 0;
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.grep-line-link {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--vscode-textLink-foreground, #3794ff);
+  font: inherit;
+  cursor: pointer;
+}
+
+.bash-file-read {
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  margin-top: 0.375rem;
+  color: var(--text-muted);
+}
+
+.grep-line-link:hover {
+  text-decoration: underline;
 }
 
 .file-list-item .file-path {
@@ -4845,8 +4763,7 @@ body.detail-panel-resizing {
   font-size: var(--font-size-sm);
 }
 
-.file-viewer-error-path code,
-.local-file-error code {
+.file-viewer-error-path code {
   display: block;
   max-width: 100%;
   padding: 0.375rem 0.5rem;
@@ -5147,6 +5064,152 @@ pre.code-highlighter-plain code {
   border-radius: 4px;
 }
 
+/* Targeted lines (`:line` links, Read ranges) in plain and Shiki views. The
+   !important beats the theme-background reset on `.file-viewer-code code *`. */
+.file-viewer-code .highlighted-line {
+  background: color-mix(in srgb, var(--accent-color, #3b82f6) 16%, transparent) !important;
+}
+
+.file-viewer-code .shiki-container .line.highlighted-line {
+  display: inline-block;
+  min-width: 100%;
+}
+
+.file-viewer-media {
+  max-width: 100%;
+  max-height: 80vh;
+  border-radius: 4px;
+}
+
+.file-viewer-audio {
+  width: 100%;
+}
+
+.file-viewer-pdf {
+  flex: 1 1 auto;
+  width: 100%;
+  min-height: 0;
+  border: 0;
+  background: var(--bg-secondary);
+}
+
+/* CSV/TSV and spreadsheet previews */
+.file-viewer-table {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;
+}
+
+.file-viewer-table table {
+  border-collapse: collapse;
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+}
+
+.file-viewer-table th,
+.file-viewer-table td {
+  max-width: 24rem;
+  padding: 0.25rem 0.5rem;
+  border: 1px solid var(--border-subtle);
+  text-align: left;
+  vertical-align: top;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.file-viewer-table thead th,
+.file-viewer-table tbody th {
+  position: sticky;
+  background: var(--bg-secondary);
+  color: var(--text-muted);
+  font-weight: 500;
+}
+
+.file-viewer-table thead th {
+  top: 0;
+  z-index: 1;
+}
+
+.file-viewer-table tbody th {
+  left: 0;
+  text-align: right;
+}
+
+.file-viewer-sheet-tabs {
+  overflow-x: auto;
+}
+
+.file-viewer-office-empty {
+  padding: 2rem;
+  text-align: center;
+  color: var(--text-muted);
+}
+
+.file-viewer-slide + .file-viewer-slide {
+  margin-top: 1rem;
+  padding-top: 1rem;
+  border-top: 1px solid var(--border-subtle);
+}
+
+/* Relative path not found in its project: offer other projects */
+.file-viewer-relative-miss {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+  max-width: 100%;
+  margin-top: 0.5rem;
+  color: var(--text-muted);
+  text-align: center;
+}
+
+.file-viewer-relative-miss p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.file-viewer-relative-miss-error {
+  color: var(--color-error);
+}
+
+.file-viewer-candidates {
+  display: flex;
+  flex-direction: column;
+  gap: 0.375rem;
+  width: 100%;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.file-viewer-candidate {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 0.125rem;
+  width: 100%;
+  padding: 0.5rem 0.75rem;
+  border: 1px solid var(--border-color);
+  border-radius: 4px;
+  background: var(--bg-secondary);
+  color: var(--text-primary);
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.file-viewer-candidate:hover {
+  background: var(--bg-hover);
+}
+
+.file-viewer-candidate-path {
+  max-width: 100%;
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  overflow-wrap: anywhere;
+}
+
 /* Binary file display */
 .file-viewer-binary {
   display: flex;
@@ -5371,6 +5434,11 @@ pre.code-highlighter-plain code {
 
 .markdown-view-toggle .toggle-btn:last-child {
   border-radius: 0 4px 4px 0;
+}
+
+.markdown-view-toggle .toggle-btn:not(:first-child):not(:last-child) {
+  border-right: none;
+  border-radius: 0;
 }
 
 .markdown-view-toggle .toggle-btn:hover {

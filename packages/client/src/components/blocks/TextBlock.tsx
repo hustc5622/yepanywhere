@@ -1,4 +1,8 @@
-import type { CodexAsyncMessage } from "@yep-anywhere/shared";
+import {
+  type CodexAsyncMessage,
+  getMediaPreviewKind,
+  isPreviewLinkablePath,
+} from "@yep-anywhere/shared";
 import {
   memo,
   useCallback,
@@ -13,22 +17,13 @@ import { useStreamingMarkdownContext } from "../../contexts/StreamingMarkdownCon
 import { useMarkdownCodeCopy } from "../../hooks/useMarkdownCodeCopy";
 import { useStreamingMarkdown } from "../../hooks/useStreamingMarkdown";
 import { useOptionalI18n } from "../../i18n";
-import { appPath } from "../../lib/apiPath";
+import { splitTextWithFilePaths } from "../../lib/filePathDetection";
 import {
-  parseLineColumn,
-  splitTextWithFilePaths,
-} from "../../lib/filePathDetection";
-import { FileViewerModal } from "../FilePathLink";
-import {
-  LocalFileModal,
-  type LocalFileTarget,
-  extractLocalFileTargetFromUrl,
-} from "../LocalFileModal";
-import {
-  LocalMediaModal,
-  extractPathFromLocalImageUrl,
-  useLocalMediaClick,
-} from "../LocalMediaModal";
+  extractFileLinkTarget,
+  filePageUrl,
+  fileRefFromPath,
+} from "../../lib/fileRef";
+import { useFilePreview } from "../FilePreviewPanel";
 import {
   BenchmarkEvalResult,
   parseBenchmarkEvalResultBlock,
@@ -42,41 +37,6 @@ interface Props {
   asyncMessage?: CodexAsyncMessage;
   /** Pre-rendered HTML from server (for completed messages) */
   augmentHtml?: string;
-}
-
-function getProjectRelativePath(
-  filePath: string,
-  projectPath: string | null | undefined,
-): string | null {
-  if (!filePath.startsWith("/")) {
-    return filePath.startsWith("../") || filePath === ".." ? null : filePath;
-  }
-  const root = projectPath?.replace(/\/+$/, "");
-  if (!root) return null;
-  if (!filePath.startsWith(`${root}/`)) return null;
-  return filePath.slice(root.length + 1);
-}
-
-function resolveLocalFilePath(
-  filePath: string,
-  projectPath: string | null | undefined,
-): string {
-  const path =
-    !filePath.startsWith("/") && projectPath
-      ? `${projectPath}/${filePath}`
-      : filePath;
-  const absolute = path.startsWith("/");
-  const parts: string[] = [];
-  for (const part of path.split("/")) {
-    if (!part || part === ".") continue;
-    if (part === "..") {
-      if (parts.length > 0 && parts[parts.length - 1] !== "..") parts.pop();
-      else if (!absolute) parts.push(part);
-    } else {
-      parts.push(part);
-    }
-  }
-  return `${absolute ? "/" : ""}${parts.join("/")}`;
 }
 
 function isModifiedClick(e: React.MouseEvent): boolean {
@@ -100,93 +60,43 @@ function isSelectingWithin(element: Element): boolean {
   return false;
 }
 
-function parseOptionalNumber(value: string | undefined): number | undefined {
-  if (!value) return undefined;
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) ? parsed : undefined;
-}
-
-function getLocalFileTarget(anchor: HTMLAnchorElement): LocalFileTarget | null {
-  const datasetPath = anchor.dataset.filePath;
-  if (datasetPath) {
-    return {
-      path: datasetPath,
-      lineNumber: parseOptionalNumber(anchor.dataset.line),
-      columnNumber: parseOptionalNumber(anchor.dataset.column),
-    };
-  }
-
-  const href = anchor.getAttribute("href");
-  if (!href) return null;
-
-  const localFileTarget = extractLocalFileTargetFromUrl(href);
-  if (localFileTarget) return localFileTarget;
-
-  const legacyLocalImagePath = extractPathFromLocalImageUrl(href);
-  if (!legacyLocalImagePath) return null;
-
-  const parsed = parseLineColumn(legacyLocalImagePath);
-  return {
-    path: parsed.path,
-    lineNumber: parsed.line,
-    columnNumber: parsed.column,
-  };
-}
-
-const IMAGE_EXTENSIONS = new Set([
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "bmp",
-  "tiff",
-  "tif",
-  "svg",
-]);
-
-const VIDEO_EXTENSIONS = new Set(["mp4", "webm", "mov", "avi", "mkv", "ogv"]);
-const MEDIA_EXTENSIONS = new Set([...IMAGE_EXTENSIONS, ...VIDEO_EXTENSIONS]);
-
-function getExtension(path: string): string {
-  return (path.split(".").pop() ?? "").toLowerCase();
-}
-
-function isLocalMediaPath(path: string): boolean {
-  if (!path.startsWith("/") || path.startsWith("//")) return false;
-  return MEDIA_EXTENSIONS.has(getExtension(path));
-}
-
-function localMediaApiPath(path: string): string {
-  return `/api/local-image?path=${encodeURIComponent(path)}`;
-}
-
-function renderPlainTextWithLocalMediaLinks(text: string): React.ReactNode {
-  const segments = splitTextWithFilePaths(text);
-
-  return segments.map((segment) => {
+/**
+ * Plain-text fallback (no server augment): link the same paths the server
+ * markdown renderer links, using the same classes so one click handler
+ * serves both.
+ */
+function renderPlainTextWithFileLinks(text: string): React.ReactNode {
+  return splitTextWithFilePaths(text).map((segment) => {
     if (segment.type === "text") {
       return segment.content;
     }
 
-    const path = segment.detected.filePath;
-    if (!isLocalMediaPath(path)) {
-      return segment.detected.match;
+    const { filePath: path, match, startIndex, lineNumber } = segment.detected;
+    if (!isPreviewLinkablePath(path)) return match;
+    const mediaType = path.startsWith("/") ? getMediaPreviewKind(path) : null;
+    if (mediaType) {
+      return (
+        <a
+          key={`${path}-${startIndex}`}
+          href={`/api/local-image?path=${encodeURIComponent(path)}`}
+          className="local-media-link"
+          data-media-type={mediaType}
+        >
+          {match}
+          <span className="local-media-type">({mediaType})</span>
+        </a>
+      );
     }
-
-    const ext = getExtension(path);
-    const mediaType = VIDEO_EXTENSIONS.has(ext) ? "video" : "image";
-    const typeLabel = mediaType;
-
     return (
       <a
-        key={`${path}-${segment.detected.startIndex}`}
-        href={localMediaApiPath(path)}
-        className="local-media-link"
-        data-media-type={mediaType}
+        key={`${path}-${startIndex}`}
+        href={`/api/local-file?path=${encodeURIComponent(path)}`}
+        className="local-file-link"
+        data-file-path={path}
+        data-line={lineNumber}
+        title={match}
       >
-        {segment.detected.match}
-        <span className="local-media-type">({typeLabel})</span>
+        {match}
       </a>
     );
   });
@@ -201,13 +111,7 @@ export const TextBlock = memo(function TextBlock({
   augmentHtml,
 }: Props) {
   const i18n = useOptionalI18n();
-  const [fileModal, setFileModal] = useState<{
-    filePath: string;
-    lineNumber?: number;
-  } | null>(null);
-  const [localFileModal, setLocalFileModal] = useState<LocalFileTarget | null>(
-    null,
-  );
+  const { openFile, filePreview } = useFilePreview();
   const blockRef = useRef<HTMLDivElement | null>(null);
   const handleCodeBlockCopyClick = useMarkdownCodeCopy(blockRef);
   const sessionMetadata = useOptionalSessionMetadata();
@@ -253,12 +157,6 @@ export const TextBlock = memo(function TextBlock({
     return unregister;
   }, [isStreaming, streamingContext, streamingMarkdown, streamingMessageId]);
 
-  const {
-    modal,
-    handleClick: handleLocalMediaClick,
-    closeModal,
-  } = useLocalMediaClick();
-
   // Firefox ignores `-webkit-user-drag`; mark links non-draggable on press so
   // a drag starting on link text extends a selection there too.
   const handleMouseDown = useCallback((e: React.MouseEvent) => {
@@ -279,53 +177,22 @@ export const TextBlock = memo(function TextBlock({
         return;
       }
 
-      if (handleLocalMediaClick(e)) return;
-
-      const target = (e.target as HTMLElement).closest?.(
-        "a[href]",
-      ) as HTMLAnchorElement | null;
-      if (!target) return;
-
-      const href = target.getAttribute("href");
-      if (!href) return;
-
-      const localFileTarget = getLocalFileTarget(target);
-      if (!localFileTarget) return;
-      localFileTarget.path = resolveLocalFilePath(
-        localFileTarget.path,
-        sessionMetadata?.projectPath,
-      );
-
-      const relativePath = getProjectRelativePath(
-        localFileTarget.path,
-        sessionMetadata?.projectPath,
-      );
-      if (!relativePath || !sessionMetadata?.projectId) {
-        e.preventDefault();
-        e.stopPropagation();
-        setLocalFileModal(localFileTarget);
-        return;
-      }
-
+      if (!(anchor instanceof HTMLAnchorElement)) return;
+      const linkTarget = extractFileLinkTarget(anchor);
+      if (!linkTarget) return;
       e.preventDefault();
       e.stopPropagation();
 
+      const ref = fileRefFromPath(linkTarget.path, sessionMetadata, {
+        lineNumber: linkTarget.lineNumber,
+      });
       if (isModifiedClick(e)) {
-        window.open(
-          appPath(
-            `/projects/${sessionMetadata.projectId}/file?path=${encodeURIComponent(relativePath)}`,
-          ),
-          "_blank",
-        );
+        window.open(filePageUrl(ref), "_blank");
         return;
       }
-
-      setFileModal({
-        filePath: relativePath,
-        lineNumber: localFileTarget.lineNumber,
-      });
+      openFile(ref);
     },
-    [handleCodeBlockCopyClick, handleLocalMediaClick, sessionMetadata],
+    [handleCodeBlockCopyClick, openFile, sessionMetadata],
   );
 
   const showStreamingContent = isStreaming && useStreamingContent;
@@ -451,32 +318,10 @@ export const TextBlock = memo(function TextBlock({
         ) : (
           // Plain text fallback (no server augment available)
           <p className="text-block-plain">
-            {renderPlainTextWithLocalMediaLinks(text)}
+            {renderPlainTextWithFileLinks(text)}
           </p>
         ))}
-      {modal && (
-        <LocalMediaModal
-          path={modal.path}
-          mediaType={modal.mediaType}
-          onClose={closeModal}
-        />
-      )}
-      {fileModal && sessionMetadata?.projectId && (
-        <FileViewerModal
-          projectId={sessionMetadata.projectId}
-          filePath={fileModal.filePath}
-          lineNumber={fileModal.lineNumber}
-          onClose={() => setFileModal(null)}
-        />
-      )}
-      {localFileModal && (
-        <LocalFileModal
-          path={localFileModal.path}
-          lineNumber={localFileModal.lineNumber}
-          columnNumber={localFileModal.columnNumber}
-          onClose={() => setLocalFileModal(null)}
-        />
-      )}
+      {filePreview}
     </div>
   );
 });

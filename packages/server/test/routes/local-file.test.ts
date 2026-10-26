@@ -108,6 +108,27 @@ describe("Local file routes", () => {
     },
   );
 
+  it("serves source code and other text types from the shared table", async () => {
+    const routes = createLocalFileRoutes();
+    for (const [name, mimeType] of [
+      ["main.ts", "text/typescript"],
+      ["server.log", "text/plain"],
+      ["data.csv", "text/csv"],
+      ["Dockerfile", "text/plain"],
+    ] as const) {
+      const filePath = path.join(tempDir, name);
+      await writeFile(filePath, "line 1\nline 2");
+      const response = await routes.request(
+        `/?path=${encodeURIComponent(filePath)}`,
+      );
+      expect(response.status, name).toBe(200);
+      await expect(response.json()).resolves.toMatchObject({
+        metadata: { mimeType, isText: true },
+        content: "line 1\nline 2",
+      });
+    }
+  });
+
   it("rejects unsupported local file extensions", async () => {
     const filePath = path.join(tempDir, "report.pdf");
     await writeFile(filePath, "%PDF-1.4");

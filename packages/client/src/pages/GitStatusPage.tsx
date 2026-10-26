@@ -1,4 +1,4 @@
-import type { GitFileChange } from "@yep-anywhere/shared";
+import { type GitFileChange, isMarkdownFilePath } from "@yep-anywhere/shared";
 import { memo, useCallback, useEffect, useRef, useState } from "react";
 import { useSearchParams } from "react-router-dom";
 import { api } from "../api/client";
@@ -348,7 +348,7 @@ function GitDiffModalContent({
   const [showMarkdownPreview, setShowMarkdownPreview] = useState(false);
   const contentRef = useRef<HTMLDivElement>(null);
 
-  const isMarkdown = /\.(md|markdown)$/i.test(file.path);
+  const isMarkdown = isMarkdownFilePath(file.path);
   const hasMarkdownPreview =
     isMarkdown &&
     !!(fullContextResult?.markdownHtml || diffResult.markdownHtml);

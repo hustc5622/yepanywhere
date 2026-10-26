@@ -3,16 +3,10 @@ import type { ZodError } from "zod";
 import { useSchemaValidationContext } from "../../../contexts/SchemaValidationContext";
 import { validateToolResult } from "../../../lib/validateToolResult";
 import { SchemaWarning } from "../../SchemaWarning";
+import { FileListItem } from "./FileListItem";
 import type { GlobInput, GlobResult, ToolRenderer } from "./types";
 
 const MAX_FILES_COLLAPSED = 20;
-
-/**
- * Extract filename from path
- */
-function getFileName(filePath: string): string {
-  return filePath.split("/").pop() || filePath;
-}
 
 /**
  * Glob tool use - shows pattern being searched
@@ -32,9 +26,11 @@ function GlobToolUse({ input }: { input: GlobInput }) {
 function GlobToolResult({
   result,
   isError,
+  searchRoot,
 }: {
   result: GlobResult;
   isError: boolean;
+  searchRoot?: string;
 }) {
   const [isExpanded, setIsExpanded] = useState(false);
   const { enabled, reportValidationError, isToolIgnored } =
@@ -101,10 +97,7 @@ function GlobToolResult({
       </div>
       <div className="file-list">
         {displayFiles.map((file) => (
-          <div key={file} className="file-list-item">
-            <span className="file-path">{getFileName(file)}</span>
-            <span className="file-dir">{file}</span>
-          </div>
+          <FileListItem key={file} path={file} searchRoot={searchRoot} />
         ))}
         {needsCollapse && !isExpanded && (
           <div className="file-list-more">
@@ -132,8 +125,14 @@ export const globRenderer: ToolRenderer<GlobInput, GlobResult> = {
     return <GlobToolUse input={input as GlobInput} />;
   },
 
-  renderToolResult(result, isError, _context) {
-    return <GlobToolResult result={result as GlobResult} isError={isError} />;
+  renderToolResult(result, isError, _context, input) {
+    return (
+      <GlobToolResult
+        result={result as GlobResult}
+        isError={isError}
+        searchRoot={(input as GlobInput | undefined)?.path}
+      />
+    );
   },
 
   getUseSummary(input) {

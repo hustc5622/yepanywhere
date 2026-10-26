@@ -8,6 +8,8 @@
  * detection in both streaming and reload rendering paths.
  */
 
+import { getKnownFileExtensions } from "./file-types.js";
+
 /**
  * A detected file path with optional line/column information.
  */
@@ -34,137 +36,10 @@ export type TextSegment =
   | { type: "filePath"; detected: DetectedFilePath };
 
 /**
- * Common file extensions that indicate a file path.
+ * File extensions that indicate a file path: every type Yep knows how to
+ * classify for preview (see `file-types.ts`, the single source of truth).
  */
-const FILE_EXTENSIONS = new Set([
-  // TypeScript/JavaScript
-  "ts",
-  "tsx",
-  "js",
-  "jsx",
-  "mjs",
-  "cjs",
-  "mts",
-  "cts",
-  // Web
-  "html",
-  "htm",
-  "css",
-  "scss",
-  "sass",
-  "less",
-  "vue",
-  "svelte",
-  // Data/Config
-  "json",
-  "yaml",
-  "yml",
-  "toml",
-  "xml",
-  "csv",
-  "env",
-  // Documentation
-  "md",
-  "mdx",
-  "txt",
-  "rst",
-  // Python
-  "py",
-  "pyi",
-  "pyx",
-  "ipynb",
-  // Ruby
-  "rb",
-  "erb",
-  "rake",
-  // Go
-  "go",
-  "mod",
-  "sum",
-  // Rust
-  "rs",
-  "toml",
-  // Java/Kotlin
-  "java",
-  "kt",
-  "kts",
-  "gradle",
-  // C/C++
-  "c",
-  "h",
-  "cpp",
-  "hpp",
-  "cc",
-  "cxx",
-  "hxx",
-  // Shell
-  "sh",
-  "bash",
-  "zsh",
-  "fish",
-  // Other
-  "sql",
-  "graphql",
-  "gql",
-  "proto",
-  "swift",
-  "php",
-  "lua",
-  "vim",
-  "el",
-  "ex",
-  "exs",
-  "erl",
-  "hrl",
-  "hs",
-  "lhs",
-  "ml",
-  "mli",
-  "fs",
-  "fsx",
-  "fsi",
-  "clj",
-  "cljs",
-  "cljc",
-  "edn",
-  "scala",
-  "sbt",
-  "r",
-  "R",
-  "rmd",
-  "jl",
-  "pl",
-  "pm",
-  "t",
-  "dart",
-  "zig",
-  "nim",
-  "cr",
-  "v",
-  "tf",
-  "tfvars",
-  "dockerfile",
-  "makefile",
-  "cmake",
-  "lock",
-  "log",
-  // Media
-  "png",
-  "jpg",
-  "jpeg",
-  "gif",
-  "webp",
-  "bmp",
-  "tiff",
-  "tif",
-  "svg",
-  "mp4",
-  "webm",
-  "mov",
-  "avi",
-  "mkv",
-  "ogv",
-]);
+const FILE_EXTENSIONS = getKnownFileExtensions();
 
 /**
  * Known filenames that are common in codebases.

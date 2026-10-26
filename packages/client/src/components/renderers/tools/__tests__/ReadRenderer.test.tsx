@@ -1,6 +1,10 @@
 import { cleanup, fireEvent, render, screen } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { I18nProvider } from "../../../../i18n";
 import { readRenderer } from "../ReadRenderer";
+
+const { getFilePreview } = vi.hoisted(() => ({ getFilePreview: vi.fn() }));
+vi.mock("../../../../api/client", () => ({ api: { getFilePreview } }));
 
 vi.mock("../../../../contexts/SchemaValidationContext", () => ({
   useSchemaValidationContext: () => ({
@@ -194,5 +198,37 @@ describe("ReadRenderer", () => {
 
     vi.advanceTimersByTime(60_000);
     expect(revokeObjectUrl).toHaveBeenCalledWith("blob:yep-pdf");
+  });
+  it("previews flattened image reads from the file path instead of placeholder text", async () => {
+    const input = { path: "/tmp/pw/c-1.png", file_path: "/tmp/pw/c-1.png" };
+    const result = "Read image file [image/png]\n[Image]";
+    expect(readRenderer.getResultSummary?.(result, false, input)).toBe("Image");
+
+    render(
+      <I18nProvider>
+        {readRenderer.renderToolResult(result, false, renderContext, input)}
+      </I18nProvider>,
+    );
+
+    expect(screen.queryByText(/2 lines/)).toBeNull();
+    getFilePreview.mockResolvedValue({
+      kind: "image",
+      metadata: {
+        path: "/tmp/pw/c-1.png",
+        absolutePath: "/tmp/pw/c-1.png",
+        size: 4,
+        mimeType: "image/png",
+        isText: false,
+      },
+      rawUrl: "/api/fs/raw?path=%2Ftmp%2Fpw%2Fc-1.png",
+    });
+    fireEvent.click(screen.getByRole("button", { name: /c-1\.png/i }));
+    expect(getFilePreview).toHaveBeenCalledWith(
+      { path: "/tmp/pw/c-1.png" },
+      true,
+    );
+    expect(
+      (await screen.findByRole("img", { name: "c-1.png" })).getAttribute("src"),
+    ).toBe("/api/fs/raw?path=%2Ftmp%2Fpw%2Fc-1.png");
   });
 });

@@ -40,9 +40,9 @@
 
 1. 会话正文两套渲染：默认 `RenderItemComponent`，`history=legacy` 和嵌套 transcript 仍走 `ContentBlockRenderer`。工具组在 `DisplayToolGroupRow` 内再分投影行和旧消息行。
 2. 思考块：`ThinkingBlock` 按 detail ref 拉取，`ThinkingRenderer` 直接渲染整段文本。
-3. 文件预览四条路径：`FileViewer`、`LocalFileModal`、`LocalMediaModal`、`AttachmentPreviewModal`。API 边界不同。
+3. 文件预览已收敛（2026-10-21）：会话内所有入口经 `useFilePreview`／`FileOpenButton`（`components/FilePreviewPanel.tsx`）打开唯一的 `FileViewer`，走 `/api/fs/*`；`LocalFileModal`、`LocalMediaModal`、`FilePathLink` 已删除。仍独立的只有上传附件 `AttachmentPreviewModal`（uploads 范围）和会话快照/diff 面板。
 4. 审批两套界面：`ToolApprovalPanel`、`QuestionAnswerPanel`（`ZCodeBridgeApprovals` 已随 ZCode 移除）。
-5. 工具名其余别名仍分开：客户端还有 `bash`、`Agent`、`webrun` 等；Codex 在有 namespace 时直接拼接，且把 `exec` 映成 `CodexExec`；Pi 把 `ls`/`find` 映成 `Glob`。消息身份里仍用 `uuid ?? id` 的几处见上表，不能改成跳过空白。思考块和四条文件预览重新看过：`ThinkingBlock` 是 `<details>` 加按需加载，`ThinkingRenderer` 是另一套按钮；文件预览的 API 和行样式也不相同，没有抽外壳。
+5. 工具名其余别名仍分开：客户端还有 `bash`、`Agent`、`webrun` 等；Codex 在有 namespace 时直接拼接，且把 `exec` 映成 `CodexExec`；Pi 把 `ls`/`find` 映成 `Glob`。消息身份里仍用 `uuid ?? id` 的几处见上表，不能改成跳过空白。思考块重新看过：`ThinkingBlock` 是 `<details>` 加按需加载，`ThinkingRenderer` 是另一套按钮。
 6. Inbox / GlobalSession 的同名类型还不能放进 `shared`。服务端 Inbox 多 `pendingRequestId`、`originChannel`，标题是 `string`；客户端标题是 `string | null`，多 `runtime`，且没有读取那两个服务端字段。GlobalSession 的服务端 `ownership` 是 `SessionOwnership` 并多 `originChannel`；客户端 `ownership` 用 `SessionStatus`，没有声明 `originChannel`。运行时 JSON 仍带着这些字段，缺的是类型声明，不是另一套接口。
 7. Codex、Pi 的 stdout 分帧和 stderr 截断策略不同，协议客户端继续分开。
 

@@ -1,9 +1,10 @@
 import { useState } from "react";
-import { api } from "../../../api/client";
 import { useOptionalSessionMetadata } from "../../../contexts/SessionMetadataContext";
 import { useFetchedImage } from "../../../hooks/useRemoteImage";
 import { useOptionalI18n } from "../../../i18n";
-import { Modal } from "../../ui/Modal";
+import { fileRefFromPath } from "../../../lib/fileRef";
+import { FileOpenButton } from "../../FilePreviewPanel";
+import { DetailPanel } from "../../ui/DetailPanel";
 import type { ToolRenderer } from "./types";
 
 interface ViewImageInput {
@@ -16,15 +17,14 @@ interface ViewImageInput {
   result?: string;
 }
 
+/**
+ * `snapshot`: image recorded with the session (Codex); `file`: a path opened in
+ * the shared file panel; `direct`: a remote/data URL.
+ */
 type ImageSource =
   | { type: "snapshot"; url: string; label: string }
-  | { type: "local"; path: string; label: string }
+  | { type: "file"; path: string; label: string }
   | { type: "direct"; url: string; label: string };
-
-interface ImageSessionMetadata {
-  projectId: string;
-  projectPath: string | null;
-}
 
 interface ImageDimensions {
   width: number;
@@ -88,21 +88,7 @@ function getImageLabel(input: ViewImageInput, path: string): string {
     : getFileName(path) || title || "Generated image";
 }
 
-function getProjectRelativePath(
-  path: string,
-  projectPath: string | null,
-): string | null {
-  if (!projectPath) return null;
-  const normalizedProjectPath = projectPath.replace(/\/+$/, "");
-  if (!normalizedProjectPath) return null;
-  if (!path.startsWith(`${normalizedProjectPath}/`)) return null;
-  return path.slice(normalizedProjectPath.length + 1);
-}
-
-function getImageSource(
-  input: ViewImageInput,
-  metadata?: ImageSessionMetadata | null,
-): ImageSource | null {
+function getImageSource(input: ViewImageInput): ImageSource | null {
   if (input.snapshotUrl) {
     return {
       type: "snapshot",
@@ -113,20 +99,8 @@ function getImageSource(
     };
   }
   if (input.path) {
-    const projectRelativePath = getProjectRelativePath(
-      input.path,
-      metadata?.projectPath ?? null,
-    );
-    if (projectRelativePath && metadata?.projectId) {
-      return {
-        type: "direct",
-        url: api.getFileRawUrl(metadata.projectId, projectRelativePath),
-        label: getImageLabel(input, input.path),
-      };
-    }
-
     return {
-      type: "local",
+      type: "file",
       path: input.path,
       label: getImageLabel(input, input.path),
     };
@@ -222,17 +196,13 @@ function ViewImageModalContent({
   source,
   alt,
 }: {
-  source: ImageSource;
+  source: Exclude<ImageSource, { type: "file" }>;
   alt: string;
 }) {
   const i18n = useOptionalI18n();
   const [attempt, setAttempt] = useState(0);
   const apiPath =
-    source.type === "snapshot"
-      ? `${source.url}?attempt=${attempt}`
-      : source.type === "local"
-        ? `/api/local-image?path=${encodeURIComponent(source.path)}`
-        : null;
+    source.type === "snapshot" ? `${source.url}?attempt=${attempt}` : null;
   const { url, loading, error, bytes, mimeType } = useFetchedImage(apiPath);
 
   if (source.type === "direct") {
@@ -302,11 +272,24 @@ function ViewImageClickable({
   stopPropagation?: boolean;
 }) {
   const metadata = useOptionalSessionMetadata();
-  const source = getImageSource(input, metadata);
+  const source = getImageSource(input);
   const [showModal, setShowModal] = useState(false);
 
   if (!source) {
     return <ViewImageUnavailable input={input} />;
+  }
+
+  if (source.type === "file") {
+    return (
+      <FileOpenButton
+        fileRef={fileRefFromPath(source.path, metadata)}
+        className={buttonClass}
+        stopPropagation={stopPropagation}
+      >
+        {source.label}
+        <span className="file-line-count-inline">(image)</span>
+      </FileOpenButton>
+    );
   }
 
   return (
@@ -320,9 +303,9 @@ function ViewImageClickable({
         }}
       />
       {showModal && (
-        <Modal title={source.label} onClose={() => setShowModal(false)}>
+        <DetailPanel title={source.label} onClose={() => setShowModal(false)}>
           <ViewImageModalContent source={source} alt={source.label} />
-        </Modal>
+        </DetailPanel>
       )}
     </>
   );

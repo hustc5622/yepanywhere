@@ -38,7 +38,6 @@ BRIDGE_LABEL="${YEP_LAUNCHD_BRIDGE_LABEL:-com.yueyuan.yepanywhere.codex-bridge}"
 RUNTIME_LABEL="${YEP_LAUNCHD_RUNTIME_LABEL:-com.yueyuan.yepanywhere.runtime}"
 SERVER_PORT="${YEP_DEPLOY_PORT:-8022}"
 SERVER_BASE_PATH="${YEP_DEPLOY_BASE_PATH:-/yep}"
-SERVER_ALLOWED_IMAGE_PATHS="${ALLOWED_IMAGE_PATHS:-/tmp,$HOME/Downloads}"
 SERVER_ALLOWED_HOSTS="${ALLOWED_HOSTS:-}"
 BRIDGE_PORT="${YEP_CODEX_BRIDGE_PORT:-${CODEX_BRIDGE_PORT:-4510}}"
 BRIDGE_URL="${YEP_CODEX_BRIDGE_CONTROL_URL:-${CODEX_BRIDGE_CONTROL_URL:-http://127.0.0.1:${BRIDGE_PORT}}}"
@@ -115,8 +114,6 @@ Options:
 Environment overrides:
   YEP_DEPLOY_PORT              Main server port (default: 8022)
   YEP_DEPLOY_BASE_PATH         Main server base path (default: /yep)
-  ALLOWED_IMAGE_PATHS          Extra local media paths for /api/local-image
-                               (default: /tmp,$HOME/Downloads)
   YEP_REPORTS_DIR              Absolute or repository-relative Reports directory
                                (default: sibling research_tasks directory)
   RESEARCH_TASKS_DIR           Legacy fallback when YEP_REPORTS_DIR is unset
@@ -580,7 +577,6 @@ write_runtime_plist() {
     "PATH" "$LAUNCHD_PATH"
     "YEP_DEPLOY_REPO_ROOT" "$REPO_ROOT"
     "YEP_REPORTS_DIR" "$SERVER_REPORTS_DIR"
-    "ALLOWED_IMAGE_PATHS" "$SERVER_ALLOWED_IMAGE_PATHS"
     "PORT" "$SERVER_PORT"
     "YEP_RUNTIME_PORT" "$RUNTIME_PORT"
     "YEP_CODEX_BRIDGE_MODE" "external"
@@ -605,7 +601,6 @@ write_server_plist() {
     "NODE_ENV" "production"
     "PATH" "$LAUNCHD_PATH"
     "BASE_PATH" "$SERVER_BASE_PATH"
-    "ALLOWED_IMAGE_PATHS" "$SERVER_ALLOWED_IMAGE_PATHS"
     "YEP_DEPLOY_REPO_ROOT" "$REPO_ROOT"
     "YEP_REPORTS_DIR" "$SERVER_REPORTS_DIR"
     "YEP_CODEX_BRIDGE_MODE" "external"

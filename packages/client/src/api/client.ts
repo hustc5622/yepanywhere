@@ -17,6 +17,8 @@ import type {
   ContextUsage,
   EnrichedRecentEntry,
   FileContentResponse,
+  FileLocateResponse,
+  FilePreviewResponse,
   GitStatusInfo,
   HarnessId,
   HarnessUpdateInfo,
@@ -55,6 +57,7 @@ import type {
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
 import { authEvents } from "../lib/authEvents";
+import { type FileRef, filePreviewApiPath } from "../lib/fileRef";
 import type {
   AgentSession,
   InputRequest,
@@ -2073,6 +2076,16 @@ export const api = {
       `/projects/${projectId}/files?${params.toString()}`,
     );
   },
+
+  /** Local projects containing a relative path (`/api/fs/locate`). */
+  locateFile: (relativePath: string) =>
+    fetchJSON<FileLocateResponse>(
+      `/fs/locate?${new URLSearchParams({ path: relativePath }).toString()}`,
+    ),
+
+  /** Unified preview for any readable file (`/api/fs/preview`). */
+  getFilePreview: (ref: FileRef, highlight = true) =>
+    fetchJSON<FilePreviewResponse>(filePreviewApiPath(ref, highlight)),
 
   getFileRawUrl: (projectId: string, path: string, download = false) => {
     const params = new URLSearchParams({ path });

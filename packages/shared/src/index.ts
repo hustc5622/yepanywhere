@@ -126,6 +126,24 @@ export {
   transformFilePathsToHtml,
 } from "./filePathDetection.js";
 
+// Canonical `file_path` for provider file tools
+export { withCanonicalFilePath } from "./file-tool-input.js";
+
+// File type classification for previews (single source of truth)
+export type { FileTypeInfo, PreviewKind } from "./file-types.js";
+export {
+  classifyPreview,
+  getFileExtension,
+  getFileMimeType,
+  getFileTypeInfo,
+  getKnownFileExtensions,
+  getMediaPreviewKind,
+  getPathBasename,
+  isMarkdownFilePath,
+  isPreviewLinkablePath,
+  isTextFilePath,
+} from "./file-types.js";
+
 export type {
   ProviderName,
   LiveProviderName,
@@ -156,6 +174,12 @@ export type {
   EffortLevel,
   FileMetadata,
   FileContentResponse,
+  FilePreviewResponse,
+  FileLocateCandidate,
+  FileLocateResponse,
+  OfficeDocumentPreview,
+  OfficeSheetPreview,
+  OfficeSlidePreview,
   ReportDocument,
   ReportDocumentKind,
   ReportComment,

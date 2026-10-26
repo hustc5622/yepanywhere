@@ -91,6 +91,7 @@ import { createDevRoutes } from "./routes/dev.js";
 import { createFeishuChannelRoutes } from "./routes/feishu-channel.js";
 import { createFeishuUserAuthRoutes } from "./routes/feishu-user-auth.js";
 import { createFilesRoutes } from "./routes/files.js";
+import { createFsRoutes } from "./routes/fs.js";
 import { createGitStatusRoutes } from "./routes/git-status.js";
 import { createGlobalSessionsRoutes } from "./routes/global-sessions.js";
 import { createHarnessUpdateRoutes } from "./routes/harness-updates.js";
@@ -274,8 +275,6 @@ export interface AppOptions {
   enabledProviders?: string[];
   /** Whether voice input is enabled. Default: true */
   voiceInputEnabled?: boolean;
-  /** Allowed directory prefixes for serving local images. Default: ["/tmp"] */
-  allowedImagePaths?: string[];
   /** Directory containing Markdown report documents for the Reports page. */
   reportsDir?: string;
   /**
@@ -1738,17 +1737,13 @@ export function createApp(options: AppOptions): AppResult {
     }),
   );
 
-  // Local media from known local projects and explicitly allowed directories.
-  app.route(
-    "/api/local-image",
-    createLocalImageRoutes({
-      allowedPaths: options.allowedImagePaths ?? [],
-      scanner,
-    }),
-  );
-
-  // Local document previews are available across projects and sessions.
+  // Local media and document previews are available for any path the server
+  // can read; access is gated by the normal API authentication only.
+  app.route("/api/local-image", createLocalImageRoutes());
   app.route("/api/local-file", createLocalFileRoutes());
+  // Unified file preview API; the routes above are thin wrappers over the
+  // same core (packages/server/src/file-preview).
+  app.route("/api/fs", createFsRoutes({ scanner }));
 
   // Push notification routes
   if (options.pushService) {

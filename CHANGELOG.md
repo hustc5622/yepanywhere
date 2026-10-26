@@ -8,17 +8,25 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 ## [Unreleased]
 
 ### Added
+- 新增统一文件预览接口 `/api/fs/preview` 与 `/api/fs/raw`：同一套实现处理项目内与项目外文件，`path` 可为绝对路径，或配合 `projectId` 相对项目根解析（允许 `../` 离开项目），可带 `:行[:列]` 后缀；预览返回文件元数据、预览类型 `kind`、1 MB 内的文本内容、可选语法高亮与 Markdown 渲染。原有 `/api/projects/:id/files`、`/files/raw`、`/api/local-file`、`/api/local-image` 地址与响应保持兼容，内部改为调用同一实现。原始文件下载改为流式传输并支持 `Range`（视频拖动、PDF 分段加载），不再整文件读入内存；HTML／SVG／XML 以原始内容打开时附加沙箱 CSP 与 `nosniff`，避免在 Yep 域名下执行文件中的脚本。
 - 新增 DeepSeek Harness（`dsh`）只读接入：侧栏项目与「全部会话」列出 `~/.dsh`（或 `DSH_HOME`）中的 dsh 会话，支持查看完整对话、思考和工具调用（Bash／Read／Edit 等沿用现有渲染），显示标题、模型、上下文用量与未读状态；dsh Web 或 dsh CLI 正在运行时显示「运行中」，等待工具审批或提问回答时显示「等待输入」。会话页底部以「在 dsh 中打开」按钮代替输入框，直接打开内嵌 dsh 页面中的同一会话继续对话；Yep 不写入 dsh 文件、不启动或续接 dsh 会话，归档只隐藏不移动文件，子 agent 会话暂不关联。可用 `ENABLED_PROVIDERS` 中的 `dsh` 控制开关。
 - 新增会话打开耗时诊断：`display/view` 返回分阶段 `Server-Timing`（attach、resolve、stamp、read、reduce、replay、wait、total）和缓存命中状态 `displayCache`（hit／miss／wait），只含耗时与固定标记，不含路径或会话内容；服务端冷读达到 500 ms 或失败时写入 `session_display_cold_read` 日志；客户端每次打开会话记录一行 `[SessionLoad]`（是否命中缓存、连接状态、首个新快照到达及其来源、HTTP 往返和服务端阶段），开启开发者模式远程日志后可在客户端日志中查看。
 
 ### Changed
+- 侧边预览打不开相对路径时说明原因：回复中的相对路径（如 `src/app.ts`）按当前会话的项目解析，找不到时提示“按 某项目 解析，未找到，可能属于其他项目”，并提供“在其他项目中查找该文件”按钮；点击后才在其他本地项目里查找同一路径（新接口 `GET /api/fs/locate`），列出找到的项目，点选即在面板内打开。绝对路径或非“不存在”类错误不显示该按钮。
+- 文件侧边预览新增类型：CSV／TSV 默认以表格显示（可切回源码）；Word（docx）、Excel（xlsx）、PowerPoint（pptx）在服务端提取文字后预览——文档显示标题、段落、列表与表格，表格按工作表分页签显示（每表最多 500 行 × 50 列），演示文稿逐页显示文字；不含格式、图片和图表，加密或损坏的文件会说明原因并提供下载。转换不引入新依赖。
+- 更多路径可以直接点开预览：助手回复中纯文本出现的文件路径、只包含一个路径的行内代码（如 `` `src/app.ts:12` ``）都会变成链接（相对路径需包含目录且是已知文件类型，避免把 `src/utils`、`and/or` 之类误判为文件）；Glob／Grep 结果的每个文件、Grep 匹配行的 `文件:行号` 可点开并定位；`cat`、`sed -n '1,80p'`、`nl -ba … | sed -n …`、`head -n` 等只读单个文件的 shell 命令在展开后显示“读取文件”链接并定位到对应行，所有 provider 通用；包含变量展开或无法确定原文件行号的管道不会误生成链接。Pi、MiniMax Code、Cursor 的文件工具参数统一补齐 `file_path`，由同一个共享函数处理。
+- 会话内的文件预览统一为一个侧边面板：消息正文里的文件／图片／视频链接、Read 工具结果（含 Pi 等把图片压成占位文本的读取）、View Image、Codex 命令输出图片、会话检查器文件列表都打开同一个查看器，统一走 `/api/fs/preview`，项目内外文件表现一致（项目外的源码也有语法高亮）。查看器按类型显示文本／Markdown、图片、视频、音频、PDF（侧栏内嵌，不再另开标签页），其他类型提供下载；带行号的链接和部分读取会标出并滚动到对应行（语法高亮模式下也生效）；Read 结果可在“当前文件”和“工具结果”（工具读取时的内容）间切换，文件已不存在时自动显示工具结果；Markdown 预览里的文件链接在面板内跳转。原先居中弹窗形式的图片预览改为同一侧栏。新增独立文件页 `/file?path=…`，项目外文件也能在新标签页打开。
+- 文件类型识别统一到 `packages/shared/src/file-types.ts`（`classifyPreview`、`getFileMimeType`、`isTextFilePath`、`getMediaPreviewKind` 等），项目文件预览、本地文本／媒体预览、Markdown 中的路径链接、消息里的路径识别和客户端查看器不再各自维护扩展名列表。随之扩大的范围：项目外的本地文本预览（`/api/local-file`）从只支持 `.md/.txt/.json` 扩展为全部文本与源码类型（如 `.ts`、`.log`、`.csv`、`Dockerfile`）；消息中的 `pdf`、Office 文档（`docx/xlsx/pptx` 等）、音频、压缩包路径也会被识别为文件路径；本地媒体额外支持 `avif`、`ico`。
 - Pi 会话的时间线区分思维链与阶段性输出：工具调用之间的中间叙述按“进度”样式显示（左侧色条、浅底、标签），末尾回复保持正文样式；思维链改为空心节点加灯泡图标，展开后以虚线缩进、斜体小字呈现，不再与输出堆在一起。
 
 ### Removed
+- 移除本地图片／视频预览接口 `/api/local-image` 的目录白名单：会话正文或工具调用中出现的任意可读绝对路径（不再限于 `/tmp`、`~/Downloads`、uploads 与已知项目目录）都能在侧边预览中打开，与 `/api/local-file` 一致，只依赖 Yep 的登录认证。`ALLOWED_IMAGE_PATHS` 环境变量不再生效，部署脚本也不再写入或检查它；已有 LaunchAgent 中残留的该变量会被忽略。
 - 移除 Kimi provider 及其全部逻辑：`kimi acp` 接入、`~/.kimi-code/sessions` 会话扫描与读取、该目录的常驻文件监听、Kimi 专属的消息快照校验与子 agent 目录重试、goal 内联卡片、`ReadMediaFile` 渲染器、计划审批「保持当前权限模式」选项、Kimi 权限模式文案，以及 `~/.kimi-code/sessions` 的本地图片白名单（`KIMI_SESSIONS_DIR`／`KIMI_CODE_HOME` 不再生效）。旧数据中的 `kimi` 会话不再出现在列表中，按已退役 provider 处理（相关接口返回 410）；Kimi 原始数据仍保留在 `~/.kimi-code`。MiniMax Code 原先与 Kimi 共用的思考等级选择器保持不变。
 - 移除 ZCode provider 及其全部逻辑：app-server 接入、`~/.zcode` SQLite 会话读取与变更监视（每 15 秒轮询）、会话归档写回、ZCode TUI hook bridge（`/api/zcode-bridge` 与「全部会话」页的审批卡片）、新建会话页的 MCP 状态面板，以及 `test:zcode-app-server-smoke` 脚本。旧数据中的 `zcode` 会话不再出现在列表中，按已退役 provider 处理（相关接口返回 410）；Yep 从未修改的 ZCode 原始数据仍保留在 `~/.zcode`。曾安装 hook 插件的用户可删除 `~/.zcode/plugins/yep-bridge` 与 `~/.zcode/yep-bridge.json`。仅被 ZCode 使用的 SQLite 查询 worker 一并删除；Pi 与 Codex 共用的编辑分支推导迁至 `sessions/copied-prefix-branch.ts`，行为不变。
 
 ### Fixed
+- 修复 Pi 等 provider 读取图片后侧边预览只显示 `Read image file [image/png]`／`[Image]` 两行文本：这类图片字节在转录中被压成占位文本的 Read 结果，现在按文件路径打开图片——项目内文件走项目文件预览，其他路径（如 `/tmp`）走本地图片接口，摘要显示为“(image)”而不是“2 lines”。
 - Yep 中的 Pi 会话改为直接使用本机 Pi 的原生配置：此前 Yep 以 `--no-extensions` 和隔离的 `PI_CODING_AGENT_DIR` 启动 Pi，`~/.pi/agent` 中安装的扩展包（如 `pi-mcp-adapter`）、`mcp.json` 中的 MCP（如飞书 `feishu-mcp`）、技能等都不会加载。现在 Yep 只额外挂载自己的扩展，其余与终端 `pi` 一致；Yep 的数据目录 `pi-agent` 变为覆盖层，以符号链接指向 `~/.pi/agent`，仅 `settings.json` 每次启动时复制一份，Yep 的模型／思考等级切换不会改写终端 `pi` 的默认设置。每次启动 Pi 进程都会重新同步，终止会话后继续发消息即可加载最新配置。设置 `YEP_PI_NATIVE_CONFIG=false` 可恢复原隔离模式（原有隔离文件保存在 `pi-agent/.yep-isolated-backup/` 并在回退时还原）。
 - 会话消息里的链接（Markdown 链接、本地文件链接、外链）现在可以拖动选中文字并复制：链接不再被当作可拖拽对象，选中文本后松开鼠标也不会触发跳转或打开文件预览；普通单击仍照常打开。
 - 修复本地部署在切服检查前替换 LaunchAgent bundle、连续部署删除仍被 external runtime／bridge 占用的旧目录：仅构建不再发布运行目录，web 切服先验证 workers 并在停止旧 shell 后发布；旧目录仅在确认无进程占用后清理，无法确认时保留。workers 探测失败最多尝试 10 次，并拒绝把无效状态 JSON 当作空闲。

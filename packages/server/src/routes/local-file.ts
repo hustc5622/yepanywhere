@@ -1,36 +1,28 @@
-import { readFile, realpath, stat } from "node:fs/promises";
-import { extname } from "node:path";
-import { parseLineColumn } from "@yep-anywhere/shared";
+import { isTextFilePath } from "@yep-anywhere/shared";
 import { Hono } from "hono";
-import { renderMarkdownDocumentToHtml } from "../augments/markdown-augments.js";
+import {
+  FilePreviewError,
+  MAX_INLINE_TEXT_BYTES,
+  buildFilePreview,
+  openPreviewFile,
+  resolvePreviewPath,
+} from "../file-preview/index.js";
 
 interface LocalFileDeps {
   maxInlineSizeBytes?: number;
-}
-
-const MAX_INLINE_SIZE = 1024 * 1024;
-
-const TEXT_FILE_MIME_TYPES: Record<string, string> = {
-  ".md": "text/markdown",
-  ".markdown": "text/markdown",
-  ".txt": "text/plain",
-  ".json": "application/json",
-};
-
-function isMarkdownPath(path: string): boolean {
-  const ext = extname(path).toLowerCase();
-  return ext === ".md" || ext === ".markdown";
 }
 
 /**
  * Serve small local text files readable by the server, regardless of project
  * or session. This route uses the application's normal API authentication.
  *
- * Supports .md/.markdown/.txt/.json files at absolute paths and refuses large files.
+ * Kept for URLs embedded in rendered markdown (`.local-file-link`); new code
+ * should use `/api/fs/preview`. Accepts every text type in the shared
+ * file-type table at absolute paths and refuses large files.
  */
 export function createLocalFileRoutes(deps: LocalFileDeps = {}) {
   const routes = new Hono();
-  const maxInlineSizeBytes = deps.maxInlineSizeBytes ?? MAX_INLINE_SIZE;
+  const maxInlineSizeBytes = deps.maxInlineSizeBytes ?? MAX_INLINE_TEXT_BYTES;
 
   routes.get("/", async (c) => {
     const rawPath = c.req.query("path");
@@ -38,62 +30,49 @@ export function createLocalFileRoutes(deps: LocalFileDeps = {}) {
       return c.json({ error: "Missing path parameter" }, 400);
     }
 
-    const parsed = parseLineColumn(rawPath);
-    const filePath = parsed.path;
-    if (!filePath.startsWith("/")) {
-      return c.json({ error: "Path must be absolute" }, 400);
-    }
-
-    const mimeType = TEXT_FILE_MIME_TYPES[extname(filePath).toLowerCase()];
-    if (!mimeType) {
-      return c.json({ error: "Not a supported local text file type" }, 400);
-    }
-
-    let resolvedPath: string;
     try {
-      resolvedPath = await realpath(filePath);
-    } catch {
-      return c.json({ error: "File not found" }, 404);
-    }
-
-    const stats = await stat(resolvedPath);
-    if (!stats.isFile()) {
-      return c.json({ error: "Not a file" }, 404);
-    }
-
-    if (stats.size > maxInlineSizeBytes) {
-      return c.json({ error: "File too large" }, 413);
-    }
-
-    let content: string;
-    try {
-      content = await readFile(resolvedPath, "utf-8");
-    } catch {
-      return c.json({ error: "Failed to read file" }, 500);
-    }
-
-    let renderedMarkdownHtml: string | undefined;
-    if (isMarkdownPath(resolvedPath)) {
-      try {
-        renderedMarkdownHtml = await renderMarkdownDocumentToHtml(content);
-      } catch {
-        // Plain text still renders if markdown rendering fails.
+      if (!rawPath.trim().startsWith("/")) {
+        return c.json({ error: "Path must be absolute" }, 400);
       }
-    }
+      const resolved = await resolvePreviewPath(rawPath);
+      const filePath = resolved.absolutePath;
+      if (!isTextFilePath(filePath)) {
+        return c.json({ error: "Not a supported local text file type" }, 400);
+      }
 
-    return c.json({
-      metadata: {
-        path: filePath,
-        size: stats.size,
-        mimeType,
-        isText: true,
-      },
-      content,
-      rawUrl: `/api/local-file?path=${encodeURIComponent(filePath)}`,
-      renderedMarkdownHtml,
-      lineNumber: parsed.line,
-      columnNumber: parsed.column,
-    });
+      let file: Awaited<ReturnType<typeof openPreviewFile>>;
+      try {
+        file = await openPreviewFile(filePath);
+      } catch (error) {
+        if (error instanceof FilePreviewError && error.status === 400) {
+          return c.json({ error: "Not a file" }, 404);
+        }
+        return c.json({ error: "File not found" }, 404);
+      }
+      if (file.stats.size > maxInlineSizeBytes) {
+        return c.json({ error: "File too large" }, 413);
+      }
+
+      const preview = await buildFilePreview(file, {
+        displayPath: filePath,
+        rawUrl: `/api/fs/raw?path=${encodeURIComponent(filePath)}`,
+        renderMarkdown: true,
+      });
+      if (preview.content === undefined) {
+        return c.json({ error: "Failed to read file" }, 500);
+      }
+
+      return c.json({
+        ...preview,
+        lineNumber: resolved.line,
+        columnNumber: resolved.column,
+      });
+    } catch (error) {
+      if (error instanceof FilePreviewError) {
+        return c.json(error.toJSON(), error.status);
+      }
+      return c.json({ error: "Internal error" }, 500);
+    }
   });
 
   return routes;

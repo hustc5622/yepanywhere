@@ -16,7 +16,11 @@ import type {
   SessionNotification,
   SessionUpdate,
 } from "@agentclientprotocol/sdk";
-import type { ModelInfo, PermissionMode } from "@yep-anywhere/shared";
+import {
+  type ModelInfo,
+  type PermissionMode,
+  withCanonicalFilePath,
+} from "@yep-anywhere/shared";
 import { getLogger } from "../../logging/logger.js";
 import { CURSOR_ACP_SESSIONS_DIR } from "../../sessions/cursor-reader.js";
 import { readCursorSessionDir } from "../../sessions/cursor-store.js";
@@ -942,9 +946,10 @@ function convertUpdate(
         ? toolNameFromUpdate(update)
         : (toolNames.get(update.toolCallId) ?? toolNameFromUpdate(update));
     toolNames.set(update.toolCallId, name);
-    const input = { ...rawInput } as Record<string, unknown>;
-    if (typeof input.path === "string" && input.file_path === undefined)
-      input.file_path = input.path;
+    const input = withCanonicalFilePath(
+      { ...rawInput } as Record<string, unknown>,
+      update.locations,
+    );
     return {
       type: "assistant",
       uuid: `cursor-tool-${update.toolCallId}`,

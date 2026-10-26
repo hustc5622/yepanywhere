@@ -53,7 +53,7 @@
 | `/api/sessions` 下 Codex transcript / image | `createCodexTranscriptRoutes`、`createCodexImageRoutes`；与列表共前缀，不是同一 handler |
 | `/api/processes`、`/api/status/workers`、`/api/queue` | `createProcessesRoutes` / `createSessionsRoutes`；runtime 与 worker admission |
 | `/api/inbox`、`/api/recents`、`/api/search`、`/api/archive/sessions` | 聚合/最近访问/全文/归档；recents、search 依赖对应 service |
-| `/api/reports`、`/api/local-file`、`/api/local-image` | 独立报告与预览。local-image 接受 allowlist，并在注入 scanner 时接受已发现的本地项目路径；可提供图片和视频 |
+| `/api/reports`、`/api/fs`、`/api/local-file`、`/api/local-image` | 独立报告与预览。`/api/fs/preview|raw` 为统一文件预览实现（`server/src/file-preview`），local-file／local-image 与项目 files 路由是其薄包装。local-file／local-image 接受任意可读绝对路径（只依赖 API 认证）；local-image 提供图片和视频 |
 | `/api/providers`、`/api/harness-updates`、`/api/codex-accounts`、`/api/llm-gateway-keys` | provider/CLI 更新、Codex 账号与网关选择；账号路由要求 dataDir |
 | `/api/codex-bridge` | 外部会话适配；Codex 要注入 bridge service |
 | `/api/settings`、`/api/auth/feishu`、`/api/channels/feishu` | settings/channel service 存在时注册；配置不等于通道已连通 |

@@ -12,7 +12,7 @@ import {
   getCodexWebResultOverview,
   getCodexWebRunOverview,
 } from "../../../lib/codexWebRun";
-import { Modal } from "../../ui/Modal";
+import { DetailPanel } from "../../ui/DetailPanel";
 import type { ToolRenderer } from "./types";
 
 const MAX_OUTPUT_LINES = 30;
@@ -285,7 +285,7 @@ function ExecImages({ images }: { images: CodexExecImageOutput[] }) {
         ))}
       </div>
       {selectedImage !== null && images[selectedImage] && (
-        <Modal
+        <DetailPanel
           title={`Exec image ${selectedImage + 1}`}
           onClose={() => setSelectedImage(null)}
         >
@@ -295,7 +295,7 @@ function ExecImages({ images }: { images: CodexExecImageOutput[] }) {
               alt={`Exec output ${selectedImage + 1}`}
             />
           </div>
-        </Modal>
+        </DetailPanel>
       )}
     </section>
   );

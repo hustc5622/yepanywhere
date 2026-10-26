@@ -11,6 +11,7 @@
  * starts mid-context (e.g., inside a multi-line comment or string).
  */
 
+import { isMarkdownFilePath } from "@yep-anywhere/shared";
 import { highlightFile } from "../highlighting/index.js";
 import { renderSafeMarkdown } from "./safe-markdown.js";
 
@@ -34,17 +35,6 @@ export interface ReadAugmentResult {
   truncated: boolean;
   /** Rendered markdown HTML (only for .md files) */
   renderedMarkdownHtml?: string;
-}
-
-/** File extensions that should get rendered markdown preview */
-const MARKDOWN_EXTENSIONS = new Set([".md", ".markdown", ".mdx"]);
-
-/**
- * Check if a file path is a markdown file.
- */
-function isMarkdownFile(filePath: string): boolean {
-  const ext = filePath.slice(filePath.lastIndexOf(".")).toLowerCase();
-  return MARKDOWN_EXTENSIONS.has(ext);
 }
 
 /**
@@ -85,7 +75,7 @@ export async function computeReadAugment(
 
   // For markdown files, also render the content to HTML
   let renderedMarkdownHtml: string | undefined;
-  if (isMarkdownFile(file_path)) {
+  if (isMarkdownFilePath(file_path)) {
     renderedMarkdownHtml = await renderMarkdown(content);
   }
 

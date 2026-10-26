@@ -8,6 +8,8 @@
  * add the renderer field aliases, keeping every native field for diagnostics.
  */
 
+import { withCanonicalFilePath } from "@yep-anywhere/shared";
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -35,17 +37,12 @@ export function normalizeMcodeToolArguments(
   nativeName: string,
   input: unknown,
 ): Record<string, unknown> {
-  const normalized = isRecord(input) ? { ...input } : {};
+  let normalized = isRecord(input) ? { ...input } : {};
   switch (nativeName.toLowerCase()) {
     case "read":
     case "write":
     case "edit":
-      if (
-        typeof normalized.path === "string" &&
-        typeof normalized.file_path !== "string"
-      ) {
-        normalized.file_path = normalized.path;
-      }
+      normalized = withCanonicalFilePath(normalized);
       break;
     case "ls":
       if (typeof normalized.pattern !== "string") normalized.pattern = "*";

@@ -1,11 +1,16 @@
+import { getMediaPreviewKind } from "@yep-anywhere/shared";
 import { useEffect, useState } from "react";
 import type { ZodError } from "zod";
 import { useSchemaValidationContext } from "../../../contexts/SchemaValidationContext";
 import { useOptionalSessionMetadata } from "../../../contexts/SessionMetadataContext";
+import {
+  type FileRef,
+  type FileSnapshot,
+  fileRefFromPath,
+} from "../../../lib/fileRef";
 import { validateToolResult } from "../../../lib/validateToolResult";
-import { FileViewerModal } from "../../FilePathLink";
+import { FileOpenButton } from "../../FilePreviewPanel";
 import { SchemaWarning } from "../../SchemaWarning";
-import { DetailPanel } from "../../ui/DetailPanel";
 import type {
   ImageFile,
   PdfFile,
@@ -44,6 +49,30 @@ function getReadSessionId(result: unknown): string | number | undefined {
   const sessionId = result.session_id;
   if (typeof sessionId === "string" || typeof sessionId === "number") {
     return sessionId;
+  }
+  return undefined;
+}
+
+/**
+ * Providers that flatten tool-result content blocks to text (Pi, and any
+ * provider whose image block degrades to `[Image]`) lose the image bytes, so
+ * the result looks like a two-line text file. Recognize that shape and preview
+ * the image from its path instead of showing the placeholder as file content.
+ */
+function getImagePlaceholderReadPath(
+  result: unknown,
+  input: unknown,
+): string | undefined {
+  if (typeof result !== "string") return undefined;
+  const filePath = getReadInputFilePath(input);
+  if (!filePath) return undefined;
+  const text = result.trim();
+  if (/^Read image file \[image\/[^\]]+\]/.test(text)) return filePath;
+  if (
+    getMediaPreviewKind(filePath) === "image" &&
+    /(^|\n)\[Image\]$/.test(text)
+  ) {
+    return filePath;
   }
   return undefined;
 }
@@ -140,24 +169,6 @@ function getFileName(filePath: string | undefined): string {
   return filePath.split("/").pop() || filePath;
 }
 
-function getProjectRelativePath(
-  filePath: string,
-  projectPath: string | null | undefined,
-): string | null {
-  if (!projectPath) return null;
-
-  const root = projectPath.replace(/\/+$/, "");
-  if (!root) return null;
-
-  if (filePath === root) return "";
-  if (!filePath.startsWith(`${root}/`)) return null;
-  return filePath.slice(root.length + 1);
-}
-
-function isProjectRelativePath(filePath: string): boolean {
-  return !filePath.startsWith("/") && !filePath.includes("://");
-}
-
 function getLineCountLabel(file: TextFile): string {
   if (file.numLines < file.totalLines || file.startLine > 1) {
     return `${file.numLines} of ${file.totalLines} lines`;
@@ -183,230 +194,79 @@ function ReadToolUse({ input }: { input: Partial<ReadInput> }) {
   );
 }
 
-/**
- * Modal content for viewing file contents
- */
-function FileModalContent({
-  file,
-  highlightedHtml,
-  highlightedTruncated,
-  renderedMarkdownHtml,
-}: {
-  file: TextFile;
-  highlightedHtml?: string;
-  highlightedTruncated?: boolean;
-  renderedMarkdownHtml?: string;
-}) {
-  const [showPreview, setShowPreview] = useState(false);
-  const lines = (file.content ?? "").split("\n");
-  const hasMarkdownPreview = !!renderedMarkdownHtml;
-  const showRangeNotice = file.startLine > 1 || file.numLines < file.totalLines;
-
-  // Toggle button for markdown files
-  const toggleButton = hasMarkdownPreview && (
-    <div className="markdown-view-toggle">
-      <button
-        type="button"
-        className={`toggle-btn ${!showPreview ? "active" : ""}`}
-        onClick={() => setShowPreview(false)}
-      >
-        Source
-      </button>
-      <button
-        type="button"
-        className={`toggle-btn ${showPreview ? "active" : ""}`}
-        onClick={() => setShowPreview(true)}
-      >
-        Preview
-      </button>
-    </div>
-  );
-
-  // Show rendered markdown preview
-  if (showPreview && renderedMarkdownHtml) {
-    return (
-      <div className="file-content-modal">
-        {showRangeNotice && (
-          <div className="file-content-range-notice">
-            Showing lines {file.startLine}-{file.startLine + file.numLines - 1}{" "}
-            of {file.totalLines}
-          </div>
-        )}
-        {toggleButton}
-        <div className="markdown-preview">
-          <div
-            className="markdown-rendered"
-            // biome-ignore lint/security/noDangerouslySetInnerHtml: server-rendered HTML
-            dangerouslySetInnerHTML={{ __html: renderedMarkdownHtml }}
-          />
-        </div>
-      </div>
-    );
-  }
-
-  // Use highlighted HTML if available
-  if (highlightedHtml) {
-    return (
-      <div className="file-content-modal">
-        {showRangeNotice && (
-          <div className="file-content-range-notice">
-            Showing lines {file.startLine}-{file.startLine + file.numLines - 1}{" "}
-            of {file.totalLines}
-          </div>
-        )}
-        {toggleButton}
-        <div className="file-viewer-code file-viewer-code-highlighted">
-          <div
-            className="shiki-container"
-            // biome-ignore lint/security/noDangerouslySetInnerHtml: server-rendered HTML
-            dangerouslySetInnerHTML={{ __html: highlightedHtml }}
-          />
-          {highlightedTruncated && (
-            <div className="file-viewer-truncated">
-              Content truncated for highlighting (showing first 2000 lines)
-            </div>
-          )}
-        </div>
-      </div>
-    );
-  }
-
-  // Fallback: plain text with line numbers
-  return (
-    <div className="file-content-modal">
-      {showRangeNotice && (
-        <div className="file-content-range-notice">
-          Showing lines {file.startLine}-{file.startLine + file.numLines - 1} of{" "}
-          {file.totalLines}
-        </div>
-      )}
-      {toggleButton}
-      <div className="file-content-with-lines">
-        <div className="line-numbers">
-          {lines.map((_, i) => (
-            <div key={`ln-${i + 1}`}>{file.startLine + i}</div>
-          ))}
-        </div>
-        <pre className="line-content">
-          <code>{file.content}</code>
-        </pre>
-      </div>
-    </div>
-  );
-}
-
-/**
- * Build modal title for file with optional range info
- */
-function FileModalTitle({ file }: { file: TextFile }) {
-  const fileName = getFileName(file.filePath);
-  const showRange = file.startLine > 1 || file.numLines < file.totalLines;
-
-  return (
-    <span className="file-path">
-      {fileName}
-      {showRange && (
-        <span className="file-range">
-          {" "}
-          (lines {file.startLine}-{file.startLine + file.numLines - 1} of{" "}
-          {file.totalLines})
-        </span>
-      )}
-    </span>
-  );
-}
-
-type ReadModalTarget =
-  | { type: "project"; relativePath: string; lineNumber?: number }
-  | { type: "fragment" };
-
-function useReadModalTarget(file: TextFile): ReadModalTarget {
+/** Side-panel reference for a Read; partial reads target their line range. */
+function useReadFileRef(file: TextFile): FileRef {
   const metadata = useOptionalSessionMetadata();
-  const relativeFromProject = getProjectRelativePath(
+  const partial = file.startLine > 1 || file.numLines < file.totalLines;
+  return fileRefFromPath(
     file.filePath,
-    metadata?.projectPath,
+    metadata,
+    partial
+      ? {
+          lineNumber: file.startLine,
+          lineEnd: file.startLine + Math.max(file.numLines - 1, 0),
+        }
+      : {},
   );
-  const lineNumber = file.startLine > 1 ? file.startLine : undefined;
-
-  if (metadata?.projectId && relativeFromProject) {
-    return {
-      type: "project",
-      relativePath: relativeFromProject,
-      lineNumber,
-    };
-  }
-
-  if (metadata?.projectId && isProjectRelativePath(file.filePath)) {
-    return {
-      type: "project",
-      relativePath: file.filePath,
-      lineNumber,
-    };
-  }
-
-  return { type: "fragment" };
 }
 
-function ReadFileModal({
-  target,
-  file,
-  highlightedHtml,
-  highlightedTruncated,
-  renderedMarkdownHtml,
-  onClose,
-}: {
-  target: ReadModalTarget;
-  file: TextFile;
-  highlightedHtml?: string;
-  highlightedTruncated?: boolean;
-  renderedMarkdownHtml?: string;
-  onClose: () => void;
-}) {
-  const metadata = useOptionalSessionMetadata();
-
-  if (target.type === "project" && metadata?.projectId) {
-    return (
-      <FileViewerModal
-        projectId={metadata.projectId}
-        filePath={target.relativePath}
-        lineNumber={target.lineNumber}
-        onClose={onClose}
-      />
-    );
-  }
-
-  return (
-    <DetailPanel title={<FileModalTitle file={file} />} onClose={onClose}>
-      <FileModalContent
-        file={file}
-        highlightedHtml={highlightedHtml}
-        highlightedTruncated={highlightedTruncated}
-        renderedMarkdownHtml={renderedMarkdownHtml}
-      />
-    </DetailPanel>
-  );
+function textSnapshot(
+  file: TextFile,
+  result: ReadResultWithAugment | undefined,
+): FileSnapshot {
+  return {
+    kind: "text",
+    content: file.content ?? "",
+    startLine: file.startLine,
+    totalLines: file.totalLines,
+    highlightedHtml: result?._highlightedContentHtml,
+    highlightedTruncated: result?._highlightedTruncated,
+    renderedMarkdownHtml: result?._renderedMarkdownHtml,
+  };
 }
 
 /**
- * Text file result - clickable filename that opens modal
+ * Image read whose bytes are not in the transcript (providers that flatten
+ * image blocks to `[Image]`): open the image file by path.
+ */
+function ImagePathRead({
+  filePath,
+  inline,
+}: {
+  filePath: string;
+  inline: boolean;
+}) {
+  const metadata = useOptionalSessionMetadata();
+  const button = (
+    <FileOpenButton
+      fileRef={fileRefFromPath(filePath, metadata)}
+      className={inline ? "file-link-inline" : "file-link-button"}
+      stopPropagation
+    >
+      {getFileName(filePath)}
+      <span className={inline ? "file-line-count-inline" : "file-line-count"}>
+        (image)
+      </span>
+    </FileOpenButton>
+  );
+  return inline ? button : <div className="read-text-result">{button}</div>;
+}
+
+/**
+ * Text file result - clickable filename that opens the side panel
  */
 function TextFileResult({
   file,
-  highlightedHtml,
-  highlightedTruncated,
-  renderedMarkdownHtml,
+  result,
   isPtyHandoff = false,
 }: {
   file: TextFile;
-  highlightedHtml?: string;
-  highlightedTruncated?: boolean;
-  renderedMarkdownHtml?: string;
+  result?: ReadResultWithAugment;
   isPtyHandoff?: boolean;
 }) {
-  const [showModal, setShowModal] = useState(false);
   const fileName = getFileName(file.filePath);
   const showRange = file.startLine > 1 || file.numLines < file.totalLines;
-  const modalTarget = useReadModalTarget(file);
+  const fileRef = useReadFileRef(file);
 
   if (isPtyHandoff) {
     return (
@@ -418,34 +278,22 @@ function TextFileResult({
   }
 
   return (
-    <>
-      <div className="read-text-result">
-        <button
-          type="button"
-          className="file-link-button"
-          onClick={() => setShowModal(true)}
-        >
-          {fileName}
-          {showRange && (
-            <span className="file-range">
-              {" "}
-              (lines {file.startLine}-{file.startLine + file.numLines - 1})
-            </span>
-          )}
-          <span className="file-line-count">{getLineCountLabel(file)}</span>
-        </button>
-      </div>
-      {showModal && (
-        <ReadFileModal
-          target={modalTarget}
-          file={file}
-          highlightedHtml={highlightedHtml}
-          highlightedTruncated={highlightedTruncated}
-          renderedMarkdownHtml={renderedMarkdownHtml}
-          onClose={() => setShowModal(false)}
-        />
-      )}
-    </>
+    <div className="read-text-result">
+      <FileOpenButton
+        fileRef={fileRef}
+        snapshot={textSnapshot(file, result)}
+        className="file-link-button"
+      >
+        {fileName}
+        {showRange && (
+          <span className="file-range">
+            {" "}
+            (lines {file.startLine}-{file.startLine + file.numLines - 1})
+          </span>
+        )}
+        <span className="file-line-count">{getLineCountLabel(file)}</span>
+      </FileOpenButton>
+    </div>
   );
 }
 
@@ -518,20 +366,35 @@ function PdfFileResult({
   file,
   filePath,
 }: { file: PdfFile; filePath?: string }) {
+  const metadata = useOptionalSessionMetadata();
   const sizeKB = file.originalSize ? Math.round(file.originalSize / 1024) : 0;
   const fileName = filePath ? getFileName(filePath) : "document.pdf";
+  const label = (
+    <>
+      {fileName}
+      {sizeKB > 0 && <span className="file-line-count">({sizeKB}KB)</span>}
+      <span className="file-line-count">Open PDF</span>
+    </>
+  );
 
   return (
     <div className="read-pdf-result">
-      <button
-        type="button"
-        className="file-link-button"
-        onClick={() => openPdfInNewTab(file.base64)}
-      >
-        {fileName}
-        {sizeKB > 0 && <span className="file-line-count">({sizeKB}KB)</span>}
-        <span className="file-line-count">Open PDF</span>
-      </button>
+      {filePath ? (
+        <FileOpenButton
+          fileRef={fileRefFromPath(filePath, metadata)}
+          className="file-link-button"
+        >
+          {label}
+        </FileOpenButton>
+      ) : (
+        <button
+          type="button"
+          className="file-link-button"
+          onClick={() => openPdfInNewTab(file.base64)}
+        >
+          {label}
+        </button>
+      )}
     </div>
   );
 }
@@ -590,7 +453,10 @@ function ReadToolResult({
         {showValidationWarning && validationErrors && (
           <SchemaWarning toolName="Read" errors={validationErrors} />
         )}
-        <PdfFileResult file={normalizedResult.file as PdfFile} />
+        <PdfFileResult
+          file={normalizedResult.file as PdfFile}
+          filePath={getReadInputFilePath(input)}
+        />
       </>
     );
   }
@@ -613,9 +479,7 @@ function ReadToolResult({
       )}
       <TextFileResult
         file={normalizedResult.file as TextFile}
-        highlightedHtml={normalizedResult._highlightedContentHtml}
-        highlightedTruncated={normalizedResult._highlightedTruncated}
-        renderedMarkdownHtml={normalizedResult._renderedMarkdownHtml}
+        result={normalizedResult}
         isPtyHandoff={isPtyHandoffTextRead(normalizedResult)}
       />
     </>
@@ -635,7 +499,7 @@ function ReadInteractiveSummary({
   isError: boolean;
 }) {
   const normalizedResult = normalizeReadResult(result, input);
-  const [showModal, setShowModal] = useState(false);
+  const metadata = useOptionalSessionMetadata();
   const { enabled, reportValidationError, isToolIgnored } =
     useSchemaValidationContext();
   const [validationErrors, setValidationErrors] = useState<ZodError | null>(
@@ -657,7 +521,11 @@ function ReadInteractiveSummary({
   const showValidationWarning =
     enabled && validationErrors && !isToolIgnored("Read");
 
-  const fileName = getFileName(getReadInputFilePath(input));
+  const inputPath = getReadInputFilePath(input);
+  const fileName = getFileName(inputPath);
+  const warning = showValidationWarning && validationErrors && (
+    <SchemaWarning toolName="Read" errors={validationErrors} />
+  );
 
   if (isError) {
     return (
@@ -676,7 +544,22 @@ function ReadInteractiveSummary({
 
   if (normalizedResult.type === "pdf") {
     const pdfFile = normalizedResult.file as PdfFile;
-    return (
+    const label = (
+      <>
+        {fileName}
+        <span className="file-line-count-inline">(PDF)</span>
+        {warning}
+      </>
+    );
+    return inputPath ? (
+      <FileOpenButton
+        fileRef={fileRefFromPath(inputPath, metadata)}
+        className="file-link-inline"
+        stopPropagation
+      >
+        {label}
+      </FileOpenButton>
+    ) : (
       <button
         type="button"
         className="file-link-inline"
@@ -685,11 +568,7 @@ function ReadInteractiveSummary({
           openPdfInNewTab(pdfFile.base64);
         }}
       >
-        {fileName}
-        <span className="file-line-count-inline">(PDF)</span>
-        {showValidationWarning && validationErrors && (
-          <SchemaWarning toolName="Read" errors={validationErrors} />
-        )}
+        {label}
       </button>
     );
   }
@@ -697,27 +576,19 @@ function ReadInteractiveSummary({
   if (normalizedResult.type === "image") {
     const imageFile = normalizedResult.file as ImageFile;
     return (
-      <>
-        <button
-          type="button"
-          className="file-link-inline"
-          onClick={(e) => {
-            e.stopPropagation();
-            setShowModal(true);
-          }}
-        >
-          {fileName}
-          <span className="file-line-count-inline">(image)</span>
-          {showValidationWarning && validationErrors && (
-            <SchemaWarning toolName="Read" errors={validationErrors} />
-          )}
-        </button>
-        {showModal && (
-          <DetailPanel title={fileName} onClose={() => setShowModal(false)}>
-            <ImageFileResult file={imageFile} />
-          </DetailPanel>
-        )}
-      </>
+      <FileOpenButton
+        fileRef={fileRefFromPath(inputPath ?? "", metadata)}
+        snapshot={{
+          kind: "image",
+          src: `data:${imageFile.type};base64,${imageFile.base64}`,
+        }}
+        className="file-link-inline"
+        stopPropagation
+      >
+        {fileName}
+        <span className="file-line-count-inline">(image)</span>
+        {warning}
+      </FileOpenButton>
     );
   }
 
@@ -749,8 +620,7 @@ function TextReadInteractiveSummary({
   showValidationWarning: boolean;
   validationErrors: ZodError | null;
 }) {
-  const [showModal, setShowModal] = useState(false);
-  const modalTarget = useReadModalTarget(file);
+  const fileRef = useReadFileRef(file);
 
   if (isPtyHandoff) {
     return (
@@ -762,34 +632,18 @@ function TextReadInteractiveSummary({
   }
 
   return (
-    <>
-      <button
-        type="button"
-        className="file-link-inline"
-        onClick={(e) => {
-          e.stopPropagation();
-          setShowModal(true);
-        }}
-      >
-        {fileName}
-        <span className="file-line-count-inline">
-          {getLineCountLabel(file)}
-        </span>
-        {showValidationWarning && validationErrors && (
-          <SchemaWarning toolName="Read" errors={validationErrors} />
-        )}
-      </button>
-      {showModal && (
-        <ReadFileModal
-          target={modalTarget}
-          file={file}
-          highlightedHtml={result._highlightedContentHtml}
-          highlightedTruncated={result._highlightedTruncated}
-          renderedMarkdownHtml={result._renderedMarkdownHtml}
-          onClose={() => setShowModal(false)}
-        />
+    <FileOpenButton
+      fileRef={fileRef}
+      snapshot={textSnapshot(file, result)}
+      className="file-link-inline"
+      stopPropagation
+    >
+      {fileName}
+      <span className="file-line-count-inline">{getLineCountLabel(file)}</span>
+      {showValidationWarning && validationErrors && (
+        <SchemaWarning toolName="Read" errors={validationErrors} />
       )}
-    </>
+    </FileOpenButton>
   );
 }
 
@@ -801,6 +655,12 @@ export const readRenderer: ToolRenderer<unknown, unknown> = {
   },
 
   renderToolResult(result, isError, _context, input) {
+    const imagePath = isError
+      ? undefined
+      : getImagePlaceholderReadPath(result, input);
+    if (imagePath) {
+      return <ImagePathRead filePath={imagePath} inline={false} />;
+    }
     return (
       <ReadToolResult
         result={result as ReadResultWithAugment | string | undefined}
@@ -817,6 +677,7 @@ export const readRenderer: ToolRenderer<unknown, unknown> = {
   getResultSummary(result, isError, input?) {
     if (isError && input) return getFileName(getReadInputFilePath(input));
     if (isError) return "Error";
+    if (getImagePlaceholderReadPath(result, input)) return "Image";
     const r = normalizeReadResult(
       result as ReadResultWithAugment | string | undefined,
       input as Partial<ReadInput> | undefined,
@@ -832,6 +693,12 @@ export const readRenderer: ToolRenderer<unknown, unknown> = {
     const partialInput = (input ?? {}) as Partial<ReadInput>;
     if (!isError && !getReadInputFilePath(partialInput) && result === undefined)
       return null;
+    const imagePath = isError
+      ? undefined
+      : getImagePlaceholderReadPath(result, partialInput);
+    if (imagePath) {
+      return <ImagePathRead filePath={imagePath} inline />;
+    }
     return (
       <ReadInteractiveSummary
         input={partialInput}

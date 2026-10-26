@@ -1,157 +1,71 @@
-import { createReadStream } from "node:fs";
-import { type FileHandle, open, realpath, stat } from "node:fs/promises";
+import { type FileHandle, open } from "node:fs/promises";
+import {
+  getFileExtension,
+  getFileMimeType,
+  getMediaPreviewKind,
+} from "@yep-anywhere/shared";
 import { Hono } from "hono";
-import { stream } from "hono/streaming";
-import type { ProjectScanner } from "../projects/scanner.js";
-
-interface LocalImageDeps {
-  allowedPaths: string[];
-  scanner?: Pick<ProjectScanner, "listProjects">;
-}
-
-const MEDIA_EXTENSIONS: Record<string, string> = {
-  // Images
-  png: "image/png",
-  jpg: "image/jpeg",
-  jpeg: "image/jpeg",
-  gif: "image/gif",
-  webp: "image/webp",
-  bmp: "image/bmp",
-  tiff: "image/tiff",
-  tif: "image/tiff",
-  svg: "image/svg+xml",
-  // Video
-  mp4: "video/mp4",
-  webm: "video/webm",
-  mov: "video/quicktime",
-  avi: "video/x-msvideo",
-  mkv: "video/x-matroska",
-  ogv: "video/ogg",
-};
+import {
+  FilePreviewError,
+  type PreviewFile,
+  openPreviewFile,
+  rawFileResponse,
+} from "../file-preview/index.js";
 
 /**
- * Create routes for serving local images from allowed paths.
+ * Create routes for serving local images and videos.
  *
- * Security: Only serves files that:
- * 1. Resolve (after symlink resolution) under an allowed prefix or known local project
- * 2. Have a recognized image or video extension
- * 3. Are regular files (not directories, devices, etc.)
+ * Any absolute path the server can read is allowed (the same policy as
+ * `/api/fs/*`); access is gated by the normal API authentication. Kept for
+ * `.local-media-link` URLs in rendered markdown; byte streaming (including
+ * `Range` for video seeking) is shared with `/api/fs/raw`. The
+ * route only checks that the target is a regular file of a recognized media
+ * type, so it cannot be used to stream arbitrary text or binaries.
  */
-export function createLocalImageRoutes(deps: LocalImageDeps) {
+export function createLocalImageRoutes() {
   const routes = new Hono();
-
-  // Resolve allowed paths at startup so symlinks like /tmp -> /private/tmp work
-  let resolvedAllowedPaths: string[] | null = null;
-  async function getAllowedPaths(): Promise<string[]> {
-    if (!resolvedAllowedPaths) {
-      resolvedAllowedPaths = await Promise.all(
-        deps.allowedPaths
-          .filter((p) => p.trim().length > 0)
-          .map(async (p) => {
-            try {
-              return await realpath(p);
-            } catch {
-              return p;
-            }
-          }),
-      );
-    }
-    return resolvedAllowedPaths;
-  }
 
   routes.get("/", async (c) => {
     const filePath = c.req.query("path");
     if (!filePath) {
       return c.json({ error: "Missing path parameter" }, 400);
     }
-
-    // Must be an absolute path
     if (!filePath.startsWith("/")) {
       return c.json({ error: "Path must be absolute" }, 400);
     }
 
-    // Check file extension. Extensionless files (e.g. content-addressed
-    // blobs) are sniffed below instead.
-    const name = filePath.split("/").pop() ?? "";
-    const ext = name.includes(".")
-      ? (name.split(".").pop()?.toLowerCase() ?? "")
-      : "";
-    let contentType = ext ? MEDIA_EXTENSIONS[ext] : undefined;
+    // Extensionless files (e.g. content-addressed blobs) are sniffed below.
+    const ext = getFileExtension(filePath);
+    let contentType = getMediaPreviewKind(filePath)
+      ? getFileMimeType(filePath)
+      : undefined;
     if (ext && !contentType) {
       return c.json({ error: "Not a recognized media type" }, 400);
     }
 
-    // Resolve symlinks to get the real path
-    let resolvedPath: string;
+    let file: PreviewFile;
     try {
-      resolvedPath = await realpath(filePath);
-    } catch {
+      file = await openPreviewFile(filePath);
+    } catch (error) {
+      if (error instanceof FilePreviewError && error.status === 400) {
+        return c.json({ error: "Not a file" }, 404);
+      }
       return c.json({ error: "File not found" }, 404);
     }
 
-    // Check resolved path against resolved allowed prefixes
-    const allowed = await getAllowedPaths();
-    let isAllowed = allowed.some((prefix) =>
-      resolvedPath.startsWith(`${prefix}/`),
-    );
-    if (!isAllowed && deps.scanner) {
-      // Use the scanner's current snapshot so newly discovered projects work
-      // without a restart and removed projects do not stay authorized forever.
-      const projects = await deps.scanner.listProjects();
-      const projectPaths = await Promise.all(
-        projects
-          .filter(
-            (project) =>
-              !project.isRemoteProject && project.path.startsWith("/"),
-          )
-          .map(async (project) => {
-            try {
-              return await realpath(project.path);
-            } catch {
-              return null;
-            }
-          }),
-      );
-      isAllowed = projectPaths.some(
-        (prefix) => prefix !== null && resolvedPath.startsWith(`${prefix}/`),
-      );
-    }
-    if (!isAllowed) {
-      return c.json({ error: "Path not in allowed directories" }, 403);
-    }
-
-    try {
-      const stats = await stat(resolvedPath);
-      if (!stats.isFile()) {
-        return c.json({ error: "Not a file" }, 404);
-      }
-
-      // Sniff extensionless files — only serve them if the bytes really are a
-      // known image format, which is a stronger check than trusting a suffix.
+    // Only serve extensionless files whose bytes really are a known image.
+    if (!contentType) {
+      contentType = await sniffImageContentType(file.realPath);
       if (!contentType) {
-        contentType = await sniffImageContentType(resolvedPath);
-        if (!contentType) {
-          return c.json({ error: "Not a recognized media type" }, 400);
-        }
+        return c.json({ error: "Not a recognized media type" }, 400);
       }
-
-      c.header("Content-Type", contentType);
-      c.header("Content-Length", stats.size.toString());
-      c.header("Cache-Control", "private, no-store");
-
-      return stream(c, async (s) => {
-        const readable = createReadStream(resolvedPath);
-        for await (const chunk of readable) {
-          await s.write(chunk);
-        }
-      });
-    } catch (err) {
-      if ((err as NodeJS.ErrnoException).code === "ENOENT") {
-        return c.json({ error: "File not found" }, 404);
-      }
-      console.error("[LocalImage] Error serving file:", err);
-      return c.json({ error: "Internal error" }, 500);
     }
+
+    return rawFileResponse(file, {
+      mimeType: contentType,
+      cacheControl: "private, no-store",
+      range: c.req.header("range"),
+    });
   });
 
   return routes;

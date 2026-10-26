@@ -37,7 +37,7 @@ import type {
   RenderItem,
   ToolCallItem,
 } from "../types/renderItems";
-import { FileViewerModal } from "./FilePathLink";
+import { FilePreviewPanel } from "./FilePreviewPanel";
 import { ProviderBadge } from "./ProviderBadge";
 import { SessionFileDiffPanel } from "./SessionFileDiffPanel";
 import { SessionSavedFilePanel } from "./SessionSavedFilePanel";
@@ -1010,9 +1010,8 @@ function InspectorFilesTab({
           onOpenFile={() => setOpenFile({ path: openFile.path, mode: "file" })}
         />
       ) : openFile?.mode === "file" ? (
-        <FileViewerModal
-          projectId={projectId}
-          filePath={openFile.path}
+        <FilePreviewPanel
+          fileRef={{ path: openFile.path, projectId }}
           onClose={() => setOpenFile(null)}
         />
       ) : null}

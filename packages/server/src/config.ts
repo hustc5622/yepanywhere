@@ -20,10 +20,7 @@ import {
   DEFAULT_LLM_GATEWAY_API_BASE,
   defaultSubModuleForApiBase,
 } from "./llm-gateways/index.js";
-import {
-  getDefaultCodexHomeDir,
-  getDefaultCodexSessionsDir,
-} from "./projects/codex-scanner.js";
+import { getDefaultCodexSessionsDir } from "./projects/codex-scanner.js";
 
 /**
  * Get the data directory for yep-anywhere state files.
@@ -159,8 +156,6 @@ export interface Config {
   enabledProviders: string[];
   /** Whether voice input is enabled. Default: true */
   voiceInputEnabled: boolean;
-  /** Allowed directory prefixes for serving local images (e.g., ["/tmp"]). Empty = disabled. */
-  allowedImagePaths: string[];
 
   /** Whether cookie-based auth is disabled by env var (--auth-disable or AUTH_DISABLED=true). Used for recovery. */
   authDisabled: boolean;
@@ -295,17 +290,6 @@ export function loadConfig(): Config {
   const projectScanCacheTtlMs = Math.max(
     0,
     parseIntOrDefault(process.env.PROJECT_SCAN_CACHE_TTL_MS, 5000),
-  );
-  const managedUploadsDir = path.join(dataDir, "uploads");
-  const extraAllowedImagePaths =
-    process.env.ALLOWED_IMAGE_PATHS !== undefined
-      ? process.env.ALLOWED_IMAGE_PATHS.split(",")
-          .map((s) => s.trim())
-          .filter(Boolean)
-      : ["/tmp"];
-  const codexGeneratedImagesDir = path.join(
-    getDefaultCodexHomeDir(),
-    "generated_images",
   );
   const sessionTitleApiKey =
     process.env.SESSION_TITLE_LLM_API_KEY ?? process.env.LLM_API_KEY;
@@ -458,17 +442,6 @@ export function loadConfig(): Config {
       : [],
     // Voice input (default: true, set VOICE_INPUT=false to disable)
     voiceInputEnabled: process.env.VOICE_INPUT !== "false",
-    // Always allow yep-managed uploads. ALLOWED_IMAGE_PATHS adds external paths
-    // like /tmp; an empty value disables only those extras.
-    allowedImagePaths: Array.from(
-      new Set(
-        [
-          managedUploadsDir,
-          codexGeneratedImagesDir,
-          ...extraAllowedImagePaths,
-        ].filter((allowedPath) => allowedPath.trim().length > 0),
-      ),
-    ),
     // Auth disabled override (for recovery if user forgets password)
     authDisabled: process.env.AUTH_DISABLED === "true",
     authCookieSecret: process.env.AUTH_COOKIE_SECRET,

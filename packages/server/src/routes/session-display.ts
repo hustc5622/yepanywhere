@@ -13,6 +13,7 @@ import {
   SessionQuestionPageSchema,
   type SessionThinkingDetail,
   type SessionToolGroupDetailPage,
+  isMarkdownFilePath,
   isUrlProjectId,
   normalizeSessionFilePath,
 } from "@yep-anywhere/shared";
@@ -429,7 +430,7 @@ export function registerSessionDisplayRoutes(
             recordId,
             content,
             renderedMarkdownHtml:
-              content !== undefined && /\.(md|markdown)$/i.test(path)
+              content !== undefined && isMarkdownFilePath(path)
                 ? await renderMarkdownDocumentToHtml(content)
                 : undefined,
             binary: content === undefined,
@@ -456,7 +457,7 @@ export function registerSessionDisplayRoutes(
         const bytes = await store.readBlob(version.blob);
         const content = decodeSavedText(bytes);
         const renderedMarkdownHtml =
-          content !== undefined && /\.(md|markdown)$/i.test(path)
+          content !== undefined && isMarkdownFilePath(path)
             ? await renderMarkdownDocumentToHtml(content)
             : undefined;
         return c.json({
