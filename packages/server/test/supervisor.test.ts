@@ -684,7 +684,7 @@ describe("Supervisor", () => {
       },
     );
 
-    it("replaces a ZCode process and registers the native fork session id", async () => {
+    it("replaces a Pi process and registers the native fork session id", async () => {
       const starts: Array<{
         aborted: boolean;
         options: StartSessionOptions;
@@ -693,7 +693,7 @@ describe("Supervisor", () => {
         const start = { aborted: false, options };
         starts.push(start);
         const actualSessionId = options.resumeSessionAt
-          ? "ses_zcode_forked"
+          ? "ses_pi_forked"
           : (options.resumeSessionId ?? "ses_created");
 
         async function* iterator() {
@@ -716,8 +716,8 @@ describe("Supervisor", () => {
         };
       });
       const provider: AgentProvider = {
-        name: "zcode",
-        displayName: "ZCode",
+        name: "pi",
+        displayName: "Pi",
         supportsPermissionMode: true,
         supportsThinkingToggle: false,
         supportsSlashCommands: false,
@@ -746,26 +746,24 @@ describe("Supervisor", () => {
         "/tmp/test",
         { text: "edited" },
         "acceptEdits",
-        { resumeSessionAt: "msg_zcode_user" },
+        { resumeSessionAt: "msg_pi_user" },
       );
 
       expect(starts[0]?.aborted).toBe(true);
       expect((forked as { id: string }).id).not.toBe(
         (original as { id: string }).id,
       );
-      expect((forked as { sessionId: string }).sessionId).toBe(
-        "ses_zcode_forked",
-      );
+      expect((forked as { sessionId: string }).sessionId).toBe("ses_pi_forked");
       expect(providerSupervisor.getProcessForSession("ses_parent")).toBe(
         undefined,
       );
-      expect(
-        providerSupervisor.getProcessForSession("ses_zcode_forked")?.id,
-      ).toBe((forked as { id: string }).id);
+      expect(providerSupervisor.getProcessForSession("ses_pi_forked")?.id).toBe(
+        (forked as { id: string }).id,
+      );
       expect(starts[1]?.options).toEqual(
         expect.objectContaining({
           resumeSessionId: "ses_parent",
-          resumeSessionAt: "msg_zcode_user",
+          resumeSessionAt: "msg_pi_user",
           permissionMode: "acceptEdits",
         }),
       );

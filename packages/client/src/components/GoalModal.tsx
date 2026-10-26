@@ -26,9 +26,8 @@ const PROMPT_ACTIONS = [
  * app-server start an automatic continuation asynchronously; whether that
  * happened is determined by turn notifications, not the action response.
  *
- * Supported providers: ZCode (`session/goal` RPC) and Codex
- * (`thread/goal/*` native controls, formatted into the same `ProviderGoalState`
- * text summary).
+ * Supported providers: Codex (`thread/goal/*` native controls, formatted
+ * into a `ProviderGoalState` text summary).
  */
 export function GoalModal({ processId, onClose }: GoalModalProps) {
   const { t } = useI18n();

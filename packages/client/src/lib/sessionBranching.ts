@@ -105,13 +105,12 @@ export function supportsHistoricalMessageEditing(
     provider == null ||
     provider === "claude" ||
     provider === "codex" ||
-    provider === "pi" ||
-    provider === "zcode"
+    provider === "pi"
   );
 }
 
 /**
- * Pi and ZCode can only fork at an authoritative native message ID.
+ * Pi can only fork at an authoritative native message ID.
  * Their live echo temporarily carries a Yep UUID, so editing stays
  * unavailable until the persisted message replaces that echo. Other
  * supported providers retain their existing edit behavior.
@@ -121,10 +120,7 @@ export function canEditPersistedUserPrompt(
   source: "sdk" | "jsonl" | undefined,
 ): boolean {
   if (!supportsHistoricalMessageEditing(provider)) return false;
-  return (
-    (!usesNativeEditForkBoundary(provider) && provider !== "zcode") ||
-    source === "jsonl"
-  );
+  return !usesNativeEditForkBoundary(provider) || source === "jsonl";
 }
 
 export function resolveSessionEditSubmission(
@@ -142,7 +138,7 @@ export function resolveSessionEditSubmission(
       : { kind: "invalid-codex-boundary" };
   }
 
-  if (usesNativeEditForkBoundary(provider) || provider === "zcode") {
+  if (usesNativeEditForkBoundary(provider)) {
     return {
       kind: "edit-fork",
       // The native fork excludes this message and everything after it.

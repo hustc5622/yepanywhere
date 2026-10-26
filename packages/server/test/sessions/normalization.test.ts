@@ -15,6 +15,29 @@ import {
 } from "../../src/sessions/normalization.js";
 import type { LoadedSession } from "../../src/sessions/types.js";
 
+/** Minimal Pi session holding one user prompt (used by branch tests). */
+function piUserSession(
+  sessionId: string,
+  messageId: string,
+  timestamp: string,
+  text: string,
+): PiSessionContent {
+  const entries: PiSessionContent["entries"] = [
+    {
+      type: "message",
+      id: messageId,
+      parentId: null,
+      timestamp,
+      message: { role: "user", content: [{ type: "text", text }] },
+    },
+  ];
+  return {
+    header: { type: "session", id: sessionId, timestamp, cwd: "/tmp/project" },
+    entries,
+    activeEntries: entries,
+  };
+}
+
 describe("normalizeSession", () => {
   it("includes sibling tool_results for parallel Tasks with same parentUuid", () => {
     // This simulates 3 parallel Task tool_uses where each produces a tool_result
@@ -634,24 +657,24 @@ describe("normalizeSession", () => {
     });
   });
 
-  it("annotates ZCode user prompts with cross-session branch alternatives", () => {
+  it("annotates Pi user prompts with cross-session branch alternatives", () => {
     const createdAtMs = Date.UTC(2026, 7, 12, 12, 0, 0);
     const createdAtIso = new Date(createdAtMs).toISOString();
     const mockSession: LoadedSession = {
       summary: {
         id: "ses_parent",
         projectId: "test-project" as UrlProjectId,
-        title: "ZCode branch",
-        fullTitle: "ZCode branch",
+        title: "Pi branch",
+        fullTitle: "Pi branch",
         createdAt: createdAtIso,
         updatedAt: createdAtIso,
         messageCount: 2,
         status: { state: "idle" },
-        provider: "zcode",
+        provider: "pi",
       },
       branchState: {
         sessionId: "ses_parent",
-        provider: "zcode",
+        provider: "pi",
         activeBranchId: "u2_edit",
         selectedBranchId: "u2_edit",
         branches: [
@@ -667,7 +690,7 @@ describe("normalizeSession", () => {
             siblingCount: 2,
             isActive: false,
             createdAt: createdAtIso,
-            provider: "zcode",
+            provider: "pi",
           },
           {
             id: "u2_edit",
@@ -681,32 +704,14 @@ describe("normalizeSession", () => {
             siblingCount: 2,
             isActive: true,
             createdAt: new Date(createdAtMs + 400).toISOString(),
-            provider: "zcode",
+            provider: "pi",
           },
         ],
       },
       data: {
-        provider: "zcode",
-        session: {
-          sessionId: "ses_parent",
-          messages: [
-            {
-              id: "u2",
-              role: "user",
-              createdAt: createdAtMs,
-              parts: [
-                {
-                  id: "u2-p0",
-                  messageID: "u2",
-                  sessionID: "ses_parent",
-                  type: "text",
-                  text: "original",
-                },
-              ],
-            },
-          ],
-        },
-      } as UnifiedSession,
+        provider: "pi",
+        session: piUserSession("ses_parent", "u2", createdAtIso, "original"),
+      },
     };
 
     const normalized = normalizeSession(mockSession);
@@ -726,24 +731,24 @@ describe("normalizeSession", () => {
     });
   });
 
-  it("resolves a ZCode copied prompt to the canonical option by timestamp and text", () => {
+  it("resolves a Pi copied prompt to the canonical option by timestamp and text", () => {
     const createdAtMs = Date.UTC(2026, 7, 12, 12, 0, 0);
     const createdAtIso = new Date(createdAtMs).toISOString();
     const mockSession: LoadedSession = {
       summary: {
         id: "ses_child",
         projectId: "test-project" as UrlProjectId,
-        title: "ZCode branch",
-        fullTitle: "ZCode branch",
+        title: "Pi branch",
+        fullTitle: "Pi branch",
         createdAt: createdAtIso,
         updatedAt: createdAtIso,
         messageCount: 1,
         status: { state: "idle" },
-        provider: "zcode",
+        provider: "pi",
       },
       branchState: {
         sessionId: "ses_child",
-        provider: "zcode",
+        provider: "pi",
         activeBranchId: "u2_edit",
         selectedBranchId: "u2_edit",
         branches: [
@@ -759,7 +764,7 @@ describe("normalizeSession", () => {
             siblingCount: 2,
             isActive: false,
             createdAt: createdAtIso,
-            provider: "zcode",
+            provider: "pi",
           },
           {
             id: "u2_edit",
@@ -772,34 +777,19 @@ describe("normalizeSession", () => {
             siblingIndex: 2,
             siblingCount: 2,
             isActive: true,
-            provider: "zcode",
+            provider: "pi",
           },
         ],
       },
       data: {
-        provider: "zcode",
-        session: {
-          sessionId: "ses_child",
-          messages: [
-            // Copied original prompt with a fresh native id: id matching
-            // fails, the timestamp/text fallback resolves the canonical one.
-            {
-              id: "u2_copy",
-              role: "user",
-              createdAt: createdAtMs,
-              parts: [
-                {
-                  id: "u2_copy-p0",
-                  messageID: "u2_copy",
-                  sessionID: "ses_child",
-                  type: "text",
-                  text: "original",
-                },
-              ],
-            },
-          ],
-        },
-      } as UnifiedSession,
+        provider: "pi",
+        session: piUserSession(
+          "ses_child",
+          "u2_copy",
+          createdAtIso,
+          "original",
+        ),
+      },
     };
 
     const normalized = normalizeSession(mockSession);

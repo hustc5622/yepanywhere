@@ -195,10 +195,10 @@ describe("historical file operation evidence", () => {
         },
       },
     ];
-    const ctx = { ...context, provider: "zcode" };
+    const ctx = { ...context, provider: "pi" };
     await importStructuredFileHistory(store, ctx, messages);
     expect(
-      (await store.snapshot({ ...scope, provider: "zcode" })).operations,
+      (await store.snapshot({ ...scope, provider: "pi" })).operations,
     ).toEqual([]);
     const result: Message = {
       type: "user",
@@ -219,7 +219,7 @@ describe("historical file operation evidence", () => {
       },
     };
     await importStructuredFileHistory(store, ctx, [...messages, result]);
-    const saved = await store.snapshot({ ...scope, provider: "zcode" });
+    const saved = await store.snapshot({ ...scope, provider: "pi" });
     expect(
       (
         await projectFileOperations(

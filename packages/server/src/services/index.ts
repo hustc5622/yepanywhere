@@ -51,10 +51,3 @@ export {
   SessionTitleService,
   type SessionTitleServiceOptions,
 } from "./SessionTitleService.js";
-
-export {
-  ZCodeSessionChangeMonitor,
-  type ZCodeSessionChangeMonitorOptions,
-  type ZCodeSessionChangeScanner,
-  type ZCodeSessionChangeSource,
-} from "./ZCodeSessionChangeMonitor.js";

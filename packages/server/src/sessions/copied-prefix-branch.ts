@@ -1,27 +1,21 @@
 /**
- * Copied-prefix edit-fork branch view, shared by ZCode and Pi.
+ * Copied-prefix edit-fork branch view, shared by Pi and Codex.
  *
- * Providers such as ZCode copy messages into the child with
- * FRESH ids, while Pi copies entries into a new session file. Yep does not
- * persist the fork boundary for either provider, so the boundary is derived.
- *
- * Fork recap (ZCode CLI 0.16.1): editing user message M forks the source at
- * the message BEFORE M (message targets are inclusive). The child therefore
- * copies a text/time-identical prefix of the parent (up to and including the
- * fork target) with fresh ids, and Yep then sends the edited text as the
- * child's first genuinely new user message M'.
+ * Some providers implement "edit a previous prompt" by forking into a new
+ * session that copies the parent's leading messages (Pi copies entries into a
+ * new session file; Codex forks a thread). Yep does not persist the fork
+ * boundary for every provider, so the boundary is derived.
  *
  * Derivation (per child → parent edge):
- *   1. `prefixMessageCount` = the longest leading run of child messages whose
- *      text matches the parent's message at the same index (the copied
- *      prefix; order-preserving copy makes same-index comparison safe, and
- *      text-only matching tolerates timestamp drift).
- *   2. Boundary = the first USER message in the parent at index
+ *   1. `prefixMessageCount` = the longest leading run of child messages that
+ *      the provider-specific matcher identifies as copied from the parent's
+ *      message at the same index (default: same role and same text).
+ *   2. Boundary = the explicit `forkBoundaryMessageId` when supplied,
+ *      otherwise the first USER message in the parent at index
  *      >= prefixMessageCount — i.e. the original edited message M. M'
- *      inherits M's logical parentId/depth so M and M' render as siblings,
- *      at the native forkMessageId boundary. When no such user
- *      message exists the edge cannot be reproduced: a diagnostic is
- *      recorded and the edge is skipped.
+ *      inherits M's logical parentId/depth so M and M' render as siblings.
+ *      When no such user message exists the edge cannot be reproduced: a
+ *      diagnostic is recorded and the edge is skipped.
  *
  * Copied prefix entries never produce branch options. Their loaded copies
  * still resolve back to the canonical option by timestamp/text during
@@ -32,21 +26,39 @@ import type {
   ProviderName,
   SessionBranchOption,
   SessionBranchState,
-  ZCodeStoredMessage,
 } from "@yep-anywhere/shared";
 
-export interface ZCodeBranchFamilySession {
+/** One text-bearing part of a copied-prefix message. */
+export interface CopiedPrefixMessagePart {
   id: string;
-  /** Fork parent session id (native sqlite parent_id / Yep metadata union). */
+  messageID: string;
+  sessionID: string;
+  type: string;
+  [key: string]: unknown;
+}
+
+/** Minimal provider-neutral message used to derive copied-prefix forks. */
+export interface CopiedPrefixMessage {
+  id: string;
+  /** `"user"` or `"assistant"`. */
+  role: string;
+  /** Creation timestamp in ms epoch. */
+  createdAt?: number;
+  parts: CopiedPrefixMessagePart[];
+}
+
+export interface CopiedPrefixFamilySession {
+  id: string;
+  /** Fork parent session id (native lineage / Yep metadata union). */
   parentId?: string | null;
   /** Exact source user message replaced by this fork, when provider supplies it. */
   forkBoundaryMessageId?: string;
-  /** ISO timestamp used to order siblings (session.time_created). */
+  /** ISO timestamp used to order siblings. */
   createdAt?: string;
-  messages: ZCodeStoredMessage[];
+  messages: CopiedPrefixMessage[];
 }
 
-export interface ZCodeBranchDiagnostic {
+export interface CopiedPrefixBranchDiagnostic {
   code:
     | "missing_parent"
     | "missing_boundary_message"
@@ -56,24 +68,24 @@ export interface ZCodeBranchDiagnostic {
   parentSessionId?: string;
 }
 
-export interface ZCodeBranchView {
+export interface CopiedPrefixBranchView {
   branchState?: SessionBranchState;
-  diagnostics: ZCodeBranchDiagnostic[];
+  diagnostics: CopiedPrefixBranchDiagnostic[];
 }
 
 export interface CopiedPrefixBranchViewOptions {
   /** Provider identity written into the provider-neutral branch state. */
-  provider?: ProviderName;
+  provider: ProviderName;
   /** Prefix for the synthetic root parent of each family root session. */
   sessionRootPrefix?: string;
   /**
    * Provider-specific proof that one leading child row is copied history.
-   * ZCode/Pi use same-position text; Codex can use its retained native ids so
+   * Pi uses same-position text (the default); Codex can use its retained native ids so
    * an edit that keeps the same prompt text is not mistaken for copied input.
    */
   isCopiedMessage?: (
-    child: ZCodeStoredMessage,
-    parent: ZCodeStoredMessage,
+    child: CopiedPrefixMessage,
+    parent: CopiedPrefixMessage,
   ) => boolean;
 }
 
@@ -86,14 +98,14 @@ interface ValidForkRelation {
   boundaryMessageId: string;
 }
 
-function messageText(entry: ZCodeStoredMessage): string {
+function messageText(entry: CopiedPrefixMessage): string {
   return entry.parts
     .filter((part) => part?.type === "text" && typeof part.text === "string")
     .map((part) => String(part.text ?? ""))
     .join("");
 }
 
-function messageCreatedAt(entry: ZCodeStoredMessage): string | undefined {
+function messageCreatedAt(entry: CopiedPrefixMessage): string | undefined {
   return typeof entry.createdAt === "number" && Number.isFinite(entry.createdAt)
     ? new Date(entry.createdAt).toISOString()
     : undefined;
@@ -109,14 +121,13 @@ function branchTitle(prompt: string): string {
 }
 
 /**
- * Longest leading run of child messages cloned from the parent. The ZCode
- * fork copies prefix rows in order with identical text, so a strict
- * same-index comparison is both sufficient and immune to repeated-text
- * ambiguities later in the conversation.
+ * Longest leading run of child messages cloned from the parent. Forks copy
+ * prefix rows in order, so a strict same-index comparison is both sufficient
+ * and immune to repeated-text ambiguities later in the conversation.
  */
 function copiedPrefixLength(
-  child: ZCodeStoredMessage[],
-  parent: ZCodeStoredMessage[],
+  child: CopiedPrefixMessage[],
+  parent: CopiedPrefixMessage[],
   isCopiedMessage: NonNullable<
     CopiedPrefixBranchViewOptions["isCopiedMessage"]
   > = defaultCopiedMessageMatch,
@@ -126,8 +137,8 @@ function copiedPrefixLength(
     length < child.length &&
     length < parent.length &&
     isCopiedMessage(
-      child[length] as ZCodeStoredMessage,
-      parent[length] as ZCodeStoredMessage,
+      child[length] as CopiedPrefixMessage,
+      parent[length] as CopiedPrefixMessage,
     )
   ) {
     length += 1;
@@ -136,8 +147,8 @@ function copiedPrefixLength(
 }
 
 function defaultCopiedMessageMatch(
-  child: ZCodeStoredMessage,
-  parent: ZCodeStoredMessage,
+  child: CopiedPrefixMessage,
+  parent: CopiedPrefixMessage,
 ): boolean {
   return (
     child.role === parent.role && messageText(child) === messageText(parent)
@@ -146,10 +157,10 @@ function defaultCopiedMessageMatch(
 
 function orderFamilySessions(
   rootSessionId: string,
-  sessionsById: Map<string, ZCodeBranchFamilySession>,
+  sessionsById: Map<string, CopiedPrefixFamilySession>,
   relations: Map<string, ValidForkRelation>,
-): ZCodeBranchFamilySession[] {
-  const childrenByParent = new Map<string, ZCodeBranchFamilySession[]>();
+): CopiedPrefixFamilySession[] {
+  const childrenByParent = new Map<string, CopiedPrefixFamilySession[]>();
   for (const relation of relations.values()) {
     const child = sessionsById.get(relation.childSessionId);
     if (!child) continue;
@@ -163,7 +174,7 @@ function orderFamilySessions(
     );
   }
 
-  const ordered: ZCodeBranchFamilySession[] = [];
+  const ordered: CopiedPrefixFamilySession[] = [];
   const visited = new Set<string>();
   const queue = [rootSessionId];
   while (queue.length > 0) {
@@ -181,21 +192,21 @@ function orderFamilySessions(
 }
 
 /**
- * Build a provider-agnostic branch state for a ZCode edit-fork family.
+ * Build a provider-agnostic branch state for a copied-prefix edit-fork family.
  * `familySessions` must already contain every member of the family (root to
- * leaves); edges come from each session's `parentId` (.zcode sqlite
- * parent_id and/or Yep's forkParentSessionId metadata, unioned upstream).
+ * leaves); edges come from each session's `parentId` (native lineage and/or
+ * Yep's forkParentSessionId metadata, unioned upstream).
  */
 export function buildCopiedPrefixForkBranchView(
-  familySessions: ZCodeBranchFamilySession[],
+  familySessions: CopiedPrefixFamilySession[],
   currentSessionId: string,
-  selectedBranchId?: string,
-  options: CopiedPrefixBranchViewOptions = {},
-): ZCodeBranchView {
-  const provider = options.provider ?? "zcode";
+  selectedBranchId: string | undefined,
+  options: CopiedPrefixBranchViewOptions,
+): CopiedPrefixBranchView {
+  const provider = options.provider;
   const sessionRootPrefix =
     options.sessionRootPrefix ?? `${provider}-session-root`;
-  const diagnostics: ZCodeBranchDiagnostic[] = [];
+  const diagnostics: CopiedPrefixBranchDiagnostic[] = [];
   const sessionsById = new Map(
     familySessions.map((session) => [session.id, session]),
   );
@@ -294,8 +305,8 @@ export function buildCopiedPrefixForkBranchView(
       const id = entry.id;
       userDepth += 1;
 
-      // ZCode forks clone every message before the edited boundary with
-      // fresh ids. Those rows are aliases of an ancestor's logical prompts,
+      // Copied-prefix forks clone every message before the edited boundary
+      // (often with fresh ids). Those rows are aliases of an ancestor's logical prompts,
       // not new branch options. Keeping their depth contribution preserves
       // the depth of the first genuinely new prompt in this session; loaded
       // copied prompts resolve back to the canonical option by timestamp/text
@@ -393,17 +404,4 @@ export function buildCopiedPrefixForkBranchView(
       branches,
     },
   };
-}
-
-/** ZCode-flavoured compatibility wrapper around the shared branch builder. */
-export function buildZCodeBranchView(
-  familySessions: ZCodeBranchFamilySession[],
-  currentSessionId: string,
-  selectedBranchId?: string,
-): ZCodeBranchView {
-  return buildCopiedPrefixForkBranchView(
-    familySessions,
-    currentSessionId,
-    selectedBranchId,
-  );
 }

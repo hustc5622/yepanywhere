@@ -253,7 +253,7 @@ export function createProcessesRoutes(deps: ProcessesDeps): Hono {
   });
 
   // POST /api/processes/:processId/compact - Trigger a provider-native
-  // context compaction (Pi compact / ZCode session/compact).
+  // context compaction (Pi compact).
   routes.post("/:processId/compact", async (c) => {
     const processId = c.req.param("processId");
 
@@ -281,7 +281,7 @@ export function createProcessesRoutes(deps: ProcessesDeps): Hono {
 
   // POST /api/processes/:processId/reasoning-effort - Change the
   // provider-native reasoning effort mid-session (Pi set_thinking_level /
-  // ZCode session/setThoughtLevel). Body: { effort: string }
+  // MiniMax Code). Body: { effort: string }
   routes.post("/:processId/reasoning-effort", async (c) => {
     const processId = c.req.param("processId");
 
@@ -321,8 +321,8 @@ export function createProcessesRoutes(deps: ProcessesDeps): Hono {
     }
   });
 
-  // POST /api/processes/:processId/goal - Goal lifecycle actions (ZCode
-  // session/goal and Codex thread/goal native controls). Body: { action:
+  // POST /api/processes/:processId/goal - Goal lifecycle actions (Codex
+  // thread/goal native controls). Body: { action:
   // "show"|"set"|"replace"|"pause"|"resume"|"clear", objective?: string }.
   // set/replace require objective.
   routes.post("/:processId/goal", async (c) => {

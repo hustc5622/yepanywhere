@@ -275,7 +275,7 @@ describe("Processes Routes", () => {
     const compact = vi.fn(async () => ({ success: true }));
     const routes = createProcessesRoutes({
       runtimeController: {
-        getProcess: vi.fn(async () => ({ provider: "zcode" })),
+        getProcess: vi.fn(async () => ({ provider: "pi" })),
         compact,
       } as unknown as RuntimeController,
       supervisor: {} as Supervisor,
@@ -318,7 +318,7 @@ describe("Processes Routes", () => {
     const setReasoningEffort = vi.fn(async () => ({ success: true }));
     const routes = createProcessesRoutes({
       runtimeController: {
-        getProcess: vi.fn(async () => ({ provider: "zcode" })),
+        getProcess: vi.fn(async () => ({ provider: "pi" })),
         setReasoningEffort,
       } as unknown as RuntimeController,
       supervisor: {} as Supervisor,
@@ -343,7 +343,7 @@ describe("Processes Routes", () => {
   it("validates the reasoning-effort body", async () => {
     const routes = createProcessesRoutes({
       runtimeController: {
-        getProcess: vi.fn(async () => ({ provider: "zcode" })),
+        getProcess: vi.fn(async () => ({ provider: "pi" })),
       } as unknown as RuntimeController,
       supervisor: {} as Supervisor,
       scanner: {} as ProjectScanner,
@@ -362,7 +362,7 @@ describe("Processes Routes", () => {
   it("surfaces provider failures for unsupported effort levels", async () => {
     const routes = createProcessesRoutes({
       runtimeController: {
-        getProcess: vi.fn(async () => ({ provider: "zcode" })),
+        getProcess: vi.fn(async () => ({ provider: "pi" })),
         setReasoningEffort: vi.fn(async () => {
           throw new Error(
             'Thought level "max" is not supported by the current model',
@@ -393,7 +393,7 @@ describe("Processes Routes", () => {
     }));
     const routes = createProcessesRoutes({
       runtimeController: {
-        getProcess: vi.fn(async () => ({ provider: "zcode" })),
+        getProcess: vi.fn(async () => ({ provider: "pi" })),
         getGoal,
       } as unknown as RuntimeController,
       supervisor: {} as Supervisor,
@@ -422,7 +422,7 @@ describe("Processes Routes", () => {
     }));
     const routes = createProcessesRoutes({
       runtimeController: {
-        getProcess: vi.fn(async () => ({ provider: "zcode" })),
+        getProcess: vi.fn(async () => ({ provider: "pi" })),
         goalAction,
       } as unknown as RuntimeController,
       supervisor: {} as Supervisor,
@@ -451,7 +451,7 @@ describe("Processes Routes", () => {
   it("validates the goal action and objective", async () => {
     const routes = createProcessesRoutes({
       runtimeController: {
-        getProcess: vi.fn(async () => ({ provider: "zcode" })),
+        getProcess: vi.fn(async () => ({ provider: "pi" })),
       } as unknown as RuntimeController,
       supervisor: {} as Supervisor,
       scanner: {} as ProjectScanner,
@@ -511,7 +511,7 @@ describe("Processes Routes", () => {
   it("surfaces provider goal failures as 502", async () => {
     const routes = createProcessesRoutes({
       runtimeController: {
-        getProcess: vi.fn(async () => ({ provider: "zcode" })),
+        getProcess: vi.fn(async () => ({ provider: "pi" })),
         goalAction: vi.fn(async () => {
           throw new Error("session unavailable");
         }),

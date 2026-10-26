@@ -87,7 +87,7 @@ sequenceDiagram
 
 **异常分支已核查**：重复回答/旧版本返回 409；缺必答题返回 400；有身份的 provider 拒绝可返回 502。broker 重启恢复会将未终结操作 fail closed，已 claim 的请求不盲目重发；未 claim 请求可被重新观察并注册。推送失败清理本次去重状态，使同 request 可重试，旧异步结果不应覆盖新请求。
 
-**数据与权限**：审批写 `interactions/operations.json`，权限可能另写 metadata；通知订阅与通知状态另存。Web cookie/desktop token 和飞书账号/用户授权是不同边界；broker 防竞争不替代身份验证。ZCode hook 审批是另一个 bridge API，本流程没有证明它与中央 broker 完全同构。
+**数据与权限**：审批写 `interactions/operations.json`，权限可能另写 metadata；通知订阅与通知状态另存。Web cookie/desktop token 和飞书账号/用户授权是不同边界；broker 防竞争不替代身份验证。
 
 **源码证据**：[packages/server/src/interactions/SessionInteractionService.ts](../../packages/server/src/interactions/SessionInteractionService.ts) `respondToInput/selectPendingInputOwner/registerPendingInteraction`；[InteractionBroker.ts](../../packages/server/src/interactions/InteractionBroker.ts) `initialize/resolve`；[push/PushNotifier.ts](../../packages/server/src/push/PushNotifier.ts) `handleProcessStateChange/sendPendingInput`；[packages/client/src/api/client.ts](../../packages/client/src/api/client.ts) `respondToInput`；[packages/client/public/sw.js](../../packages/client/public/sw.js) `notificationclick` 及审批请求；[channels/feishu/channel-runtime.ts](../../packages/server/src/channels/feishu/channel-runtime.ts) `doStart`。
 

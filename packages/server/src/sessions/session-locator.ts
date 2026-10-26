@@ -26,7 +26,6 @@ import {
 } from "../projects/paths.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import { isRetiredProviderName } from "../sdk/providers/policy.js";
-import type { ZCodeSessionReader } from "../sessions/zcode-reader.js";
 import type { Project } from "../supervisor/types.js";
 import type { CodexSessionReader } from "./codex-reader.js";
 import { getCodexSessionManifest } from "./codex-session-manifest.js";
@@ -50,10 +49,8 @@ export interface SessionLocatorDeps {
   geminiScanner?: GeminiSessionScanner;
   geminiSessionsDir?: string;
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
-  zcodeDbPath?: string;
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
-  zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   kimiSessionsDir?: string;
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
   codexBridgeService?: BridgeController;

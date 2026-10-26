@@ -11,7 +11,6 @@ const PROVIDER_COLORS: Record<LiveProviderName, string> = {
   "gemini-acp": "var(--provider-gemini)", // Google blue (same as gemini)
   pi: "var(--provider-pi)", // Pi cyan
   kimi: "var(--provider-kimi, #1783ff)", // Kimi KMBlue
-  zcode: "var(--provider-zcode)", // ZCode
   cursor: "var(--provider-cursor)",
   mcode: "var(--provider-mcode)",
   dsh: "var(--provider-dsh)",
@@ -30,7 +29,6 @@ const PROVIDER_LABELS: Record<LiveProviderName, string> = {
   "gemini-acp": "Gemini ACP",
   pi: "Pi",
   kimi: "Kimi",
-  zcode: "ZCode",
   cursor: "Cursor",
   mcode: "MiniMax",
   dsh: "dsh",

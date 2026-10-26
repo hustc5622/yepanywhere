@@ -6,8 +6,7 @@ interface AsyncQueueWaiter<T> {
 }
 
 /**
- * In-process notification buffer shared by the Codex and ZCode app-server
- * clients. Closing rejects waiters and drops anything already buffered.
+ * In-process notification buffer used by the Codex app-server client. Closing rejects waiters and drops anything already buffered.
  * A later push is ignored. Aborting a shift rejects only that waiter.
  */
 export class AsyncQueue<T> {

@@ -3,7 +3,7 @@
 > 2026-09-21 开发状态更新：Codex／Pi 生产执行入口已移除本页描述的目录快照采集接线。旧记录仍以“旧版工作区观测”只读展示；新记录走工具操作账本。以下采集实现保留为旧机制说明和兼容测试，不代表新执行仍会扫描目录。详见[工具驱动开发计划](./2026-09-21-session-tool-file-changes-development-plan.md)及[逐步验收记录](./2026-09-21-session-tool-file-changes-acceptance.md)。
 
 共用模块已接入本机 Codex（直连及 bridge）和 Yep 管理的 Pi 执行生命周期。
-只采集新执行窗口，不回填历史会话；Codex／Pi 的文件 API 和前端已读取新记录。ZCode、Kimi 不受影响。
+只采集新执行窗口，不回填历史会话；Codex／Pi 的文件 API 和前端已读取新记录。Kimi 不受影响。
 
 ## 接口与存储
 

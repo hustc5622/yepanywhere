@@ -1,24 +1,38 @@
-import type { ZCodeStoredMessage } from "@yep-anywhere/shared";
 /**
- * buildZCodeBranchView unit tests (pure function, synthetic message lists).
+ * buildCopiedPrefixForkBranchView unit tests (pure function, synthetic
+ * message lists).
  *
- * Covers the zcode-specific boundary derivation: the fork's copied prefix
+ * Covers the copied-prefix boundary derivation: the fork's copied prefix
  * (fresh ids, identical text) never produces branch options, and the edited
  * original prompt in the parent is derived as the first user message after
  * the matched prefix so the replacement prompt renders as its sibling.
  */
 import { describe, expect, it } from "vitest";
 import {
-  type ZCodeBranchFamilySession,
-  buildZCodeBranchView,
-} from "../../src/sessions/zcode-branch.js";
+  type CopiedPrefixFamilySession,
+  type CopiedPrefixMessage,
+  buildCopiedPrefixForkBranchView,
+} from "../../src/sessions/copied-prefix-branch.js";
+
+function buildView(
+  sessions: CopiedPrefixFamilySession[],
+  currentSessionId: string,
+  selectedBranchId?: string,
+) {
+  return buildCopiedPrefixForkBranchView(
+    sessions,
+    currentSessionId,
+    selectedBranchId,
+    { provider: "pi", sessionRootPrefix: "pi-session-root" },
+  );
+}
 
 function msg(
   id: string,
   role: "user" | "assistant",
   text: string,
   createdAt?: number,
-): ZCodeStoredMessage {
+): CopiedPrefixMessage {
   return {
     id,
     role,
@@ -30,12 +44,12 @@ function msg(
 }
 
 function family(
-  ...sessions: ZCodeBranchFamilySession[]
-): ZCodeBranchFamilySession[] {
+  ...sessions: CopiedPrefixFamilySession[]
+): CopiedPrefixFamilySession[] {
   return sessions;
 }
 
-describe("buildZCodeBranchView", () => {
+describe("buildCopiedPrefixForkBranchView", () => {
   it("renders the edited prompt as a sibling of the original boundary", () => {
     const T = Date.UTC(2026, 7, 12, 12, 0, 0);
     const sessions = family(
@@ -64,11 +78,11 @@ describe("buildZCodeBranchView", () => {
       },
     );
 
-    const view = buildZCodeBranchView(sessions, "child");
+    const view = buildView(sessions, "child");
     expect(view.diagnostics).toEqual([]);
     const state = view.branchState;
     expect(state).toBeDefined();
-    expect(state?.provider).toBe("zcode");
+    expect(state?.provider).toBe("pi");
     expect(state?.sessionId).toBe("child");
 
     const byId = new Map(state?.branches.map((b) => [b.id, b]));
@@ -79,7 +93,7 @@ describe("buildZCodeBranchView", () => {
     // Root options: u1 → u2 → u3 chain.
     expect(byId.get("u1")).toMatchObject({
       sessionId: "root",
-      parentId: "zcode-session-root:root",
+      parentId: "pi-session-root:root",
       depth: 1,
       siblingCount: 1,
     });
@@ -141,7 +155,7 @@ describe("buildZCodeBranchView", () => {
       },
     );
 
-    const view = buildZCodeBranchView(sessions, "grandchild");
+    const view = buildView(sessions, "grandchild");
     expect(view.diagnostics).toEqual([]);
     const byId = new Map(view.branchState?.branches.map((b) => [b.id, b]));
     // Three siblings (v1 / v2 / v3) all under u1's logical parent slot.
@@ -185,7 +199,7 @@ describe("buildZCodeBranchView", () => {
         ],
       },
     );
-    const view = buildZCodeBranchView(sessions, "child");
+    const view = buildView(sessions, "child");
     const branchIds = view.branchState?.branches.map((b) => b.id);
     expect(branchIds).toEqual(["u1", "u2", "u2c"]);
     // The current session contributes exactly one new option, and it is active.
@@ -201,7 +215,7 @@ describe("buildZCodeBranchView", () => {
       { id: "a", parentId: "b", messages: [msg("u1", "user", "xa", 1)] },
       { id: "b", parentId: "a", messages: [msg("u2", "user", "xb", 2)] },
     );
-    const view = buildZCodeBranchView(sessions, "a");
+    const view = buildView(sessions, "a");
     expect(view.diagnostics).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ code: "lineage_cycle" }),
@@ -234,7 +248,7 @@ describe("buildZCodeBranchView", () => {
         ],
       },
     );
-    const view = buildZCodeBranchView(sessions, "child");
+    const view = buildView(sessions, "child");
     expect(view.branchState).toBeUndefined();
     expect(view.diagnostics).toEqual(
       expect.arrayContaining([
@@ -253,7 +267,7 @@ describe("buildZCodeBranchView", () => {
       parentId: "gone",
       messages: [msg("u1", "user", "x", 1)],
     });
-    const view = buildZCodeBranchView(sessions, "orphan");
+    const view = buildView(sessions, "orphan");
     expect(view.branchState).toBeUndefined();
     expect(view.diagnostics).toEqual([
       expect.objectContaining({
@@ -288,7 +302,7 @@ describe("buildZCodeBranchView", () => {
         messages: [msg("u2c", "user", "edited too", T + 6)],
       },
     );
-    const view = buildZCodeBranchView(sessions, "child");
+    const view = buildView(sessions, "child");
     expect(view.diagnostics).toEqual(
       expect.arrayContaining([
         expect.objectContaining({ code: "duplicate_message_id" }),
@@ -312,15 +326,15 @@ describe("buildZCodeBranchView", () => {
         ],
       },
     );
-    const view = buildZCodeBranchView(sessions, "child", "nonexistent");
+    const view = buildView(sessions, "child", "nonexistent");
     expect(view.branchState?.selectedBranchId).toBe("u3c");
     // A valid selection is honoured.
-    const selected = buildZCodeBranchView(sessions, "child", "u1");
+    const selected = buildView(sessions, "child", "u1");
     expect(selected.branchState?.selectedBranchId).toBe("u1");
   });
 
   it("returns no branch state for a singleton family", () => {
-    const view = buildZCodeBranchView(
+    const view = buildView(
       [{ id: "solo", messages: [msg("u1", "user", "hi", 1)] }],
       "solo",
     );

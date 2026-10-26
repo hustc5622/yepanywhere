@@ -1418,7 +1418,7 @@ describe("SessionIndexService full-validation throttling", () => {
     testDir = join(tmpdir(), `index-throttle-${randomUUID()}`);
     dataDir = join(testDir, "indexes");
     projectsDir = join(testDir, "projects");
-    sessionDir = join(testDir, "zcode-sessions");
+    sessionDir = join(testDir, "mcode-sessions");
     await mkdir(dataDir, { recursive: true });
     await mkdir(sessionDir, { recursive: true });
     projectId = toUrlProjectId("/test/project");
@@ -1435,7 +1435,7 @@ describe("SessionIndexService full-validation throttling", () => {
   function countingReader(scope: string, onList?: () => Promise<void>) {
     let listCalls = 0;
     const reader: ISessionReader = {
-      getIndexScopeKey: (dir) => `zcode::${dir}::${scope}`,
+      getIndexScopeKey: (dir) => `mcode::${dir}::${scope}`,
       listSessionFiles: async (dir) => {
         listCalls += 1;
         await onList?.();
@@ -1455,7 +1455,7 @@ describe("SessionIndexService full-validation throttling", () => {
         updatedAt: "2026-08-17T00:00:00.000Z",
         messageCount: 1,
         ownership: { owner: "none" },
-        provider: "zcode",
+        provider: "mcode",
       }),
       getAgentMappings: async () => [],
       getAgentSession: async () => null,
@@ -1468,10 +1468,10 @@ describe("SessionIndexService full-validation throttling", () => {
     };
   }
 
-  function emitZCodeChange(bus: EventBus): void {
+  function emitMcodeChange(bus: EventBus): void {
     bus.emit({
       type: "file-change",
-      provider: "zcode",
+      provider: "mcode",
       path: join(sessionDir, "session-1.jsonl"),
       relativePath: "session-1.jsonl",
       changeType: "modify",
@@ -1501,7 +1501,7 @@ describe("SessionIndexService full-validation throttling", () => {
 
     // A watcher storm: every event marks the scope dirty.
     for (let i = 0; i < 20; i++) {
-      emitZCodeChange(eventBus);
+      emitMcodeChange(eventBus);
       await service.getSessionsWithCache(sessionDir, projectId, reader);
     }
 
@@ -1525,7 +1525,7 @@ describe("SessionIndexService full-validation throttling", () => {
     await service.getSessionsWithCache(sessionDir, projectId, reader);
     const primed = probe.listCalls();
 
-    emitZCodeChange(eventBus);
+    emitMcodeChange(eventBus);
     await new Promise((resolve) => setTimeout(resolve, 40));
     await service.getSessionsWithCache(sessionDir, projectId, reader);
 
@@ -1549,7 +1549,7 @@ describe("SessionIndexService full-validation throttling", () => {
     await service.getSessionsWithCache(sessionDir, projectId, reader);
     const primed = probe.listCalls();
 
-    emitZCodeChange(eventBus);
+    emitMcodeChange(eventBus);
     await service.getSessionsWithCache(sessionDir, projectId, reader);
 
     expect(probe.listCalls()).toBeGreaterThan(primed);
@@ -1621,7 +1621,7 @@ describe("SessionIndexService full-validation accounting", () => {
 
   function slowReader(scope: string, workMs: number): ISessionReader {
     return {
-      getIndexScopeKey: (dir) => `zcode::${dir}::${scope}`,
+      getIndexScopeKey: (dir) => `mcode::${dir}::${scope}`,
       listSessionFiles: async (dir) => {
         await new Promise((resolve) => setTimeout(resolve, workMs));
         return [
@@ -1640,7 +1640,7 @@ describe("SessionIndexService full-validation accounting", () => {
         updatedAt: "2026-08-17T00:00:00.000Z",
         messageCount: 1,
         ownership: { owner: "none" },
-        provider: "zcode",
+        provider: "mcode",
       }),
       getAgentMappings: async () => [],
       getAgentSession: async () => null,
@@ -1732,7 +1732,7 @@ describe("SessionIndexService full-validation admission", () => {
 
   function reader(scope: string, workMs: number): ISessionReader {
     return {
-      getIndexScopeKey: (dir) => `zcode::${dir}::${scope}`,
+      getIndexScopeKey: (dir) => `mcode::${dir}::${scope}`,
       listSessionFiles: async (dir) => {
         if (workMs > 0) {
           await new Promise((resolve) => setTimeout(resolve, workMs));
@@ -1753,7 +1753,7 @@ describe("SessionIndexService full-validation admission", () => {
         updatedAt: "2026-08-17T00:00:00.000Z",
         messageCount: 1,
         ownership: { owner: "none" },
-        provider: "zcode",
+        provider: "mcode",
       }),
       getAgentMappings: async () => [],
       getAgentSession: async () => null,

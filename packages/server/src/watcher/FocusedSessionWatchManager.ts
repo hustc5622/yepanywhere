@@ -2,7 +2,6 @@ import * as fs from "node:fs";
 import { stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { UrlProjectId } from "@yep-anywhere/shared";
-import type { ZCodeSessionInfo } from "../projects/zcode-scanner.js";
 import { CURSOR_ACP_SESSIONS_DIR } from "../sessions/cursor-reader.js";
 import { findDshSessionRecord } from "../sessions/dsh-store.js";
 import { findMcodeSessionRecord } from "../sessions/mcode-store.js";
@@ -15,7 +14,6 @@ type WatchProvider =
   | "gemini"
   | "pi"
   | "kimi"
-  | "zcode"
   | "cursor"
   | "mcode"
   | "dsh";
@@ -48,8 +46,6 @@ interface SessionWatchTarget {
   provider: WatchProvider | null;
   knownMtimeMs: number | null;
   knownSize: number | null;
-  /** Provider-specific row version for shared SQLite databases. */
-  knownSessionMtime: number | null;
   watcher: fs.FSWatcher | null;
   pollTimer: NodeJS.Timeout | null;
   debounceTimer: NodeJS.Timeout | null;
@@ -88,9 +84,6 @@ export interface FocusedSessionWatchManagerOptions {
   piScanner?: {
     getSessionsForProject(projectPath: string): Promise<PiSessionInfo[]>;
   };
-  zcodeScanner?: {
-    getSessionsForProject(projectPath: string): Promise<ZCodeSessionInfo[]>;
-  };
   pollMs?: number;
   debounceMs?: number;
 }
@@ -98,11 +91,6 @@ export interface FocusedSessionWatchManagerOptions {
 interface ResolvedSessionFile {
   filePath: string;
   provider: WatchProvider;
-  /**
-   * Some providers share one SQLite file. The per-row time_updated value
-   * lets us avoid emitting a change for every other session's write.
-   */
-  sessionMtime?: number;
 }
 
 /**
@@ -118,7 +106,6 @@ export class FocusedSessionWatchManager {
   private readonly codexScanner: FocusedSessionWatchManagerOptions["codexScanner"];
   private readonly geminiScanner: FocusedSessionWatchManagerOptions["geminiScanner"];
   private readonly piScanner: FocusedSessionWatchManagerOptions["piScanner"];
-  private readonly zcodeScanner: FocusedSessionWatchManagerOptions["zcodeScanner"];
   private readonly pollMs: number;
   private readonly debounceMs: number;
   private readonly targets = new Map<string, SessionWatchTarget>();
@@ -129,7 +116,6 @@ export class FocusedSessionWatchManager {
     this.codexScanner = options.codexScanner;
     this.geminiScanner = options.geminiScanner;
     this.piScanner = options.piScanner;
-    this.zcodeScanner = options.zcodeScanner;
     this.pollMs = Math.max(250, options.pollMs ?? 1500);
     this.debounceMs = Math.max(50, options.debounceMs ?? 200);
   }
@@ -188,7 +174,6 @@ export class FocusedSessionWatchManager {
       provider: null,
       knownMtimeMs: null,
       knownSize: null,
-      knownSessionMtime: null,
       watcher: null,
       pollTimer: null,
       debounceTimer: null,
@@ -247,7 +232,6 @@ export class FocusedSessionWatchManager {
     target.filePath = resolved.filePath;
     target.fileName = basename(resolved.filePath);
     target.provider = resolved.provider;
-    target.knownSessionMtime = resolved.sessionMtime ?? null;
 
     try {
       const stats = await stat(resolved.filePath);
@@ -341,25 +325,6 @@ export class FocusedSessionWatchManager {
 
       if (!changed) {
         return;
-      }
-
-      // ZCode uses one database file for every session. A
-      // database mtime alone therefore tells us only that *some* session
-      // changed. Re-resolve the selected row and emit only when its
-      // time_updated value changed too. Without this guard, one active
-      // session repeatedly refreshes every other session currently open in Yep.
-      if (target.provider === "zcode") {
-        const resolved = await this.resolveSessionFile(target);
-        if (!resolved || resolved.provider !== "zcode") {
-          await this.ensureWatching(target);
-          return;
-        }
-
-        const nextSessionMtime = resolved.sessionMtime ?? null;
-        if (nextSessionMtime === target.knownSessionMtime) {
-          return;
-        }
-        target.knownSessionMtime = nextSessionMtime;
       }
 
       const event: FocusedSessionWatchEvent = {
@@ -486,22 +451,6 @@ export class FocusedSessionWatchManager {
         if (record && (await this.fileExists(record.logPath))) {
           return { filePath: record.logPath, provider };
         }
-        continue;
-      }
-
-      if (provider === "zcode") {
-        const sessions =
-          (await this.zcodeScanner?.getSessionsForProject(project.path)) ?? [];
-        const match = sessions.find(
-          (session) => session.id === target.sessionId,
-        );
-        if (match) {
-          return {
-            filePath: match.filePath,
-            provider,
-            sessionMtime: match.mtime,
-          };
-        }
       }
     }
 
@@ -524,7 +473,6 @@ export class FocusedSessionWatchManager {
     pushCandidate("codex");
     pushCandidate("gemini");
     pushCandidate("pi");
-    pushCandidate("zcode");
     pushCandidate("cursor");
     pushCandidate("mcode");
     pushCandidate("dsh");

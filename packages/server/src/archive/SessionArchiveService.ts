@@ -13,19 +13,15 @@ import {
 import { basename, dirname, join } from "node:path";
 import type { ProviderName, UrlProjectId } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
-import { isRetiredProviderName } from "../sdk/providers/policy.js";
+import {
+  type RetiredProviderName,
+  isRetiredProviderName,
+} from "../sdk/providers/policy.js";
 import { normalizeProviderGroup } from "../sessions/provider-groups.js";
-import { withWritableSqliteDatabase } from "../sqlite/query.js";
 import type { Project, SessionSummary } from "../supervisor/types.js";
 
-export type ArchiveProvider =
-  | "claude"
-  | "codex"
-  | "pi"
-  | "kimi"
-  | "zcode"
-  | "cursor";
-type PersistedArchiveProvider = ArchiveProvider | "opencode";
+export type ArchiveProvider = "claude" | "codex" | "pi" | "kimi" | "cursor";
+type PersistedArchiveProvider = ArchiveProvider | RetiredProviderName;
 export type ArchiveReason = "manual" | "auto";
 
 export interface ArchivedFileRecord {
@@ -48,7 +44,6 @@ export interface ArchivedSessionRecord {
   createdAt?: string;
   updatedAt?: string;
   messageCount?: number;
-  storagePath?: string;
   archivedAt: string;
   reason: ArchiveReason;
   files: ArchivedFileRecord[];
@@ -182,7 +177,6 @@ export class SessionArchiveService {
     if (existing) {
       const primaryExists =
         isRetiredProviderName(existing.provider) ||
-        isSqliteArchiveProvider(existing.provider) ||
         (await fileExists(existing.files[0]?.archivePath));
       if (primaryExists) {
         throw new ArchiveError(
@@ -216,24 +210,12 @@ export class SessionArchiveService {
       createdAt: params.summary?.createdAt,
       updatedAt: params.summary?.updatedAt,
       messageCount: params.summary?.messageCount,
-      storagePath: isSqliteArchiveProvider(provider)
-        ? params.sessionFilePath
-        : undefined,
       archivedAt: new Date().toISOString(),
       reason: params.reason,
       files,
     };
 
-    if (isSqliteArchiveProvider(provider)) {
-      await setSqliteSessionArchived({
-        dbPath: params.sessionFilePath,
-        sessionId: params.sessionId,
-        projectPath: params.project.path,
-        archivedAtMs: Date.now(),
-      });
-    } else {
-      await moveFiles(files, "to-archive");
-    }
+    await moveFiles(files, "to-archive");
     this.manifest.sessions[params.sessionId] = record;
     await this.save();
     return record;
@@ -254,30 +236,16 @@ export class SessionArchiveService {
       );
     }
 
-    if (isSqliteArchiveProvider(record.provider)) {
-      if (!record.storagePath) {
+    for (const file of record.files) {
+      if (await fileExists(file.originalPath)) {
         throw new ArchiveError(
-          "restore_failed",
-          `Cannot restore ${sessionId}; missing provider database path`,
+          "restore_conflict",
+          `Cannot restore ${sessionId}; original path already exists: ${file.originalPath}`,
         );
       }
-      await setSqliteSessionUnarchived({
-        dbPath: record.storagePath,
-        sessionId,
-        projectPath: record.projectPath,
-      });
-    } else {
-      for (const file of record.files) {
-        if (await fileExists(file.originalPath)) {
-          throw new ArchiveError(
-            "restore_conflict",
-            `Cannot restore ${sessionId}; original path already exists: ${file.originalPath}`,
-          );
-        }
-      }
-
-      await moveFiles(record.files, "to-original");
     }
+
+    await moveFiles(record.files, "to-original");
 
     delete this.manifest.sessions[sessionId];
     await this.save();
@@ -363,10 +331,6 @@ export class SessionArchiveService {
       sessionFilePath,
       join(archiveSessionDir, basename(sessionFilePath)),
     );
-
-    if (isSqliteArchiveProvider(provider)) {
-      return [];
-    }
 
     if (provider !== "claude") {
       return [primary];
@@ -471,88 +435,6 @@ function normalizeArchiveProvider(
   return group === "gemini" || group === "mcode" || group === "dsh"
     ? null
     : group;
-}
-
-function isSqliteArchiveProvider(
-  provider: PersistedArchiveProvider,
-): provider is "zcode" {
-  return provider === "zcode";
-}
-
-async function setSqliteSessionArchived(params: {
-  dbPath: string;
-  sessionId: string;
-  projectPath: string;
-  archivedAtMs: number;
-}): Promise<void> {
-  const result = await withWritableSqliteDatabase<
-    "archived" | "already_archived" | "not_found" | "unavailable"
-  >(params.dbPath, "unavailable", (db) => {
-    const row = db
-      .prepare(
-        "SELECT time_archived FROM session WHERE id = ? AND directory = ?",
-      )
-      .get(params.sessionId, params.projectPath);
-
-    if (!row) return "not_found";
-    if (typeof row.time_archived === "number") return "already_archived";
-
-    db.prepare(
-      "UPDATE session SET time_archived = ? WHERE id = ? AND directory = ?",
-    ).run(params.archivedAtMs, params.sessionId, params.projectPath);
-    return "archived";
-  });
-
-  if (result === "archived") return;
-  if (result === "already_archived") {
-    throw new ArchiveError(
-      "already_archived",
-      `Session ${params.sessionId} is already archived`,
-    );
-  }
-  if (result === "not_found") {
-    throw new ArchiveError(
-      "session_not_found",
-      `SQLite session not found for ${params.sessionId}`,
-    );
-  }
-  throw new ArchiveError(
-    "archive_failed",
-    "Provider database is not available for archive",
-  );
-}
-
-async function setSqliteSessionUnarchived(params: {
-  dbPath: string;
-  sessionId: string;
-  projectPath: string;
-}): Promise<void> {
-  const result = await withWritableSqliteDatabase<
-    "restored" | "not_found" | "unavailable"
-  >(params.dbPath, "unavailable", (db) => {
-    const row = db
-      .prepare("SELECT id FROM session WHERE id = ? AND directory = ?")
-      .get(params.sessionId, params.projectPath);
-
-    if (!row) return "not_found";
-
-    db.prepare(
-      "UPDATE session SET time_archived = NULL WHERE id = ? AND directory = ?",
-    ).run(params.sessionId, params.projectPath);
-    return "restored";
-  });
-
-  if (result === "restored") return;
-  if (result === "not_found") {
-    throw new ArchiveError(
-      "restore_failed",
-      `SQLite session not found for ${params.sessionId}`,
-    );
-  }
-  throw new ArchiveError(
-    "restore_failed",
-    "Provider database is not available for restore",
-  );
 }
 
 async function createArchivedFileRecord(

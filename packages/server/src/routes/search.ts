@@ -36,7 +36,6 @@ import { normalizeSession } from "../sessions/normalization.js";
 import type { PiSessionReader } from "../sessions/pi-reader.js";
 import { resolveSessionSources } from "../sessions/provider-resolution.js";
 import type { ISessionReader } from "../sessions/types.js";
-import type { ZCodeSessionReader } from "../sessions/zcode-reader.js";
 import type { Project } from "../supervisor/types.js";
 import { buildProviderProjectCatalog } from "./provider-catalog.js";
 
@@ -52,10 +51,8 @@ export interface SearchDeps {
   geminiSessionsDir?: string;
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
   piScanner?: PiSessionScanner;
-  zcodeDbPath?: string;
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
-  zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   kimiScanner?: KimiSessionScanner;
   cursorScanner?: CursorSessionScanner;
   mcodeScanner?: McodeSessionScanner;

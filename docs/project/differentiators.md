@@ -29,7 +29,7 @@ Claude Remote Control is "interact with any currently running claude CLI session
 | **Providers** | | |
 | Claude Code | ✅ | ✅ |
 | Codex / Codex-OSS | ✅ | ❌ |
-| Gemini / Pi / Kimi / ZCode | ✅ | ❌ |
+| Gemini / Pi / Kimi | ✅ | ❌ |
 | Works with API keys (no subscription) | ✅ | ❌ |
 | Works with MAX plans (subscription) | ✅ | ✅ |
 | Works with Pro plans (subscription) | ✅ | ❌ |
@@ -65,7 +65,7 @@ Claude Remote Control is "interact with any currently running claude CLI session
 - **Session cloning/forking** — Branch from any message to explore alternatives
 
 ### Multi-Provider
-- **Claude, Codex, Codex-OSS, Gemini, Pi, Kimi, ZCode** — Single UI for multiple agent runtimes. RC is Claude-only
+- **Claude, Codex, Codex-OSS, Gemini, Pi, Kimi** — Single UI for multiple agent runtimes. RC is Claude-only
 - **Provider badges and filtering** — See which provider is running at a glance
 
 ### Connectivity & Security

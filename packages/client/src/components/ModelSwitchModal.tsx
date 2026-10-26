@@ -68,7 +68,7 @@ export function ModelSwitchModal({
   /**
    * Switch the reasoning/thought level. Switches the model first when the
    * target model differs from the current one; a pure level change only
-   * calls the reasoning-effort endpoint (ZCode session/setThoughtLevel).
+   * calls the reasoning-effort endpoint.
    */
   const handleSelectEffort = async (modelId: string, effort: string) => {
     if (switching) return;

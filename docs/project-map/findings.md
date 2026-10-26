@@ -30,7 +30,7 @@
 | 未确认事项 | 为什么本轮没有结论 | 后续要拿到的证据 |
 | --- | --- | --- |
 | 8022 的 commit、`BASE_PATH`、runtime 形态 | 调查当时未查端口。2026-10-20 用户重启后已只读核对，记录在 [consolidation.md](consolidation.md#8022-运行核对) | 已拿到 `/yep/api/version`、`/yep/build-info.json`、`/yep/api/status/workers`。4510 与 bridge 是否启用仍未查 |
-| provider CLI / 生成 schema / 本机协议一致性 | 只读仓库参考与 adapter；未启动 CLI，尤其没有 ZCode probe | 按 AGENTS 的 provider 参考/临时 probe 要求，在明确授权范围比较版本与响应；不得自动发模型请求 |
+| provider CLI / 生成 schema / 本机协议一致性 | 只读仓库参考与 adapter；未启动 CLI | 按 AGENTS 的 provider 参考/临时 probe 要求，在明确授权范围比较版本与响应；不得自动发模型请求 |
 | 每种 provider 的完整状态/分叉/审批语义 | F4 深入 Codex，其余只盘点接线或抽样 reader | 每个 adapter 分别追同一用例，补故障分支和真实协议证据，不能靠 Codex 测试替代 |
 | 认证关闭/开启、desktop token、反向代理前缀组合 | 中间件含明确路径比较，但未做带前缀请求 | 用隔离 Hono 测试检查 login、status、hook、WS upgrade 的矩阵；确认实际代理行为后再认定故障 |
 | 推送、Feishu/OAuth/MCP、webhook、Worker/R2 | 注册只证明代码可达，外部凭据与投递情况未查看 | 外部账号配置和权限核对、测试目标的投递/回调证据；涉及给他人发消息须另获授权 |

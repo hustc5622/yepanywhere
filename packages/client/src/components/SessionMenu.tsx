@@ -106,9 +106,9 @@ export interface SessionMenuProps {
   onClone?: (newSessionId: string) => void | Promise<void>;
   /** Called to terminate the session's process */
   onTerminate?: () => void | Promise<void>;
-  /** Called to trigger a provider-native context compaction (ZCode). */
+  /** Called to trigger a provider-native context compaction (Codex). */
   onCompact?: () => void | Promise<void>;
-  /** Called to open the provider-native goal lifecycle dialog (ZCode). */
+  /** Called to open the provider-native goal lifecycle dialog (Codex). */
   onGoal?: () => void;
   /** Use "..." icon instead of chevron */
   useEllipsisIcon?: boolean;

@@ -13,8 +13,7 @@
 > - [Codex canonical overlay 性能方案](./2026-08-10-codex-canonical-overlay-performance-plan.md)
 > - [Codex 事件 journal 内存索引有界化方案](./2026-08-13-codex-event-journal-memory-plan.md)
 > - [Session 分支设计](./2026-01-05-session-forking.md)
-> - [ZCode provider 集成计划](./2026-08-11-zcode-provider-integration-plan.md)
-> - [ZCode 支持现状](./2026-08-12-zcode-support-current-state.md)
+> - ZCode provider 集成计划、ZCode 支持现状（ZCode provider 已于 2026-10 移除，相关文档一并删除，可在 git 历史中查阅）
 > - [OpenAI 官方 Goal 指南](https://learn.chatgpt.com/use-cases/follow-goals)
 
 ## 1. 结论

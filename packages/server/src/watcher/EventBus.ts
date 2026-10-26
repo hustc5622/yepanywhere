@@ -23,7 +23,6 @@ export type WatchProvider =
   | "codex"
   | "pi"
   | "kimi"
-  | "zcode"
   | "cursor"
   | "mcode"
   | "dsh";
@@ -201,7 +200,7 @@ export interface SessionUpdatedEvent {
   sessionId: string;
   projectId: UrlProjectId;
   /** Optional producer identity for diagnostics and downstream dedup logs. */
-  trigger?: "codex-plan-updated" | "zcode-db-reconcile";
+  trigger?: "codex-plan-updated";
   /** New title (derived from first user message) */
   title?: string | null;
   /** New message count */

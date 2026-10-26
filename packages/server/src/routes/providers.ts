@@ -22,9 +22,9 @@ import { claudeProvider, getAllProviders } from "../sdk/providers/index.js";
 import {
   isProviderEnabled,
   isRetiredProviderName,
+  retiredProviderMessage,
 } from "../sdk/providers/policy.js";
 import type { AgentProvider } from "../sdk/providers/types.js";
-import { ZCodeProtocolError } from "../sdk/providers/zcode-protocol/types.js";
 import type { ModelInfoService } from "../services/ModelInfoService.js";
 
 interface ProviderRouteDeps {
@@ -158,50 +158,6 @@ export function createProvidersRoutes(deps: ProviderRouteDeps = {}): Hono {
     return c.json(await getUsage({ fresh: c.req.query("fresh") === "1" }));
   });
 
-  // GET /api/providers/zcode/mcp-servers?projectId=<id> - Read-only MCP
-  // server status snapshot for a project's workspace. ZCode is the only
-  // provider that can report MCP statuses today.
-  routes.get("/zcode/mcp-servers", async (c) => {
-    if (!isProviderEnabled("zcode", deps.enabledProviders)) {
-      return c.json({ error: "Provider not found" }, 404);
-    }
-    const projectId = c.req.query("projectId");
-    if (!projectId || !isUrlProjectId(projectId)) {
-      return c.json({ error: "projectId query parameter is required" }, 400);
-    }
-
-    const providers = deps.providers ?? getAllProviders();
-    const provider = providers.find((p) => p.name === "zcode");
-    if (!provider?.listMcpServers) {
-      return c.json(
-        {
-          error: "Provider does not support MCP server status listing",
-          code: "mcp_list_unsupported",
-        },
-        404,
-      );
-    }
-
-    try {
-      const servers = await provider.listMcpServers(decodeProjectId(projectId));
-      return c.json({ servers });
-    } catch (error) {
-      if (error instanceof ZCodeProtocolError) {
-        const unavailable =
-          error.code === "zcode_cli_not_found" ||
-          error.code === "zcode_cli_unsupported_version" ||
-          error.code === "zcode_config_unavailable";
-        return c.json(
-          { error: error.message, code: error.code },
-          unavailable ? 503 : 502,
-        );
-      }
-      const message =
-        error instanceof Error ? error.message : "mcp/list failed";
-      return c.json({ error: message, code: "zcode_protocol_error" }, 502);
-    }
-  });
-
   // GET /api/providers - Get all available providers with auth status and models
   routes.get("/", async (c) => {
     const providers = (deps.providers ?? getAllProviders()).filter((provider) =>
@@ -228,7 +184,7 @@ export function createProvidersRoutes(deps: ProviderRouteDeps = {}): Hono {
     if (isRetiredProviderName(name)) {
       return c.json(
         {
-          error: "OpenCode provider has been retired",
+          error: retiredProviderMessage(name),
           code: "provider_retired",
         },
         410,

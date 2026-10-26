@@ -271,8 +271,7 @@ function commandMatchesAnyProvider(command: string): boolean {
     commandMatchesProvider("claude", command) ||
     commandMatchesProvider("gemini", command) ||
     commandMatchesProvider("codex", command) ||
-    commandMatchesProvider("pi", command) ||
-    commandMatchesProvider("zcode", command)
+    commandMatchesProvider("pi", command)
   );
 }
 
@@ -292,8 +291,6 @@ function commandMatchesProvider(
       return /(?:^|[\/\s])pi(?:\.[cm]?js|[-_]coding[-_]agent)?(?:[\/\s]|$)/.test(
         normalized,
       );
-    case "zcode":
-      return /\bzcode\b/.test(normalized) && !/\bapp-server\b/.test(normalized);
     default:
       return false;
   }

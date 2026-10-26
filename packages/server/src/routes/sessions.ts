@@ -123,7 +123,6 @@ import {
 } from "../sessions/session-runtime.js";
 import type { ISessionReader } from "../sessions/types.js";
 import { isUserPromptMessage } from "../sessions/user-prompt-message.js";
-import type { ZCodeSessionReader } from "../sessions/zcode-reader.js";
 import type { ExternalSessionTracker } from "../supervisor/ExternalSessionTracker.js";
 import type { Supervisor } from "../supervisor/Supervisor.js";
 import type {
@@ -199,10 +198,8 @@ export interface SessionsDeps {
   /** Optional shared Gemini reader factory for cross-provider session lookups */
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
   piScanner?: PiSessionScanner;
-  zcodeDbPath?: string;
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
-  zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   kimiScanner?: KimiSessionScanner;
   cursorScanner?: CursorSessionScanner;
   mcodeScanner?: McodeSessionScanner;
@@ -669,8 +666,6 @@ function toProviderResolutionDeps(deps: SessionsDeps): ProviderResolutionDeps {
     kimiReaderFactory: deps.kimiReaderFactory,
     mcodeReaderFactory: deps.mcodeReaderFactory,
     dshReaderFactory: deps.dshReaderFactory,
-    zcodeDbPath: deps.zcodeDbPath,
-    zcodeReaderFactory: deps.zcodeReaderFactory,
   };
 }
 

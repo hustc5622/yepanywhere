@@ -171,7 +171,6 @@ describe("provider fork lineage resolution", () => {
           geminiPaths: new Set(),
           piPaths: new Set(),
           kimiPaths: new Set(),
-          zcodePaths: new Set(),
           cursorPaths: new Set(),
           codexSessionsByPath: new Map([["/repo", [catalogSession]]]),
         },

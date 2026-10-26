@@ -8,7 +8,7 @@
 
 | 日期 | 重复点 | 现在的唯一入口 | 核对 |
 | --- | --- | --- | --- |
-| 2026-10-20 | Codex 与 ZCode 各写一份 `AsyncQueue` | [packages/server/src/utils/async-queue.ts](../../packages/server/src/utils/async-queue.ts) `AsyncQueue`。关闭时拒绝等待者并丢弃缓冲，之后的 `push` 被忽略；`drain()` 仍只被 Codex 使用 | `packages/server/test/utils/async-queue.test.ts` |
+| 2026-10-20 | Codex 与 ZCode 各写一份 `AsyncQueue`（ZCode 已移除，现仅 Codex 使用） | [packages/server/src/utils/async-queue.ts](../../packages/server/src/utils/async-queue.ts) `AsyncQueue`。关闭时拒绝等待者并丢弃缓冲，之后的 `push` 被忽略；`drain()` 仍只被 Codex 使用 | `packages/server/test/utils/async-queue.test.ts` |
 | 2026-10-20 | `tool-approval` 以外的 pending input 都折叠成 `user-question`，同一表达式写在 Supervisor、项目列表、会话详情、外置 runtime 快照和 PushNotifier | [packages/server/src/sessions/session-runtime.ts](../../packages/server/src/sessions/session-runtime.ts) `pendingInputTypeFromRequest`。`pendingInputTypeFromProcess` 改为调用它 | `packages/server/test/sessions/session-runtime.test.ts` |
 | 2026-10-20 | 三个通知开关各写一套 `settings-item`、开关和测试发送条 | [packages/client/src/components/ui/SettingsItem.tsx](../../packages/client/src/components/ui/SettingsItem.tsx) `SettingsItem`、`SettingsToggle`、`NotificationTestActions`。`BrowserNotificationToggle`、`PushNotificationToggle`、`NativePushNotificationToggle` 保留各自的权限和订阅分支 | `packages/client/src/components/ui/__tests__/SettingsItem.test.tsx` |
 | 2026-10-20 | 非空消息身份在客户端合并、调试摘要、display 投影和搜索索引里各写一遍 | [packages/shared/src/message-id.ts](../../packages/shared/src/message-id.ts) `nonEmptyMessageId`、`stringMessageId`。客户端 `getMessageId` 仍负责对象局部 fallback。分页、inspector、文件活动、标题上下文和 `SessionInspector` 继续用 `uuid ?? id` | `packages/shared/src/message-id.test.ts`，客户端 `mergeMessages` 的既有身份测试 |
@@ -41,9 +41,9 @@
 1. 会话正文两套渲染：默认 `RenderItemComponent`，`history=legacy` 和嵌套 transcript 仍走 `ContentBlockRenderer`。工具组在 `DisplayToolGroupRow` 内再分投影行和旧消息行。
 2. 思考块：`ThinkingBlock` 按 detail ref 拉取，`ThinkingRenderer` 直接渲染整段文本。
 3. 文件预览四条路径：`FileViewer`、`LocalFileModal`、`LocalMediaModal`、`AttachmentPreviewModal`。API 边界不同。
-4. 审批三套界面：`ToolApprovalPanel`、`QuestionAnswerPanel`、`ZCodeBridgeApprovals`。
+4. 审批两套界面：`ToolApprovalPanel`、`QuestionAnswerPanel`（`ZCodeBridgeApprovals` 已随 ZCode 移除）。
 5. 工具名其余别名仍分开：客户端还有 `bash`、`Agent`、`webrun` 等；Codex 在有 namespace 时直接拼接，且把 `exec` 映成 `CodexExec`；Pi 把 `ls`/`find` 映成 `Glob`。消息身份里仍用 `uuid ?? id` 的几处见上表，不能改成跳过空白。思考块和四条文件预览重新看过：`ThinkingBlock` 是 `<details>` 加按需加载，`ThinkingRenderer` 是另一套按钮；文件预览的 API 和行样式也不相同，没有抽外壳。
 6. Inbox / GlobalSession 的同名类型还不能放进 `shared`。服务端 Inbox 多 `pendingRequestId`、`originChannel`，标题是 `string`；客户端标题是 `string | null`，多 `runtime`，且没有读取那两个服务端字段。GlobalSession 的服务端 `ownership` 是 `SessionOwnership` 并多 `originChannel`；客户端 `ownership` 用 `SessionStatus`，没有声明 `originChannel`。运行时 JSON 仍带着这些字段，缺的是类型声明，不是另一套接口。
-7. Codex、ZCode、Pi 的 stdout 分帧和 stderr 截断策略不同，协议客户端继续分开。
+7. Codex、Pi 的 stdout 分帧和 stderr 截断策略不同，协议客户端继续分开。
 
 做完一条就补到「已收口」，并写上测试或检查命令。没有测量数据时，不要把性能候选写成本表的已完成项。

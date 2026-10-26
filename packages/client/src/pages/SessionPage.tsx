@@ -206,8 +206,6 @@ function getApprovalAgentName(
       return "Pi";
     case "kimi":
       return "Kimi";
-    case "zcode":
-      return "ZCode";
     case "cursor":
       return "Cursor";
     case "mcode":
@@ -1194,7 +1192,7 @@ function SessionPageContent({
     }
 
     try {
-      // Provider-specific edit semantics: Codex, Pi and ZCode create a
+      // Provider-specific edit semantics: Codex and Pi create a
       // new native session while preserving the source; Claude resumes
       // through the prompt parent.
       if (editRewind) {
@@ -2432,16 +2430,14 @@ function SessionPageContent({
                     }}
                     onTerminate={handleTerminate}
                     onCompact={
-                      (session?.provider === "zcode" ||
-                        session?.provider === "codex") &&
+                      session?.provider === "codex" &&
                       status.owner === "self" &&
                       status.processId
                         ? handleCompact
                         : undefined
                     }
                     onGoal={
-                      (session?.provider === "zcode" ||
-                        session?.provider === "codex") &&
+                      session?.provider === "codex" &&
                       status.owner === "self" &&
                       status.processId
                         ? () => setShowGoalModal(true)
@@ -2581,7 +2577,7 @@ function SessionPageContent({
             />
           )}
 
-        {/* Provider-native Goal lifecycle dialog (ZCode or Codex). */}
+        {/* Provider-native Goal lifecycle dialog (Codex). */}
         {showGoalModal && status.owner === "self" && status.processId && (
           <GoalModal
             processId={status.processId}

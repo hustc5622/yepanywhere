@@ -52,7 +52,6 @@ import {
   pendingInputTypeFromProcess,
 } from "../sessions/session-runtime.js";
 import type { ISessionReader } from "../sessions/types.js";
-import type { ZCodeSessionReader } from "../sessions/zcode-reader.js";
 import type { Supervisor } from "../supervisor/Supervisor.js";
 import type {
   AgentActivity,
@@ -77,10 +76,8 @@ export interface InboxDeps {
   geminiSessionsDir?: string;
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
   piScanner?: PiSessionScanner;
-  zcodeDbPath?: string;
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
-  zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   kimiScanner?: KimiSessionScanner;
   cursorScanner?: CursorSessionScanner;
   mcodeScanner?: McodeSessionScanner;

@@ -70,16 +70,14 @@ describe("provider-specific historical message editing", () => {
   it("only enables native-entry forks after the authoritative disk message arrives", () => {
     expect(canEditPersistedUserPrompt("pi", "jsonl")).toBe(true);
     expect(canEditPersistedUserPrompt("pi", "sdk")).toBe(false);
-    expect(canEditPersistedUserPrompt("zcode", "jsonl")).toBe(true);
-    expect(canEditPersistedUserPrompt("zcode", "sdk")).toBe(false);
-    expect(canEditPersistedUserPrompt("zcode", undefined)).toBe(false);
+    expect(canEditPersistedUserPrompt("pi", undefined)).toBe(false);
     expect(canEditPersistedUserPrompt("claude", "sdk")).toBe(true);
   });
 
-  it("resolves ZCode edits to the provider-agnostic fork submission", () => {
-    expect(supportsHistoricalMessageEditing("zcode")).toBe(true);
+  it("resolves Pi edits to the provider-agnostic fork submission", () => {
+    expect(supportsHistoricalMessageEditing("pi")).toBe(true);
     expect(
-      resolveSessionEditSubmission("zcode", {
+      resolveSessionEditSubmission("pi", {
         uuid: "msg_user_native",
         parentUuid: "not-the-boundary",
       }),
@@ -89,10 +87,10 @@ describe("provider-specific historical message editing", () => {
       optimisticTruncate: false,
       refreshSameSessionBranches: false,
     });
-    // Editing the first ZCode prompt is still a fork attempt; the server
+    // Editing the first Pi prompt is still a fork attempt; the server
     // fails closed when no predecessor exists.
     expect(
-      resolveSessionEditSubmission("zcode", {
+      resolveSessionEditSubmission("pi", {
         uuid: "msg_first_native",
         parentUuid: null,
       }),
@@ -193,7 +191,7 @@ describe("queued historical edit recovery", () => {
 describe("session branch navigation", () => {
   const branchState: SessionBranchState = {
     sessionId: "ses_parent",
-    provider: "zcode",
+    provider: "pi",
     activeBranchId: "msg_original",
     selectedBranchId: "msg_original",
     branches: [

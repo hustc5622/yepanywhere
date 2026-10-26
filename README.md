@@ -14,7 +14,7 @@
   <a href="https://yepanywhere.com">yepanywhere.com</a>
 </p>
 
-Yep Anywhere 是 Codex、Gemini、Pi、Kimi、ZCode（以及兼容保留的 Claude Code）的远程操作界面。它自托管、无需云账号，让智能体继续在你的开发机上运行，你可以从手机上查看进度、处理审批并继续对话。
+Yep Anywhere 是 Codex、Gemini、Pi、Kimi（以及兼容保留的 Claude Code）的远程操作界面。它自托管、无需云账号，让智能体继续在你的开发机上运行，你可以从手机上查看进度、处理审批并继续对话。
 
 ## 功能
 
@@ -40,7 +40,6 @@ Yep Anywhere 是 Codex、Gemini、Pi、Kimi、ZCode（以及兼容保留的 Clau
 | Gemini | 支持 | 依 provider 模式 | 支持 | 支持 CLI 与 ACP 接入 |
 | Pi | 完整支持 | 支持 | 支持 | 通过原生 RPC 与中性 LLM gateway 接入 |
 | Kimi | 完整支持 | 支持 | 支持 | 通过 ACP 接入 |
-| ZCode | 完整支持 | 支持 | 支持 | 通过 app-server 接入 |
 | Claude Code | 完整支持 | 支持 | 支持 | 仅兼容保留：可读取和继续既有会话，但不参与 provider 自动发现 |
 
 ## 截图

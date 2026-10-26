@@ -67,6 +67,7 @@ import {
 import {
   isProviderEnabled,
   isRetiredProviderName,
+  retiredProviderMessage,
 } from "../sdk/providers/policy.js";
 import type {
   CodexStructuredUserInput,
@@ -86,7 +87,6 @@ import {
 } from "../sessions/provider-resolution.js";
 import { resolveSessionModel } from "../sessions/session-model.js";
 import type { ISessionReader } from "../sessions/types.js";
-import type { ZCodeSessionReader } from "../sessions/zcode-reader.js";
 import type {
   ImmediateStartUnavailableResponse,
   QueueFullResponse,
@@ -118,10 +118,8 @@ export interface SessionCommandServiceDeps {
   geminiScanner?: GeminiSessionScanner;
   geminiSessionsDir?: string;
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
-  zcodeDbPath?: string;
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
-  zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   kimiSessionsDir?: string;
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
   mcodeReaderFactory?: (projectPath: string) => McodeSessionReader;
@@ -486,7 +484,7 @@ function resolveCodexModelProviderForStart(
 function supportsResumeSessionAt(
   provider: ProviderName | string | undefined,
 ): boolean {
-  return provider === "claude" || provider === "pi" || provider === "zcode";
+  return provider === "claude" || provider === "pi";
 }
 
 function resolveCodexResumeSource(
@@ -1299,8 +1297,7 @@ export class SessionCommandService {
     const isSourcePreservingFork =
       (providerName === "codex" &&
         effectiveCodexForkExcludedTurns !== undefined) ||
-      ((providerName === "pi" || providerName === "zcode") &&
-        Boolean(body.resumeSessionAt));
+      (providerName === "pi" && Boolean(body.resumeSessionAt));
     const runtimeFailure = await this.validateCursorRuntime(providerName);
     if (runtimeFailure) return runtimeFailure;
     const result = await this.deps.runtimeController.resumeSession({
@@ -1495,10 +1492,7 @@ export class SessionCommandService {
           );
         }
       }
-      if (
-        (providerName === "pi" || providerName === "zcode") &&
-        body.resumeSessionAt
-      ) {
+      if (providerName === "pi" && body.resumeSessionAt) {
         // Record edit-fork lineage so list views can collapse the family.
         await this.deps.sessionMetadataService?.setForkParentSessionId?.(
           actualSessionId,
@@ -2150,7 +2144,7 @@ export class SessionCommandService {
     provider: unknown,
   ): SessionCommandResult<never> | null {
     if (isRetiredProviderName(provider)) {
-      return commandFailure("OpenCode provider has been retired", 410, {
+      return commandFailure(retiredProviderMessage(provider), 410, {
         code: "provider_retired",
       });
     }
@@ -2364,8 +2358,6 @@ export class SessionCommandService {
       kimiReaderFactory: this.deps.kimiReaderFactory,
       mcodeReaderFactory: this.deps.mcodeReaderFactory,
       dshReaderFactory: this.deps.dshReaderFactory,
-      zcodeDbPath: this.deps.zcodeDbPath,
-      zcodeReaderFactory: this.deps.zcodeReaderFactory,
       sessionMetadataService: this.deps.sessionMetadataService,
     };
   }

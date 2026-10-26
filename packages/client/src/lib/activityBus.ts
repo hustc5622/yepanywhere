@@ -102,7 +102,7 @@ export interface SessionUpdatedEvent {
   sessionId: string;
   projectId: UrlProjectId;
   /** Optional producer identity for targeted refresh behavior. */
-  trigger?: "codex-plan-updated" | "zcode-db-reconcile";
+  trigger?: "codex-plan-updated";
   /** New title (derived from first user message) */
   title?: string | null;
   /** New message count */

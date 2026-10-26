@@ -360,16 +360,12 @@ describe("shouldWatchOwnedSessionFile", () => {
     },
   );
 
-  it.each([
-    "claude",
-    "codex",
-    "codex-oss",
-    "gemini",
-    "zcode",
-    undefined,
-  ] as const)("leaves owned %s sessions on their live stream", (provider) => {
-    expect(shouldWatchOwnedSessionFile(provider)).toBe(false);
-  });
+  it.each(["claude", "codex", "codex-oss", "gemini", undefined] as const)(
+    "leaves owned %s sessions on their live stream",
+    (provider) => {
+      expect(shouldWatchOwnedSessionFile(provider)).toBe(false);
+    },
+  );
 });
 
 describe("buildAgentMappingLoadPlan", () => {

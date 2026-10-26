@@ -530,9 +530,9 @@ describe("Sessions API", () => {
       expect(resumeSpy).not.toHaveBeenCalled();
     });
 
-    it("returns the ZCode fork id and records edit-fork lineage", async () => {
+    it("returns the Pi fork id and records edit-fork lineage", async () => {
       const sessionMetadataService = {
-        getProvider: vi.fn(() => "zcode"),
+        getProvider: vi.fn(() => "pi"),
         getExecutor: vi.fn(() => undefined),
         setProvider: vi.fn(async () => undefined),
         setForkParentSessionId: vi.fn(async () => undefined),
@@ -548,8 +548,8 @@ describe("Sessions API", () => {
       const resumeSpy = vi
         .spyOn(supervisor, "resumeSession")
         .mockResolvedValue({
-          id: "process-zcode-fork",
-          sessionId: "ses_zcode_fork",
+          id: "process-pi-fork",
+          sessionId: "ses_pi_fork",
           permissionMode: "acceptEdits",
           modeVersion: 3,
         } as unknown as Awaited<ReturnType<typeof supervisor.resumeSession>>);
@@ -563,38 +563,38 @@ describe("Sessions API", () => {
             "X-Yep-Anywhere": "true",
           },
           body: JSON.stringify({
-            message: "edited ZCode prompt",
+            message: "edited Pi prompt",
             mode: "acceptEdits",
-            resumeSessionAt: "msg_zcode_user",
+            resumeSessionAt: "msg_pi_user",
           }),
         },
       );
 
       expect(res.status).toBe(200);
       await expect(res.json()).resolves.toMatchObject({
-        sessionId: "ses_zcode_fork",
+        sessionId: "ses_pi_fork",
         forkParentSessionId: "sess-existing",
-        processId: "process-zcode-fork",
+        processId: "process-pi-fork",
       });
       expect(resumeSpy).toHaveBeenCalledWith(
         "sess-existing",
         expect.any(String),
-        expect.objectContaining({ text: "edited ZCode prompt" }),
+        expect.objectContaining({ text: "edited Pi prompt" }),
         "acceptEdits",
         expect.objectContaining({
-          providerName: "zcode",
-          resumeSessionAt: "msg_zcode_user",
+          providerName: "pi",
+          resumeSessionAt: "msg_pi_user",
           rollbackNumTurns: undefined,
         }),
         { requireImmediate: true },
       );
       expect(sessionMetadataService.setProvider).toHaveBeenCalledWith(
-        "ses_zcode_fork",
-        "zcode",
+        "ses_pi_fork",
+        "pi",
       );
       expect(
         sessionMetadataService.setForkParentSessionId,
-      ).toHaveBeenCalledWith("ses_zcode_fork", "sess-existing");
+      ).toHaveBeenCalledWith("ses_pi_fork", "sess-existing");
     });
 
     it("returns 400 for non-integer rollbackNumTurns", async () => {

@@ -52,7 +52,6 @@ import {
   pendingInputTypeFromProcess,
 } from "../sessions/session-runtime.js";
 import type { ISessionReader } from "../sessions/types.js";
-import type { ZCodeSessionReader } from "../sessions/zcode-reader.js";
 import type { ExternalSessionTracker } from "../supervisor/ExternalSessionTracker.js";
 import type { Supervisor } from "../supervisor/Supervisor.js";
 import type {
@@ -100,10 +99,8 @@ export interface GlobalSessionsDeps {
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
   /** Pi scanner for checking if a project has Pi sessions */
   piScanner?: PiSessionScanner;
-  zcodeDbPath?: string;
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
-  zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   /** Kimi scanner for checking if a project has Kimi sessions */
   kimiScanner?: KimiSessionScanner;
   cursorScanner?: CursorSessionScanner;

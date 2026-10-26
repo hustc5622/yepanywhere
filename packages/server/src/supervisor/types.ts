@@ -60,7 +60,6 @@ export interface Project {
   hasGeminiSessions?: boolean; // whether this project also has Gemini sessions
   hasPiSessions?: boolean; // whether this project also has Pi sessions
   hasKimiSessions?: boolean; // whether this project also has Kimi sessions
-  hasZCodeSessions?: boolean; // whether this project also has ZCode sessions
   hasCursorSessions?: boolean; // whether this project also has Cursor ACP sessions
   hasMcodeSessions?: boolean; // whether this project also has MiniMax Code sessions
   hasDshSessions?: boolean; // whether this project also has read-only DeepSeek Harness sessions

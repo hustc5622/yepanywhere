@@ -3,7 +3,6 @@ import type {
   SessionBranchState,
   SessionDisplayTurnStatus,
   UrlProjectId,
-  ZCodeStoredMessage,
 } from "@yep-anywhere/shared";
 import { codexAgentWaitMessage } from "../codex/agent-wait.js";
 import {
@@ -25,8 +24,11 @@ import {
   publicCodexImageUrl,
   publicCodexThreadItem,
 } from "../sdk/providers/codex.js";
+import {
+  type CopiedPrefixMessage,
+  buildCopiedPrefixForkBranchView,
+} from "../sessions/copied-prefix-branch.js";
 import type { GetSessionOptions, LoadedSession } from "../sessions/types.js";
-import { buildCopiedPrefixForkBranchView } from "../sessions/zcode-branch.js";
 import type {
   ContentBlock,
   Message,
@@ -213,7 +215,7 @@ export class CodexAppServerHistoryReader {
     {
       revision: string;
       expiresAt: number;
-      messages: Promise<ZCodeStoredMessage[]>;
+      messages: Promise<CopiedPrefixMessage[]>;
     }
   >();
   private readonly mode: "auto" | "rollout" | "app-server";
@@ -627,7 +629,7 @@ export class CodexAppServerHistoryReader {
   private getForkPromptMessages(
     candidate: CodexForkBranchCandidate,
     targets: readonly string[],
-  ): Promise<ZCodeStoredMessage[]> {
+  ): Promise<CopiedPrefixMessage[]> {
     const revision = JSON.stringify([candidate.updatedAt, targets]);
     const cached = this.forkPromptCache.get(candidate.id);
     if (cached?.revision === revision && cached.expiresAt > Date.now()) {
@@ -982,7 +984,7 @@ async function readCodexForkBranchMessages(
   client: Pick<CodexHistoryClient, "listTurns" | "listItems">,
   sessionId: string,
   targets: readonly string[],
-): Promise<ZCodeStoredMessage[]> {
+): Promise<CopiedPrefixMessage[]> {
   const turns: Turn[] = [];
   const seenCursors = new Set<string>();
   let cursor: string | null = null;
@@ -1025,7 +1027,7 @@ async function readCodexForkBranchMessages(
       const items = needsExactBoundary
         ? await readAllTurnItems(client, sessionId, turn.id)
         : turn.items;
-      return items.flatMap((item): ZCodeStoredMessage[] => {
+      return items.flatMap((item): CopiedPrefixMessage[] => {
         if (item.type !== "userMessage") return [];
         const id = codexSemanticMessageId(item.id, turn.id);
         return [

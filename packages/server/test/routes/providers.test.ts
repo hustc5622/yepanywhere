@@ -4,7 +4,6 @@ import { createProvidersRoutes } from "../../src/routes/providers.js";
 import type { RuntimeController } from "../../src/runtime/types.js";
 import { getAllProviders, getProvider } from "../../src/sdk/providers/index.js";
 import type { AgentProvider } from "../../src/sdk/providers/types.js";
-import { ZCodeProtocolError } from "../../src/sdk/providers/zcode-protocol/types.js";
 
 function deferred() {
   let resolve!: () => void;
@@ -119,12 +118,15 @@ describe("provider routes", () => {
     expect(getProvider("claude")?.name).toBe("claude");
   });
 
-  it("does not expose the retired OpenCode provider", () => {
-    expect(getAllProviders().map((provider) => provider.name)).not.toContain(
-      "opencode",
-    );
-    expect(getProvider("opencode")).toBeNull();
-  });
+  it.each(["opencode", "zcode"])(
+    "does not expose the retired %s provider",
+    (name) => {
+      expect(getAllProviders().map((provider) => provider.name)).not.toContain(
+        name,
+      );
+      expect(getProvider(name)).toBeNull();
+    },
+  );
 
   it("returns a stable retired response for legacy provider detail requests", async () => {
     const response = await createProvidersRoutes({ providers: [] }).request(
@@ -134,6 +136,18 @@ describe("provider routes", () => {
     expect(response.status).toBe(410);
     await expect(response.json()).resolves.toEqual({
       error: "OpenCode provider has been retired",
+      code: "provider_retired",
+    });
+  });
+
+  it("returns a retired response for ZCode provider detail requests", async () => {
+    const response = await createProvidersRoutes({ providers: [] }).request(
+      "/zcode",
+    );
+
+    expect(response.status).toBe(410);
+    await expect(response.json()).resolves.toEqual({
+      error: "ZCode provider has been retired",
       code: "provider_retired",
     });
   });
@@ -230,113 +244,5 @@ describe("provider routes", () => {
       usage: { planType: "pro", primary: { usedPercent: 12 } },
     });
     expect(getClaudeUsage).toHaveBeenCalledWith({ fresh: true });
-  });
-
-  describe("GET /zcode/mcp-servers", () => {
-    const projectPath = "/tmp/mcp-proj";
-    const projectId = encodeProjectId(projectPath);
-
-    it("returns the provider's MCP server statuses for the project workspace", async () => {
-      const listMcpServers = vi.fn(async () => ({
-        context7: {
-          status: "connected",
-          transport: "http",
-          toolCount: 4,
-          updatedAt: "2026-08-13T00:00:00Z",
-        },
-      }));
-      const provider = {
-        name: "zcode",
-        displayName: "ZCode",
-        listMcpServers,
-      } as unknown as AgentProvider;
-      const routes = createProvidersRoutes({ providers: [provider] });
-
-      const response = await routes.request(
-        `/zcode/mcp-servers?projectId=${encodeURIComponent(projectId)}`,
-      );
-
-      expect(response.status).toBe(200);
-      await expect(response.json()).resolves.toEqual({
-        servers: {
-          context7: {
-            status: "connected",
-            transport: "http",
-            toolCount: 4,
-            updatedAt: "2026-08-13T00:00:00Z",
-          },
-        },
-      });
-      expect(listMcpServers).toHaveBeenCalledWith(projectPath);
-    });
-
-    it("requires a projectId query parameter", async () => {
-      const routes = createProvidersRoutes({ providers: [] });
-      const response = await routes.request("/zcode/mcp-servers");
-      expect(response.status).toBe(400);
-    });
-
-    it("reports 404 when no provider supports MCP listing", async () => {
-      const provider = {
-        name: "zcode",
-        displayName: "ZCode",
-      } as unknown as AgentProvider;
-      const routes = createProvidersRoutes({ providers: [provider] });
-      const response = await routes.request(
-        `/zcode/mcp-servers?projectId=${encodeURIComponent(projectId)}`,
-      );
-      expect(response.status).toBe(404);
-      await expect(response.json()).resolves.toMatchObject({
-        code: "mcp_list_unsupported",
-      });
-    });
-
-    it("maps provider capability failures to 503 with the stable code", async () => {
-      const listMcpServers = vi.fn(async () => {
-        throw new ZCodeProtocolError(
-          "zcode_cli_not_found",
-          "ZCode CLI unavailable: zcode_cli_not_found",
-        );
-      });
-      const provider = {
-        name: "zcode",
-        displayName: "ZCode",
-        listMcpServers,
-      } as unknown as AgentProvider;
-      const routes = createProvidersRoutes({ providers: [provider] });
-
-      const response = await routes.request(
-        `/zcode/mcp-servers?projectId=${encodeURIComponent(projectId)}`,
-      );
-
-      expect(response.status).toBe(503);
-      await expect(response.json()).resolves.toMatchObject({
-        code: "zcode_cli_not_found",
-      });
-    });
-
-    it("maps protocol failures to 502", async () => {
-      const listMcpServers = vi.fn(async () => {
-        throw new ZCodeProtocolError(
-          "zcode_protocol_timeout",
-          "ZCode request timed out",
-        );
-      });
-      const provider = {
-        name: "zcode",
-        displayName: "ZCode",
-        listMcpServers,
-      } as unknown as AgentProvider;
-      const routes = createProvidersRoutes({ providers: [provider] });
-
-      const response = await routes.request(
-        `/zcode/mcp-servers?projectId=${encodeURIComponent(projectId)}`,
-      );
-
-      expect(response.status).toBe(502);
-      await expect(response.json()).resolves.toMatchObject({
-        code: "zcode_protocol_timeout",
-      });
-    });
   });
 });

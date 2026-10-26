@@ -142,7 +142,7 @@ export interface ModelSettings {
   permissions?: PermissionRules;
   /**
    * Provider-native edit boundary. Claude resumes through an ancestor UUID;
-   * Pi and ZCode fork before the native user message ID supplied here.
+   * Pi forks before the native user message ID supplied here.
    */
   resumeSessionAt?: string;
   /**
@@ -850,11 +850,11 @@ export class Supervisor {
     // Add the initial user message to history with the same UUID we passed to provider.
     process.addInitialUserMessage(message, messageUuid, message.tempId);
 
-    // Pi and ZCode edit-fork around a native message boundary and
+    // Pi edit-forks around a native message boundary and
     // preserve the source session, so the supervisor must re-key the process
     // onto the fork's native id once the provider reports it.
     const isCrossSessionEditFork =
-      (activeProvider.name === "pi" || activeProvider.name === "zcode") &&
+      activeProvider.name === "pi" &&
       Boolean(resumeSessionId && modelSettings?.resumeSessionAt);
     const isCodexFork =
       activeProvider.name === "codex" &&

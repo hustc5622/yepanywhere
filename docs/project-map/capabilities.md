@@ -10,7 +10,7 @@
 | 创建或继续工作 | prompt、provider、model、权限、附件 → session/process ID 或排队结果 | `NewSessionForm` → `SessionCommandService` → `RuntimeController` → `Supervisor` → provider。`start` 与无消息的 `create` 分开；附件可先建 session，再上传、发送。F1 |
 | 阅读历史并监督实时进度 | project/session/branch、游标 → 问题目录、工具组、文本、状态、按需详情 | `useSession` + `SessionDisplayService` 合并历史与运行事件；新显示投影与 legacy 路径并存。折叠工具合集可带 `durationMs`/`timedCount`，没有可靠起止时不推算。依赖 provider store、runtime journal、内存缓存。F2 |
 | 批准工具或回答 agent | request ID、批准/拒绝/答案 → 继续执行或明确失败 | `SessionInteractionService` 在 runtime / Codex bridge 中选请求持有者；`InteractionBroker` 协调并发回答；通知只是提醒入口。F3 |
-| 编辑历史探索另一条路线 | 原 prompt 身份、修改文本 → 新会话或 provider 特定恢复结果 | `resolveSessionEditSubmission` 区分 Codex/Pi/ZCode fork 与 Claude resume；不是统一“截断文件”。Codex 使用原生 fork，另记 family 元数据。F4 |
+| 编辑历史探索另一条路线 | 原 prompt 身份、修改文本 → 新会话或 provider 特定恢复结果 | `resolveSessionEditSubmission` 区分 Codex/Pi fork 与 Claude resume；不是统一“截断文件”。Codex 使用原生 fork，另记 family 元数据。F4 |
 | 及时发现要处理的会话 | 聚合状态、访问记录 → needsAttention / active / recent / unread | `createInboxRoutes` 结合 catalog、runtime、bridge、metadata、`NotificationService`；可见会话页面标记已读，activity 事件刷新其他客户端。F5 |
 
 以上对应的源码入口：
@@ -51,7 +51,7 @@
 | Gemini | registry 同时包含 legacy Gemini 与 ACP；`getProvider("gemini")` 和 `getProvider("gemini-acp")` 都返回 ACP 实例 | `sdk/providers/index.ts` `getProvider`；`gemini-acp.ts`、`sessions/gemini-reader.ts` |
 | Pi | active；RPC 执行路径和原生 session tree；网关配置可按 session 保存 | `sdk/providers/pi.ts`、`sessions/pi-reader.ts`；参考 `references/pi/.../rpc-types.ts`，本轮只抽查命令定义 |
 | Kimi | active；ACP 适配，独立 scanner/reader | `sdk/providers/kimi.ts`、`projects/kimi-scanner.ts`、`sessions/kimi-reader.ts` |
-| ZCode | active；app-server adapter、SQLite reader、独立 hook bridge | `sdk/providers/zcode.ts`、`sessions/zcode-db.ts`、`zcode-bridge/ZCodeBridgeService.ts`；未探测本机 CLI，协议兼容性待确认 |
+| ZCode | retired（2026-10 移除）；旧数据中的 `zcode` 按 retired provider 处理，接口返回 410 | `sdk/providers/policy.ts` `RETIRED_PROVIDER_NAMES` |
 | Cursor | **实际 active registry 成员**，有 ACP adapter 与 SQLite/blob 历史读取；旧总览未列全 | `sdk/providers/cursor.ts`、`sessions/cursor-store.ts`、`sessions/cursor-reader.ts` |
 | Claude | 不在 active discovery；`getProvider("claude")` 仍能解析，供既有会话兼容 | `sdk/providers/index.ts` `getAllProviders/getProvider`；`claude.ts`、`sessions/reader.ts` |
 | Claude Ollama / OpenCode | policy 仍把 `claude-ollama` 算 live，但 server `getProvider` 无对应分支；OpenCode 被明确列为 retired | 差异是现状，不代表可新建或可安全删除；见 findings |

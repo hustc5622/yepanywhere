@@ -37,8 +37,6 @@ import type {
   SessionBranchOption,
   SessionBranchState,
   UnifiedSession,
-  ZCodeSessionContent,
-  ZCodeStoredMessage,
 } from "@yep-anywhere/shared";
 import {
   getGeminiUserMessageText,
@@ -570,16 +568,6 @@ export function normalizeSession(
             message: { role: "assistant", content },
           };
         }),
-      });
-    }
-    case "zcode": {
-      const messages = convertZCodeMessages(data.session);
-      return sanitizePublicNormalizedSession({
-        ...summary,
-        branchState: loaded.branchState,
-        messages: loaded.branchState
-          ? annotateBranchMessages(messages, loaded.branchState)
-          : messages,
       });
     }
   }
@@ -3888,141 +3876,3 @@ function mergeKimiGoalSnapshots(
   }
   return result;
 }
-
-// --- ZCode Conversion Logic ---
-
-/**
- * Convert a persisted ZCode session into normalized Messages.
- * Full implementation: maps stored messages to Message objects with text,
- * reasoning (thinking), and tool (tool_use + tool_result) parts.
- * Unknown part types are safely ignored.
- */
-export function convertZCodeMessages(session: ZCodeSessionContent): Message[] {
-  const messages: Message[] = [];
-  const sid = session.sessionId;
-
-  for (const stored of session.messages) {
-    const role = stored.role === "user" ? "user" : "assistant";
-    const blocks: ContentBlock[] = [];
-    const toolResults: Array<{
-      toolUseId: string;
-      content: string;
-      isError: boolean;
-    }> = [];
-
-    for (const part of stored.parts) {
-      const partType = part?.type;
-      if (typeof partType !== "string") continue;
-
-      switch (partType) {
-        case "text": {
-          const text = typeof part.text === "string" ? part.text : "";
-          if (text) {
-            blocks.push({ type: "text", text });
-          }
-          break;
-        }
-        case "reasoning": {
-          const thinking = typeof part.text === "string" ? part.text : "";
-          if (thinking) {
-            blocks.push({ type: "thinking", thinking });
-          }
-          break;
-        }
-        case "tool": {
-          const callId =
-            typeof part.callID === "string" ? part.callID : part.id;
-          const toolName =
-            typeof part.tool === "string" ? part.tool : "Unknown";
-          const state = part.state as Record<string, unknown> | undefined;
-          const status =
-            typeof state?.status === "string" ? state.status : "pending";
-          const input = state?.input;
-          const output = state?.output;
-          const isError = status === "error";
-
-          // Emit tool_use block.
-          blocks.push({
-            type: "tool_use",
-            id: callId,
-            name: toolName,
-            input: input ?? {},
-            status,
-          });
-
-          // Emit tool_result if completed or error.
-          if (status === "completed" || status === "error") {
-            toolResults.push({
-              toolUseId: callId,
-              content:
-                typeof output === "string"
-                  ? output
-                  : JSON.stringify(output ?? ""),
-              isError,
-            });
-          }
-          break;
-        }
-        case "step-start":
-        case "step-finish":
-        case "timeline":
-        case "file":
-        case "snapshot":
-        case "patch":
-        case "compaction":
-        case "retry":
-        case "agent":
-        case "subagent":
-          // Metadata-only parts — no transcript content in P2.
-          break;
-        default:
-          // Unknown part type — safely ignored.
-          break;
-      }
-    }
-
-    // Emit assistant message with content blocks.
-    if (blocks.length > 0) {
-      messages.push({
-        type: role,
-        uuid: stored.id,
-        session_id: sid,
-        ...(typeof stored.createdAt === "number"
-          ? { timestamp: new Date(stored.createdAt).toISOString() }
-          : {}),
-        message: {
-          role,
-          content: blocks,
-          ...(stored.model ? { model: stored.model } : {}),
-        },
-      });
-    }
-
-    // Emit tool results as separate user messages.
-    for (const tr of toolResults) {
-      messages.push({
-        type: "user",
-        // Synthesized results need stable identities for pagination cursors.
-        uuid: `${stored.id}-result-${tr.toolUseId}`,
-        session_id: sid,
-        tool_use_id: tr.toolUseId,
-        message: {
-          role: "user",
-          content: [
-            {
-              type: "tool_result",
-              tool_use_id: tr.toolUseId,
-              content: tr.content,
-              ...(tr.isError ? { status: "error" } : {}),
-            },
-          ],
-        },
-      });
-    }
-  }
-
-  return messages;
-}
-
-// Suppress unused import — ZCodeStoredMessage is used for type safety.
-void (null as unknown as ZCodeStoredMessage);

@@ -178,20 +178,20 @@ export interface AgentSession {
   setPermissionMode?: (mode: PermissionMode) => Promise<void>;
   /**
    * Trigger a provider-native context compaction for this session
-   * (e.g. ZCode `session/compact`). Providers without a compact capability
+   * (e.g. Pi `compact`). Providers without a compact capability
    * omit this.
    */
   compact?: () => Promise<void>;
   /**
    * Change the provider-native reasoning effort / thought level mid-session
-   * (e.g. ZCode `session/setThoughtLevel`). Providers without a mid-session
+   * (e.g. Pi `set_thinking_level`). Providers without a mid-session
    * level API omit this. Implementations must fail closed when the level is
    * not supported by the session's current model.
    */
   setReasoningEffort?: (effort: string) => Promise<void>;
   /**
-   * Read the provider-native session goal status (e.g. ZCode
-   * `session/goal {action: "show"}`). The `response` field is the
+   * Read the provider-native session goal status (e.g. Codex
+   * `thread/goal`). The `response` field is the
    * provider-rendered status text.
    */
   getGoal?: () => Promise<import("@yep-anywhere/shared").ProviderGoalState>;
@@ -295,15 +295,4 @@ export interface AgentProvider {
   getAvailableModels(options?: {
     waitForRefresh?: boolean;
   }): Promise<ModelInfo[]>;
-
-  /**
-   * List MCP server statuses for a workspace, when the provider can report
-   * them. Read-only introspection: providers must never open MCP connections
-   * here. Unsupported providers simply omit this method.
-   */
-  listMcpServers?(
-    cwd: string,
-  ): Promise<
-    Record<string, import("@yep-anywhere/shared").ProviderMcpServerStatus>
-  >;
 }

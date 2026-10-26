@@ -22,15 +22,12 @@ import {
 } from "./provider-groups.js";
 import { ClaudeSessionReader } from "./reader.js";
 import type { ISessionReader } from "./types.js";
-import { ZCODE_DB_PATH } from "./zcode-db.js";
-import { ZCodeSessionReader } from "./zcode-reader.js";
 
 export interface ProviderProjectCatalog {
   codexPaths: Set<string>;
   geminiPaths: Set<string>;
   piPaths: Set<string>;
   kimiPaths: Set<string>;
-  zcodePaths: Set<string>;
   cursorPaths: Set<string>;
   /** Optional so older catalog builders/tests remain valid. */
   mcodePaths?: Set<string>;
@@ -61,8 +58,6 @@ export interface ProviderResolutionDeps {
    * unlike other providers there is no fallback reader.
    */
   dshReaderFactory?: (projectPath: string) => DshSessionReader;
-  zcodeDbPath?: string;
-  zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   allowStaleSessionCache?: boolean;
   /** Yep sidecar lineage used when a stable provider API cannot persist it. */
   sessionMetadataService?: {
@@ -83,7 +78,6 @@ export interface SessionSource {
     | "gemini"
     | "pi"
     | "kimi"
-    | "zcode"
     | "cursor"
     | "mcode"
     | "dsh";
@@ -155,8 +149,7 @@ function mayHaveCursorSessions(
     provider === "codex" ||
     provider === "gemini" ||
     provider === "pi" ||
-    provider === "kimi" ||
-    provider === "zcode"
+    provider === "kimi"
   );
 }
 
@@ -183,23 +176,6 @@ function mayHaveDshSessions(
   }
   // The reader filters by cwd, so a miss only costs one cached directory scan.
   return normalizeProviderGroup(project.provider) !== null;
-}
-
-function mayHaveZCodeSessions(
-  project: Project,
-  catalog?: ProviderProjectCatalog,
-): boolean {
-  if (catalog) {
-    return catalog.zcodePaths.has(canonicalizeProjectPath(project.path));
-  }
-  const provider = normalizeProviderGroup(project.provider);
-  return (
-    provider === "claude" ||
-    provider === "codex" ||
-    provider === "gemini" ||
-    provider === "pi" ||
-    provider === "kimi"
-  );
 }
 
 function createClaudeSource(
@@ -295,22 +271,6 @@ function createPiSource(
   };
 }
 
-function createZCodeSource(
-  project: Project,
-  deps: ProviderResolutionDeps,
-): SessionSource | null {
-  const dbPath = deps.zcodeDbPath ?? ZCODE_DB_PATH;
-  const reader =
-    deps.zcodeReaderFactory?.(project.path) ??
-    new ZCodeSessionReader({ dbPath, projectPath: project.path });
-  return {
-    provider: "zcode",
-    reader,
-    sessionDir: dbPath,
-    kind: "zcode",
-  };
-}
-
 function buildCandidateGroups(
   project: Project,
   preferredProvider: ProviderName | string | undefined,
@@ -339,9 +299,6 @@ function buildCandidateGroups(
   }
   if (mayHaveKimiSessions(project, catalog)) {
     pushGroup("kimi");
-  }
-  if (mayHaveZCodeSessions(project, catalog)) {
-    pushGroup("zcode");
   }
   if (mayHaveCursorSessions(project, catalog)) {
     pushGroup("cursor");
@@ -373,8 +330,6 @@ function getSourceForGroup(
       return createGeminiSource(project, deps, catalog);
     case "kimi":
       return createKimiSource(project, deps);
-    case "zcode":
-      return createZCodeSource(project, deps);
     case "cursor":
       return createCursorSource(project, deps);
     case "mcode":

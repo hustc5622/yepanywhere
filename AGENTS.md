@@ -29,7 +29,7 @@ Yep Anywhere 是一个面向移动端优先的 coding agent 监督器。核心�
 - Hono 服务端管理 provider 进程，并暴露 REST/WebSocket API。
 - React 客户端通过 WebSocket 流式展示 session 状态。
 - session 数据以 provider JSONL/session 文件持久化，并在展示前做 normalize。
-- 支持多个 provider：Claude Code、Codex、Gemini、Pi、Kimi、ZCode 以及相关 bridge 模式。
+- 支持多个 provider：Claude Code、Codex、Gemini、Pi、Kimi、MiniMax Code、DeepSeek Harness（只读）以及相关 bridge 模式。ZCode provider 已移除，旧数据中的 `zcode` 按 retired provider 处理。
 
 从过去的 Codex session 看，本仓库高频工作主要集中在：
 - Codex bridge / remote app-server 行为（`4510`、`cf`、MCP profiles）。
@@ -41,8 +41,6 @@ Yep Anywhere 是一个面向移动端优先的 coding agent 监督器。核心�
 涉及 Pi（`@earendil-works/pi-coding-agent`）的 RPC 协议、扩展、原生 session tree/fork、工具调用或展示改动时，先查看 `references/pi/`；RPC 重点看 `packages/coding-agent/src/modes/rpc/`，session/extension 重点看 `packages/coding-agent/src/core/`。本项目实现入口通常在 `packages/server/src/sdk/providers/pi.ts`、`packages/server/resources/pi-yep-extension.mjs`、`packages/server/src/sessions/pi-*` 和 `packages/shared/src/pi-schema/`。
 
 涉及 Codex CLI、Codex app-server、remote bridge、session rollback/branch、Codex JSONL/session 解析或 Codex 工具展示改动时，先查看仓库内已有的 Codex CLI 参考源码，不要凭印象实现。参考源码位于 `references/codex/`；其中 app-server 相关实现重点看 `references/codex/codex-rs/app-server*`，CLI/TUI 相关实现重点看 `references/codex/codex-rs/cli` 和 `references/codex/codex-rs/tui`。本项目自身的 Codex 实现入口通常在 `packages/server/src/codex-bridge/`、`packages/server/src/sdk/providers/codex*`、`packages/server/src/sessions/codex-*`、`packages/client/src/lib/codex*` 和 `packages/shared/src/codex-schema/`。
-
-涉及 ZCode（zcode provider、app-server 协议、session fork/attachments/mcp/bridge）改动时，协议事实一律以本机真实 CLI（`/Applications/ZCode.app/Contents/Resources/glm/zcode.cjs`）的只读探测和 bundle 源码为准，不要凭印象实现；所有 params schema 都是 strict，改任何请求结构前先用临时 app-server 探测（参考 `scripts/smoke-zcode-app-server.ts` 的写法）。实现入口：`packages/server/src/sdk/providers/zcode*`、`packages/server/src/sessions/zcode-*`、`packages/shared/src/zcode-schema/`、`packages/server/src/zcode-bridge/`。ZCode bridge 采用 hook 插件（`packages/server/resources/zcode-plugin/`），需用户手动运行 `scripts/install-zcode-yep-plugin.sh` 安装后才生效；不要代替用户安装（会改写 `~/.zcode` 配置）。read-only smoke：`pnpm test:zcode-app-server-smoke -- --read-only --summary`；会发起模型请求或写诊断 session 的 smoke 必须先取得用户明确授权。
 
 涉及 MiniMax Code（`mcode` provider、`mcode acp`、`~/.minimax` 会话目录/transcript、App 会话接管）改动时，协议事实以本机真实 CLI（`mcode`，npm 包 `@minimax/code`）和 `references/minimax/` 为准；ACP 服务端行为看 `references/minimax/pretty/run-acp-command.js`，存储/权限看 `references/minimax/app/mavis/`。CLI 与桌面 App 共用 `~/.minimax`，Yep 只读其数据库与 transcript，不要写入。实现入口：`packages/server/src/sdk/providers/mcode*.ts`、`packages/server/src/sessions/mcode-*.ts`、`packages/server/src/projects/mcode-scanner.ts`。真实联调脚本 `scripts/smoke-mcode-provider.ts` 会发起模型请求，需用户授权。说明见 `docs/project/mcode.md`。
 
@@ -72,7 +70,7 @@ PORT=4000 YEP_ANYWHERE_PROFILE=dev pnpm dev
 - `YEP_ANYWHERE_PROFILE`：创建 `~/.yep-anywhere-{profile}/`。
 - `YEP_ANYWHERE_DATA_DIR`：显式覆盖数据目录。
 - `CLAUDE_CONFIG_DIR`：Claude Code 配置/session 根目录，默认 `~/.claude`。
-- `ENABLED_PROVIDERS`：逗号分隔的 provider allowlist。有效值包括 `claude`、`claude-ollama`、`codex`、`codex-oss`、`gemini`、`gemini-acp`、`pi`、`kimi`、`zcode`、`mcode`、`dsh`（只读）。
+- `ENABLED_PROVIDERS`：逗号分隔的 provider allowlist。有效值包括 `claude`、`claude-ollama`、`codex`、`codex-oss`、`gemini`、`gemini-acp`、`pi`、`kimi`、`mcode`、`dsh`（只读）。
 - `VOICE_INPUT=false`：在服务端禁用语音输入按钮。
 - `YEP_RUNTIME_EXTERNAL=true`：部署时把 agent runtime 拆成独立进程（见下面的热叠加章节）。
 - `YEP_RUNTIME_MODE`：`embedded`（默认）或 `external`，运行时形态。

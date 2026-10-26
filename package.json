@@ -39,7 +39,6 @@
     "test:codex-app-server-smoke": "tsx --conditions source scripts/smoke-codex-app-server.ts",
     "test:codex-lifecycle-hydration-smoke": "tsx --conditions source scripts/smoke-codex-lifecycle-hydration.ts --disposable",
     "test:codex-history-read-smoke": "tsx --conditions source scripts/smoke-codex-history-read.ts --read-only --summary",
-    "test:zcode-app-server-smoke": "tsx --conditions source scripts/smoke-zcode-app-server.ts",
     "test:e2e:ui": "corepack pnpm --filter client test:e2e:ui",
     "test:e2e:sdk": "corepack pnpm --filter server test:e2e",
     "lint": "corepack pnpm lint:typography && biome check .",

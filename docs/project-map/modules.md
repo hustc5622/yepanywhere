@@ -21,7 +21,7 @@
 | [runtime/types.ts](../../packages/server/src/runtime/types.ts) `RuntimeController`；[EmbeddedRuntimeController.ts](../../packages/server/src/runtime/EmbeddedRuntimeController.ts)；[HttpRuntimeController.ts](../../packages/server/src/runtime/HttpRuntimeController.ts) | command、display、process API、interaction；embedded 委托 Supervisor，external 请求独立控制面 | 会话命令/查询/事件统一边界。web shell 代码应通过 controller 查询 ownership，external 下本地 Supervisor 没有实际 worker |
 | [supervisor/Supervisor.ts](../../packages/server/src/supervisor/Supervisor.ts) `startSession/resumeSession/registerProcess/processQueue` | Embedded controller；依赖 provider、`Process`、`WorkerQueue` | 进程/会话映射、worker admission、排队、回收、ownership 事件；队列主要是内存，不是可靠任务数据库 |
 | [supervisor/Process.ts](../../packages/server/src/supervisor/Process.ts) `Process/setState` | Supervisor；依赖 `AgentSession` iterator、消息队列 | 当前 turn、pending input、hold、消息 buffer、异步事件；provider 才执行原生操作。UI ownership 与 process activity 不同 |
-| [sdk/providers/types.ts](../../packages/server/src/sdk/providers/types.ts) `AgentProvider/AgentSession/StartSessionOptions`；[index.ts](../../packages/server/src/sdk/providers/index.ts) `getProvider` | Supervisor；依赖原生 CLI/SDK/app-server | provider 接入入口；原生写入、approval mapping、工具和消息 normalize 需逐 provider 核对。Codex 与 ZCode 的通知缓冲共用 [utils/async-queue.ts](../../packages/server/src/utils/async-queue.ts) `AsyncQueue` |
+| [sdk/providers/types.ts](../../packages/server/src/sdk/providers/types.ts) `AgentProvider/AgentSession/StartSessionOptions`；[index.ts](../../packages/server/src/sdk/providers/index.ts) `getProvider` | Supervisor；依赖原生 CLI/SDK/app-server | provider 接入入口；原生写入、approval mapping、工具和消息 normalize 需逐 provider 核对。Codex 的通知缓冲使用 [utils/async-queue.ts](../../packages/server/src/utils/async-queue.ts) `AsyncQueue` |
 | [projects/scanner.ts](../../packages/server/src/projects/scanner.ts) `ProjectScanner`；[routes/provider-catalog.ts](../../packages/server/src/routes/provider-catalog.ts) `buildProviderProjectCatalog` | projects/global sessions/inbox/search/recents 等 | 聚合真实目录与 provider 项目，维护扫描缓存；新 provider 不能只加入 runtime registry |
 | [sessions/provider-resolution.ts](../../packages/server/src/sessions/provider-resolution.ts) `resolveSessionSources/findSessionSummaryAcrossProviders`；[types.ts](../../packages/server/src/sessions/types.ts) `ISessionReader` | command、列表、display、历史 API | 按来源选 reader，返回原生历史/summary；应复用解析入口，避免页面/路由自行猜 provider 文件位置 |
 | [codex-history/CodexSessionCatalog.ts](../../packages/server/src/codex-history/CodexSessionCatalog.ts) `CodexSessionCatalog`；[CodexAppServerHistoryReader.ts](../../packages/server/src/codex-history/CodexAppServerHistoryReader.ts) `getSemanticTurnsPage` | app 装配，provider catalog、sessions、display | Codex catalog 与分页历史；仍有 rollout reader fallback，来源可用性及 revision 要保留 |
@@ -55,7 +55,7 @@
 | `/api/inbox`、`/api/recents`、`/api/search`、`/api/archive/sessions` | 聚合/最近访问/全文/归档；recents、search 依赖对应 service |
 | `/api/reports`、`/api/local-file`、`/api/local-image` | 独立报告与预览。local-image 接受 allowlist，并在注入 scanner 时接受已发现的本地项目路径；可提供图片和视频 |
 | `/api/providers`、`/api/harness-updates`、`/api/codex-accounts`、`/api/llm-gateway-keys` | provider/CLI 更新、Codex 账号与网关选择；账号路由要求 dataDir |
-| `/api/codex-bridge`、`/api/zcode-bridge` | 外部会话适配；Codex 要注入 bridge service；ZCode hook 另有 token 检查 |
+| `/api/codex-bridge` | 外部会话适配；Codex 要注入 bridge service |
 | `/api/settings`、`/api/auth/feishu`、`/api/channels/feishu` | settings/channel service 存在时注册；配置不等于通道已连通 |
 | `/api/push`、`/api/connections`、`/api/browser-profiles`、`/api/activity` | 推送注册、连接档案、activity；按依赖条件注册 |
 | `/api/sharing` | 分享，要求 service；注册存在仍可能缺 Worker 配置。`/api/devices` 与设备桥接已删除 |
@@ -69,7 +69,7 @@
 ## 权限与运行边界
 
 - 主 API：[middleware/security.ts](../../packages/server/src/middleware/security.ts) `hostCheckMiddleware/corsMiddleware/requireCustomHeader` 校验 host/origin，变更请求要求 `X-Yep-Anywhere: true`。这不是业务用户的逐项目 ACL。
-- 认证：[middleware/auth.ts](../../packages/server/src/middleware/auth.ts) `createAuthMiddleware` 根据 AuthService、`authDisabled`、desktop token、cookie 执行；auth 未启用时存在放行路径。`/api/auth/*` 与 ZCode hook 有例外，hook 自行鉴权。反向代理前缀下的例外匹配没有动态验收。
+- 认证：[middleware/auth.ts](../../packages/server/src/middleware/auth.ts) `createAuthMiddleware` 根据 AuthService、`authDisabled`、desktop token、cookie 执行；auth 未启用时存在放行路径。`/api/auth/*` 有例外。反向代理前缀下的例外匹配没有动态验收。
 - WS：[routes/ws.ts](../../packages/server/src/routes/ws.ts) `createWsRoutes` 校验 origin；主 API 中间件作用于 upgrade。`handleRequest` 用服务端 Symbol `WS_INTERNAL_AUTHENTICATED` 标识内部转发，不靠客户端可伪造的字符串头来替代认证。没有应用层端到端加密的当前实现证据。
 - external runtime：[runtime/control-server.ts](../../packages/server/src/runtime/control-server.ts) `createRuntimeControlApp/tokensMatch` 校验 Bearer token；[HttpRuntimeController.ts](../../packages/server/src/runtime/HttpRuntimeController.ts) `start` 检查协议。控制面的 `/events`、`/activity-events` 是内部 SSE，不应据此把浏览器订阅描述成 SSE。
 - 文件 API：[routes/local-file.ts](../../packages/server/src/routes/local-file.ts) `createLocalFileRoutes` 读取支持类型的绝对路径、`realpath/stat`；[uploads/manager.ts](../../packages/server/src/uploads/manager.ts) `UploadManager` 则检查上传目录 containment。这些能力处于不同路径信任边界，修改时应分别检查。

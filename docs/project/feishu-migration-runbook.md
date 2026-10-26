@@ -122,7 +122,7 @@ curl -fsS <base-url>/build-info.json
 
 | Profile | 必须证明 |
 | --- | --- |
-| clean/default host | Node pin 与 pnpm pin 一致；无 Feishu config/secret 仍可 build/test；channel inert；既有 Claude/Codex/Gemini/Pi/Kimi/ZCode 路径不因 Lark SDK 初始化失败 |
+| clean/default host | Node pin 与 pnpm pin 一致；无 Feishu config/secret 仍可 build/test；channel inert；既有 Claude/Codex/Gemini/Pi/Kimi 路径不因 Lark SDK 初始化失败 |
 | Feishu-enabled fake host | 只使用 synthetic config、mock SDK、临时 data dir 和 fake provider；protocol、interaction、session、artifact、channel tests 通过；不访问真实 tenant |
 
 仓库同时维护 `.nvmrc` 和 `.node-version`，两者必须相同。部署脚本会拒绝不一致的 Node pin 或错误 pnpm 版本；不要因为某台主机恰好安装了更高 Node 或全局 pnpm 就跳过门禁。

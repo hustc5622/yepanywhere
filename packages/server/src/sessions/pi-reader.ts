@@ -9,13 +9,16 @@ import {
   SESSION_TITLE_MAX_LENGTH,
   type SessionBranchState,
   type UrlProjectId,
-  type ZCodeStoredMessage,
   getPiMessageText,
   parsePiSessionHeader,
   parsePiSessionJsonl,
 } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
 import type { SessionSummary } from "../supervisor/types.js";
+import {
+  type CopiedPrefixMessage,
+  buildCopiedPrefixForkBranchView,
+} from "./copied-prefix-branch.js";
 import { convertPiSession, derivePiSession } from "./normalization.js";
 import {
   PI_SESSIONS_DIR,
@@ -32,7 +35,6 @@ import type {
   LoadedSession,
   SessionFileEntry,
 } from "./types.js";
-import { buildCopiedPrefixForkBranchView } from "./zcode-branch.js";
 
 export interface PiSessionReaderOptions {
   sessionsDir?: string;
@@ -384,8 +386,8 @@ export class PiSessionReader implements ISessionReader {
                   deferMedia: true,
                 });
           if (!parsed) return null;
-          const messages: ZCodeStoredMessage[] = parsed.activeEntries.flatMap(
-            (entry): ZCodeStoredMessage[] => {
+          const messages: CopiedPrefixMessage[] = parsed.activeEntries.flatMap(
+            (entry): CopiedPrefixMessage[] => {
               if (!isPiMessageEntry(entry)) return [];
               const text = getPiMessageText(entry.message);
               return [
