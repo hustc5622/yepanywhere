@@ -11,6 +11,9 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - 新增 DeepSeek Harness（`dsh`）只读接入：侧栏项目与「全部会话」列出 `~/.dsh`（或 `DSH_HOME`）中的 dsh 会话，支持查看完整对话、思考和工具调用（Bash／Read／Edit 等沿用现有渲染），显示标题、模型、上下文用量与未读状态；dsh Web 或 dsh CLI 正在运行时显示「运行中」，等待工具审批或提问回答时显示「等待输入」。会话页底部以「在 dsh 中打开」按钮代替输入框，直接打开内嵌 dsh 页面中的同一会话继续对话；Yep 不写入 dsh 文件、不启动或续接 dsh 会话，归档只隐藏不移动文件，子 agent 会话暂不关联。可用 `ENABLED_PROVIDERS` 中的 `dsh` 控制开关。
 - 新增会话打开耗时诊断：`display/view` 返回分阶段 `Server-Timing`（attach、resolve、stamp、read、reduce、replay、wait、total）和缓存命中状态 `displayCache`（hit／miss／wait），只含耗时与固定标记，不含路径或会话内容；服务端冷读达到 500 ms 或失败时写入 `session_display_cold_read` 日志；客户端每次打开会话记录一行 `[SessionLoad]`（是否命中缓存、连接状态、首个新快照到达及其来源、HTTP 往返和服务端阶段），开启开发者模式远程日志后可在客户端日志中查看。
 
+### Changed
+- Pi 会话的时间线区分思维链与阶段性输出：工具调用之间的中间叙述按“进度”样式显示（左侧色条、浅底、标签），末尾回复保持正文样式；思维链改为空心节点加灯泡图标，展开后以虚线缩进、斜体小字呈现，不再与输出堆在一起。
+
 ### Fixed
 - Yep 中的 Pi 会话改为直接使用本机 Pi 的原生配置：此前 Yep 以 `--no-extensions` 和隔离的 `PI_CODING_AGENT_DIR` 启动 Pi，`~/.pi/agent` 中安装的扩展包（如 `pi-mcp-adapter`）、`mcp.json` 中的 MCP（如飞书 `feishu-mcp`）、技能等都不会加载。现在 Yep 只额外挂载自己的扩展，其余与终端 `pi` 一致；Yep 的数据目录 `pi-agent` 变为覆盖层，以符号链接指向 `~/.pi/agent`，仅 `settings.json` 每次启动时复制一份，Yep 的模型／思考等级切换不会改写终端 `pi` 的默认设置。每次启动 Pi 进程都会重新同步，终止会话后继续发消息即可加载最新配置。设置 `YEP_PI_NATIVE_CONFIG=false` 可恢复原隔离模式（原有隔离文件保存在 `pi-agent/.yep-isolated-backup/` 并在回退时还原）。
 - 会话消息里的链接（Markdown 链接、本地文件链接、外链）现在可以拖动选中文字并复制：链接不再被当作可拖拽对象，选中文本后松开鼠标也不会触发跳转或打开文件预览；普通单击仍照常打开。

@@ -353,6 +353,38 @@ describe("buildMessageRows", () => {
     });
   });
 
+  it("marks interim narration before later tool calls as progress when enabled", () => {
+    const items = [
+      text("intro", "Checking the gateway."),
+      toolCall("grep"),
+      text("step", "Gateway lacks the endpoint; checking keys."),
+      toolCall("read"),
+      text("final", "Done."),
+    ];
+    const base = {
+      items,
+      hasOlderMessages: false,
+      hasNewerMessages: false,
+      pendingMessages: [],
+      deferredMessages: [],
+      isCompacting: false,
+      focusedBranchItemId: null,
+      targetItemId: null,
+    };
+
+    const enabled = buildMessageRows({ ...base, interimTextIsProgress: true });
+    expect(enabled.find((row) => row.kind === "assistant-turn")).toMatchObject({
+      progressTextItemIds: ["intro", "step"],
+    });
+
+    const disabled = buildMessageRows(base);
+    expect(disabled.find((row) => row.kind === "assistant-turn")).toMatchObject(
+      {
+        progressTextItemIds: [],
+      },
+    );
+  });
+
   it("keys deferred rows by tempId and falls back to index", () => {
     const rows = buildMessageRows({
       items: [],

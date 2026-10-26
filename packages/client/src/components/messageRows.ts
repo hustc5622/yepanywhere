@@ -246,6 +246,42 @@ export function groupItemsIntoTurns(items: RenderItem[]): MessageTurnGroup[] {
   return groups;
 }
 
+function getProgressTextItemIds(
+  items: RenderItem[],
+  interimTextIsProgress: boolean,
+): string[] {
+  const prelude = getQuestionPreludeTextItemIds(items);
+  if (!interimTextIsProgress) return prelude;
+  const ids = new Set([...prelude, ...getInterimTextItemIds(items)]);
+  return items.filter((item) => ids.has(item.id)).map((item) => item.id);
+}
+
+/**
+ * Unmarked text that is followed by a later tool call narrates a step in the
+ * turn rather than answering it; the trailing text stays the final response.
+ */
+function getInterimTextItemIds(items: RenderItem[]): string[] {
+  const ids: string[] = [];
+  let hasLaterTool = false;
+  for (let index = items.length - 1; index >= 0; index--) {
+    const item = items[index];
+    if (!item) continue;
+    if (item.type === "tool_call" || item.type === "display_tool_group") {
+      hasLaterTool = true;
+      continue;
+    }
+    if (
+      hasLaterTool &&
+      item.type === "text" &&
+      item.phase === undefined &&
+      !item.asyncMessage
+    ) {
+      ids.unshift(item.id);
+    }
+  }
+  return ids;
+}
+
 /**
  * Providers without commentary/final markers treat only the contiguous
  * text immediately before an answered question as progress: it is a checkpoint
@@ -335,6 +371,12 @@ interface BuildMessageRowsParams {
   targetItemId: string | null;
   /** Turn-key strategy. Defaults to the window-relative `defaultTurnKey`. */
   resolveTurnKey?: TurnKeyResolver;
+  /**
+   * Treat unmarked text followed by a later tool call in the same turn as
+   * progress. For providers (e.g. Pi) that emit interim narration between
+   * tool calls but no commentary/final markers.
+   */
+  interimTextIsProgress?: boolean;
 }
 
 /**
@@ -354,6 +396,7 @@ export function buildMessageRows({
   focusedBranchItemId,
   targetItemId,
   resolveTurnKey = defaultTurnKey,
+  interimTextIsProgress = false,
 }: BuildMessageRowsParams): MessageRow[] {
   const rows: MessageRow[] = [];
 
@@ -392,7 +435,10 @@ export function buildMessageRows({
       kind: "assistant-turn",
       key: resolveTurnKey(group.items),
       items: group.items,
-      progressTextItemIds: getQuestionPreludeTextItemIds(group.items),
+      progressTextItemIds: getProgressTextItemIds(
+        group.items,
+        interimTextIsProgress,
+      ),
       resumedAfterQuestion: group.resumedAfterQuestion,
       turnTimestamp: firstItem.sourceMessages[0]?.timestamp,
       turnUpdatedAt,

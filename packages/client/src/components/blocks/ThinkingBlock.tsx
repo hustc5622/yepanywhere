@@ -121,6 +121,7 @@ export const ThinkingBlock = memo(function ThinkingBlock({
       }}
     >
       <summary className="collapsible__summary">
+        <ThinkingIcon />
         {isExpanded || !summaryPreview ? (
           <span className="thinking-block__label">
             {isStreaming
@@ -151,6 +152,28 @@ export const ThinkingBlock = memo(function ThinkingBlock({
     </details>
   );
 });
+
+/** Marks reasoning rows apart from narration without adding prose. */
+function ThinkingIcon() {
+  return (
+    <svg
+      className="thinking-block__icon"
+      viewBox="0 0 16 16"
+      width="1em"
+      height="1em"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.4"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      aria-hidden="true"
+      focusable="false"
+    >
+      <path d="M8 1.75a4.25 4.25 0 0 0-2.5 7.69V11h5V9.44A4.25 4.25 0 0 0 8 1.75Z" />
+      <path d="M6 13.25h4M6.75 14.75h2.5" />
+    </svg>
+  );
+}
 
 function previewLine(thinking: string): string {
   const firstLine = thinking.trim().split("\n", 1)[0]?.trim() ?? "";

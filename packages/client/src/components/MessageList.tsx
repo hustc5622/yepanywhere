@@ -395,6 +395,7 @@ export const MessageList = memo(function MessageList({
       focusedBranchItemId,
       targetItemId,
       resolveTurnKey,
+      interimTextIsProgress: provider === "pi",
     });
 
     pruneTurnKeyRegistry(registry, visibleRenderItems);
@@ -410,6 +411,7 @@ export const MessageList = memo(function MessageList({
     focusedBranchItemId,
     targetItemId,
     transcriptKey,
+    provider,
   ]);
 
   // Only the assistant turn at the transcript tail can use last-update

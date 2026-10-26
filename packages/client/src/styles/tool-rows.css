@@ -59,8 +59,12 @@
   padding-top: 2px;
 }
 
+/* Hollow dot: reasoning is a side lane, not a step of visible output. */
 .thinking-block.timeline-item::before {
   top: 8px;
+  box-sizing: border-box;
+  background: transparent;
+  border: 1px solid var(--timeline-dot-default);
 }
 
 .thinking-block.timeline-item::after {
