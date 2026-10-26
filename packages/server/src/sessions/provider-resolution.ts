@@ -7,6 +7,8 @@ import {
   CURSOR_ACP_SESSIONS_DIR,
   CursorSessionReader,
 } from "./cursor-reader.js";
+import type { DshSessionReader } from "./dsh-reader.js";
+import { DSH_SESSIONS_DIR } from "./dsh-store.js";
 import { collapseEditForkFamilies } from "./edit-fork-families.js";
 import { GeminiSessionReader } from "./gemini-reader.js";
 import { KimiSessionReader } from "./kimi-reader.js";
@@ -32,6 +34,8 @@ export interface ProviderProjectCatalog {
   cursorPaths: Set<string>;
   /** Optional so older catalog builders/tests remain valid. */
   mcodePaths?: Set<string>;
+  /** Projects with read-only DeepSeek Harness sessions. */
+  dshPaths?: Set<string>;
   geminiHashToCwd?: Promise<Map<string, string>>;
   codexSessionsByPath?: Map<string, SessionSummary[]>;
 }
@@ -52,6 +56,11 @@ export interface ProviderResolutionDeps {
   cursorReaderFactory?: (projectPath: string) => CursorSessionReader;
   mcodeSessionsDir?: string;
   mcodeReaderFactory?: (projectPath: string) => McodeSessionReader;
+  /**
+   * Read-only DeepSeek Harness reader. Absent when the provider is disabled;
+   * unlike other providers there is no fallback reader.
+   */
+  dshReaderFactory?: (projectPath: string) => DshSessionReader;
   zcodeDbPath?: string;
   zcodeReaderFactory?: (projectPath: string) => ZCodeSessionReader;
   allowStaleSessionCache?: boolean;
@@ -76,7 +85,8 @@ export interface SessionSource {
     | "kimi"
     | "zcode"
     | "cursor"
-    | "mcode";
+    | "mcode"
+    | "dsh";
 }
 
 export interface ResolvedSessionSummary {
@@ -161,6 +171,17 @@ function mayHaveMcodeSessions(
   }
   // Without a catalog, any non-mcode project may also hold MiniMax Code
   // sessions; the reader filters by cwd, so a miss only costs one query.
+  return normalizeProviderGroup(project.provider) !== null;
+}
+
+function mayHaveDshSessions(
+  project: Project,
+  catalog?: ProviderProjectCatalog,
+): boolean {
+  if (catalog?.dshPaths) {
+    return catalog.dshPaths.has(canonicalizeProjectPath(project.path));
+  }
+  // The reader filters by cwd, so a miss only costs one cached directory scan.
   return normalizeProviderGroup(project.provider) !== null;
 }
 
@@ -328,6 +349,9 @@ function buildCandidateGroups(
   if (mayHaveMcodeSessions(project, catalog)) {
     pushGroup("mcode");
   }
+  if (mayHaveDshSessions(project, catalog)) {
+    pushGroup("dsh");
+  }
 
   return groups;
 }
@@ -355,7 +379,23 @@ function getSourceForGroup(
       return createCursorSource(project, deps);
     case "mcode":
       return createMcodeSource(project, deps);
+    case "dsh":
+      return createDshSource(project, deps);
   }
+}
+
+function createDshSource(
+  project: Project,
+  deps: ProviderResolutionDeps,
+): SessionSource | null {
+  const reader = deps.dshReaderFactory?.(project.path);
+  if (!reader) return null;
+  return {
+    provider: "dsh",
+    reader,
+    sessionDir: DSH_SESSIONS_DIR,
+    kind: "dsh",
+  };
 }
 
 function createMcodeSource(

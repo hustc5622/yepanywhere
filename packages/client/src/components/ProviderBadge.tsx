@@ -14,6 +14,7 @@ const PROVIDER_COLORS: Record<LiveProviderName, string> = {
   zcode: "var(--provider-zcode)", // ZCode
   cursor: "var(--provider-cursor)",
   mcode: "var(--provider-mcode)",
+  dsh: "var(--provider-dsh)",
 };
 
 const PROVIDER_LABELS: Record<LiveProviderName, string> = {
@@ -32,6 +33,7 @@ const PROVIDER_LABELS: Record<LiveProviderName, string> = {
   zcode: "ZCode",
   cursor: "Cursor",
   mcode: "MiniMax",
+  dsh: "dsh",
 };
 
 interface ProviderBadgeProps {

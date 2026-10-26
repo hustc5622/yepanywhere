@@ -591,6 +591,16 @@ describe("extractSessionIdFromFileEvent", () => {
       }),
     ).toBe("mvs_08415984c3c94c9f84781cdcf3c4346f");
   });
+
+  it("uses the session directory for DeepSeek Harness logs", () => {
+    expect(
+      extractSessionIdFromFileEvent({
+        provider: "dsh",
+        relativePath:
+          "--Users-me-work--/session-846eb2c2-c340-433c-ab4e-508ba45ba257/session.v4.jsonl.zstd",
+      }),
+    ).toBe("session-846eb2c2-c340-433c-ab4e-508ba45ba257");
+  });
 });
 
 describe("extractKimiAgentIdFromFileEvent", () => {

@@ -313,6 +313,13 @@ export class FileWatcher {
         return /(?:^|[\\/])messages\.jsonl$/.test(relativePath)
           ? "session"
           : "other";
+      case "dsh":
+        // ~/.dsh/sessions/<encoded-cwd>/<session-id>/session.v<N>.jsonl[.<codec>]
+        return /(?:^|[\\/])session(?:\.v\d+)?\.jsonl(?:\.[a-z]+)?$/.test(
+          relativePath,
+        )
+          ? "session"
+          : "other";
     }
   }
 

@@ -8,6 +8,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 ## [Unreleased]
 
 ### Added
+- 新增 DeepSeek Harness（`dsh`）只读接入：侧栏项目与「全部会话」列出 `~/.dsh`（或 `DSH_HOME`）中的 dsh 会话，支持查看完整对话、思考和工具调用（Bash／Read／Edit 等沿用现有渲染），显示标题、模型、上下文用量与未读状态；dsh Web 或 dsh CLI 正在运行时显示「运行中」，等待工具审批或提问回答时显示「等待输入」。会话页底部以「在 dsh 中打开」按钮代替输入框，直接打开内嵌 dsh 页面中的同一会话继续对话；Yep 不写入 dsh 文件、不启动或续接 dsh 会话，归档只隐藏不移动文件，子 agent 会话暂不关联。可用 `ENABLED_PROVIDERS` 中的 `dsh` 控制开关。
 - 新增会话打开耗时诊断：`display/view` 返回分阶段 `Server-Timing`（attach、resolve、stamp、read、reduce、replay、wait、total）和缓存命中状态 `displayCache`（hit／miss／wait），只含耗时与固定标记，不含路径或会话内容；服务端冷读达到 500 ms 或失败时写入 `session_display_cold_read` 日志；客户端每次打开会话记录一行 `[SessionLoad]`（是否命中缓存、连接状态、首个新快照到达及其来源、HTTP 往返和服务端阶段），开启开发者模式远程日志后可在客户端日志中查看。
 
 ### Fixed

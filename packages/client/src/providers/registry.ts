@@ -4,6 +4,7 @@ import {
   CodexProvider,
 } from "./implementations/CodexProvider";
 import { CursorProvider } from "./implementations/CursorProvider";
+import { DshProvider } from "./implementations/DshProvider";
 import { GeminiACPProvider } from "./implementations/GeminiACPProvider";
 import { GeminiProvider } from "./implementations/GeminiProvider";
 import { KimiProvider } from "./implementations/KimiProvider";
@@ -28,6 +29,8 @@ const providers: Record<string, Provider> = {
   // Retain Claude capabilities for rendering historical sessions, but keep the
   // retired SSH channel out of settings and new-session provider discovery.
   claude: new ClaudeProvider(),
+  // Read-only: rendered from ~/.dsh, never offered for new sessions.
+  dsh: new DshProvider(),
   ...activeProviders,
 };
 

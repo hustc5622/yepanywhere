@@ -88,6 +88,7 @@ import {
   ZCodeSessionChangeMonitor,
 } from "./services/index.js";
 import { CURSOR_ACP_SESSIONS_DIR } from "./sessions/cursor-reader.js";
+import { DSH_SESSIONS_DIR } from "./sessions/dsh-store.js";
 import { MCODE_SESSIONS_DIR } from "./sessions/mcode-store.js";
 import { PI_SESSIONS_DIR } from "./sessions/pi-files.js";
 import { ClaudeSessionReader } from "./sessions/reader.js";
@@ -472,7 +473,15 @@ console.log(
 // Helper to create watcher if directory exists
 function createWatcherIfExists(
   watchDir: string,
-  provider: "claude" | "gemini" | "codex" | "pi" | "kimi" | "cursor" | "mcode",
+  provider:
+    | "claude"
+    | "gemini"
+    | "codex"
+    | "pi"
+    | "kimi"
+    | "cursor"
+    | "mcode"
+    | "dsh",
   ensureDirectory = false,
   persistent = false,
   periodicRescanOverrideMs?: number,
@@ -563,6 +572,10 @@ createWatcherIfExists(
 );
 if (isProviderEnabled("mcode", config.enabledProviders)) {
   createWatcherIfExists(MCODE_SESSIONS_DIR, "mcode", false, true);
+}
+if (isProviderEnabled("dsh", config.enabledProviders)) {
+  // Read-only DeepSeek Harness logs; dsh Web and the dsh CLI append here.
+  createWatcherIfExists(DSH_SESSIONS_DIR, "dsh", false, true);
 }
 
 // When running without tsx watch (NO_BACKEND_RELOAD=true), start source watcher

@@ -15,6 +15,7 @@ import {
   tryMapRemotePathToLocal,
 } from "../sdk/remote-path-mapping.js";
 import { CURSOR_ACP_SESSIONS_DIR } from "../sessions/cursor-reader.js";
+import { DSH_SESSIONS_DIR } from "../sessions/dsh-store.js";
 import { MCODE_SESSIONS_DIR } from "../sessions/mcode-store.js";
 import { PI_SESSIONS_DIR } from "../sessions/pi-files.js";
 import { ZCODE_DB_PATH } from "../sessions/zcode-db.js";
@@ -23,6 +24,7 @@ import { atomicWriteText } from "../utils/atomic-json-file.js";
 import type { EventBus, FileChangeEvent } from "../watcher/index.js";
 import { CODEX_SESSIONS_DIR, CodexSessionScanner } from "./codex-scanner.js";
 import { CursorSessionScanner } from "./cursor-scanner.js";
+import { DshSessionScanner } from "./dsh-scanner.js";
 import { GEMINI_TMP_DIR, GeminiSessionScanner } from "./gemini-scanner.js";
 import { KIMI_SESSIONS_DIR, KimiSessionScanner } from "./kimi-scanner.js";
 import { McodeSessionScanner } from "./mcode-scanner.js";
@@ -51,6 +53,7 @@ export interface ScannerOptions {
   zcodeScanner?: ZCodeSessionScanner | null; // shared provider scanner
   cursorScanner?: CursorSessionScanner | null; // shared provider scanner
   mcodeScanner?: McodeSessionScanner | null; // shared provider scanner
+  dshScanner?: DshSessionScanner | null; // shared provider scanner
   enableCodex?: boolean; // whether to include Codex projects (default: true)
   enableGemini?: boolean; // whether to include Gemini projects (default: true)
   enableKimi?: boolean; // whether to include Kimi projects (default: true)
@@ -62,6 +65,11 @@ export interface ScannerOptions {
    * shared scanner is injected, so tests never read the real ~/.minimax DB.
    */
   enableMcode?: boolean;
+  /**
+   * Whether to include read-only DeepSeek Harness projects. Defaults to true
+   * only when a shared scanner is injected, so tests never read ~/.dsh.
+   */
+  enableDsh?: boolean;
   projectMetadataService?: ProjectMetadataService; // for persisting added projects
   /** Remote Claude executors whose shared stores should also be scanned. */
   remoteExecutors?: RemoteExecutorConfig[];
@@ -110,6 +118,7 @@ export class ProjectScanner {
   private zcodeScanner: ZCodeSessionScanner | null;
   private cursorScanner: CursorSessionScanner | null;
   private mcodeScanner: McodeSessionScanner | null;
+  private dshScanner: DshSessionScanner | null;
   private enableCodex: boolean;
   private enableGemini: boolean;
   private enableKimi: boolean;
@@ -176,6 +185,10 @@ export class ProjectScanner {
     this.mcodeScanner =
       (options.enableMcode ?? Boolean(options.mcodeScanner))
         ? (options.mcodeScanner ?? new McodeSessionScanner())
+        : null;
+    this.dshScanner =
+      (options.enableDsh ?? Boolean(options.dshScanner))
+        ? (options.dshScanner ?? new DshSessionScanner())
         : null;
     this.projectMetadataService = options.projectMetadataService ?? null;
     this.cacheTtlMs = Math.max(0, options.cacheTtlMs ?? 5000);
@@ -437,6 +450,8 @@ export class ProjectScanner {
       this.cursorScanner?.invalidateCache();
     } else if (event.provider === "mcode") {
       this.mcodeScanner?.invalidateCache();
+    } else if (event.provider === "dsh") {
+      this.dshScanner?.invalidateCache();
     }
   }
 
@@ -815,6 +830,43 @@ export class ProjectScanner {
       }
     }
 
+    if (this.dshScanner) {
+      const dshProjects = await this.dshScanner.listProjects();
+      for (const dshProject of dshProjects) {
+        const projectPath = canonicalizeProjectPath(dshProject.path);
+        const existing = projects.find(
+          (project) => canonicalizeProjectPath(project.path) === projectPath,
+        );
+        if (existing) {
+          existing.hasDshSessions = true;
+          existing.sessionCount += dshProject.sessionCount;
+          if (
+            dshProject.lastActivity &&
+            (!existing.lastActivity ||
+              dshProject.lastActivity > existing.lastActivity)
+          ) {
+            existing.lastActivity = dshProject.lastActivity;
+          }
+          continue;
+        }
+        seenPaths.add(projectPath);
+        projects.push({
+          ...dshProject,
+          id: encodeProjectId(projectPath),
+          path: projectPath,
+          name: basename(projectPath),
+          hasCodexSessions: false,
+          hasGeminiSessions: false,
+          hasPiSessions: false,
+          hasKimiSessions: false,
+          hasZCodeSessions: false,
+          hasCursorSessions: false,
+          hasMcodeSessions: false,
+          hasDshSessions: true,
+        });
+      }
+    }
+
     // Merge manually added projects (from ProjectMetadataService)
     if (this.projectMetadataService) {
       const addedProjects = this.projectMetadataService.getAllProjects();
@@ -1076,6 +1128,14 @@ export class ProjectScanner {
           provider = "mcode";
         }
       }
+
+      if (provider === "claude" && this.dshScanner) {
+        const dshSessions =
+          await this.dshScanner.getSessionsForProject(projectPath);
+        if (dshSessions.length > 0) {
+          provider = "dsh";
+        }
+      }
     }
 
     // Create a virtual project entry
@@ -1096,6 +1156,8 @@ export class ProjectScanner {
       sessionDir = CURSOR_ACP_SESSIONS_DIR;
     } else if (provider === "mcode") {
       sessionDir = MCODE_SESSIONS_DIR;
+    } else if (provider === "dsh") {
+      sessionDir = DSH_SESSIONS_DIR;
     } else {
       sessionDir = this.getClaudeSessionDirForProject(projectPath);
     }
@@ -1113,6 +1175,7 @@ export class ProjectScanner {
       hasZCodeSessions: provider === "zcode",
       hasCursorSessions: provider === "cursor",
       hasMcodeSessions: provider === "mcode",
+      hasDshSessions: provider === "dsh",
       activeOwnedCount: 0,
       activeExternalCount: 0,
       lastActivity: null,

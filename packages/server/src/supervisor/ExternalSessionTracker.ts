@@ -15,6 +15,10 @@ import type { ProjectScanner } from "../projects/scanner.js";
 import { cursorSessionIdFromWatchPath } from "../sessions/cursor-reader.js";
 import { parseCursorMetaJson } from "../sessions/cursor-store.js";
 import {
+  readDshLogActivity,
+  readDshSessionRecord,
+} from "../sessions/dsh-store.js";
+import {
   findMcodeSessionRecord,
   mcodeSessionIdFromWatchPath,
 } from "../sessions/mcode-store.js";
@@ -538,6 +542,11 @@ export class ExternalSessionTracker {
       return;
     }
 
+    if (event.provider === "dsh") {
+      await this.handleDshFileChange(event);
+      return;
+    }
+
     // Parse sessionId and projectId from path
     // Format: projects/<projectId>/<sessionId>.jsonl
     const parsed = this.parseSessionPath(event.relativePath);
@@ -670,6 +679,32 @@ export class ExternalSessionTracker {
       provider: "mcode",
       projectId: encodeProjectId(record.cwd),
       sessionFilePath: record.messagesPath,
+    });
+  }
+
+  /**
+   * DeepSeek Harness logs change when dsh Web or a dsh CLI runs a turn. Yep
+   * never owns these sessions; the log tail (open turn, pending approval or
+   * question) is the activity evidence, since dsh Web hosts every agent
+   * in-process and the process probe cannot attribute them to a project.
+   */
+  private async handleDshFileChange(event: FileChangeEvent): Promise<void> {
+    // relativePath: <encoded-cwd>/<session-id>/<log file>
+    if (event.relativePath.split(/[\\/]+/).filter(Boolean).length !== 3) {
+      return;
+    }
+    const sessionDir = path.dirname(event.path);
+    const record = await readDshSessionRecord(sessionDir);
+    if (!record) return;
+    const sessionId = record.sessionId;
+    if (this.isInAbortGracePeriod(sessionId)) return;
+
+    const activity = await readDshLogActivity(record.logPath);
+    await this.handleUnownedSessionActivity(sessionId, {
+      provider: "dsh",
+      projectId: encodeProjectId(record.cwd),
+      sessionFilePath: record.logPath,
+      ...(activity.waitingInput ? { activity: "waiting-input" as const } : {}),
     });
   }
 
@@ -920,7 +955,9 @@ export class ExternalSessionTracker {
     // recent external file activity as active until the decay timeout expires.
     this.markExternal(
       sessionId,
-      piTailActivity === "in-flight" ? { ...info, activity: "in-turn" } : info,
+      piTailActivity === "in-flight"
+        ? { ...info, activity: info.activity ?? "in-turn" }
+        : info,
     );
   }
 
@@ -944,7 +981,13 @@ export class ExternalSessionTracker {
   private async getPiTailActivity(
     info: ExternalSessionCandidate,
   ): Promise<PiSessionTailActivity> {
-    if (info.provider !== "pi" || !info.sessionFilePath) return "unknown";
+    if (!info.sessionFilePath) return "unknown";
+    if (info.provider === "dsh") {
+      // Same contract as Pi: dsh Web runs agents in-process, so the log's
+      // open `turn/start` is the authoritative liveness evidence.
+      return (await readDshLogActivity(info.sessionFilePath)).turn;
+    }
+    if (info.provider !== "pi") return "unknown";
     return readPiSessionTailActivity(info.sessionFilePath);
   }
 
@@ -993,7 +1036,18 @@ export class ExternalSessionTracker {
       existing.lastActivity = now;
       existing.sessionFilePath =
         info.sessionFilePath ?? existing.sessionFilePath;
-      existing.activity = info.activity ?? existing.activity;
+      const previousActivity = existing.activity;
+      existing.activity =
+        info.provider === "dsh"
+          ? (info.activity ?? "in-turn")
+          : (info.activity ?? existing.activity);
+      if (existing.activity !== previousActivity) {
+        // A dsh approval or question opening/closing changes what the
+        // session list should show without changing ownership.
+        void this.emitOwnershipChangeByInfo(sessionId, existing, {
+          owner: "external",
+        });
+      }
       existing.timeoutId = this.createDecayTimeout(sessionId);
       existing.validationTimeoutId =
         this.createProcessValidationTimeout(sessionId);

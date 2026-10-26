@@ -1,4 +1,7 @@
-import { parseSideConversationCommand } from "@yep-anywhere/shared";
+import {
+  isReadOnlyProvider,
+  parseSideConversationCommand,
+} from "@yep-anywhere/shared";
 import {
   ALL_CODEX_MCP_MODES,
   ALL_PERMISSION_MODES,
@@ -72,6 +75,7 @@ import type {
 } from "../sdk/types.js";
 import { CodexSessionReader } from "../sessions/codex-reader.js";
 import { computeCodexRollbackNumTurns } from "../sessions/codex-rollback.js";
+import type { DshSessionReader } from "../sessions/dsh-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import type { KimiSessionReader } from "../sessions/kimi-reader.js";
 import type { McodeSessionReader } from "../sessions/mcode-reader.js";
@@ -121,6 +125,7 @@ export interface SessionCommandServiceDeps {
   kimiSessionsDir?: string;
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
   mcodeReaderFactory?: (projectPath: string) => McodeSessionReader;
+  dshReaderFactory?: (projectPath: string) => DshSessionReader;
   enabledProviders?: readonly string[];
 }
 
@@ -302,6 +307,18 @@ function commandFailure(
   details: Record<string, unknown> = {},
 ): SessionCommandResult<never> {
   return { ok: false, status, body: { error, ...details } };
+}
+
+/**
+ * Read-only providers (DeepSeek Harness) are displayed by Yep, but their own
+ * UI owns every mutation, so Yep never starts or resumes them.
+ */
+function readOnlyProviderFailure(): SessionCommandResult<never> {
+  return commandFailure(
+    "This session is read-only in Yep. Continue it in the provider's own UI.",
+    409,
+    { code: "read_only_provider" },
+  );
 }
 
 function isQueuedResponse(
@@ -1113,6 +1130,9 @@ export class SessionCommandService {
         metadataProvider ??
         body.provider ??
         project.provider;
+    }
+    if (isReadOnlyProvider(providerName)) {
+      return readOnlyProviderFailure();
     }
     if (controlAfterResume && providerName !== "codex") {
       return commandFailure(
@@ -2134,6 +2154,9 @@ export class SessionCommandService {
         code: "provider_retired",
       });
     }
+    if (isReadOnlyProvider(typeof provider === "string" ? provider : null)) {
+      return readOnlyProviderFailure();
+    }
     if (
       typeof provider === "string" &&
       !isProviderEnabled(provider, this.deps.enabledProviders)
@@ -2340,6 +2363,7 @@ export class SessionCommandService {
       kimiSessionsDir: this.deps.kimiSessionsDir,
       kimiReaderFactory: this.deps.kimiReaderFactory,
       mcodeReaderFactory: this.deps.mcodeReaderFactory,
+      dshReaderFactory: this.deps.dshReaderFactory,
       zcodeDbPath: this.deps.zcodeDbPath,
       zcodeReaderFactory: this.deps.zcodeReaderFactory,
       sessionMetadataService: this.deps.sessionMetadataService,

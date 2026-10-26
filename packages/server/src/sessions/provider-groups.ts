@@ -15,7 +15,8 @@ export type ProviderGroup =
   | "kimi"
   | "zcode"
   | "cursor"
-  | "mcode";
+  | "mcode"
+  | "dsh";
 
 export function normalizeProviderGroup(
   provider: string | null | undefined,
@@ -28,6 +29,7 @@ export function normalizeProviderGroup(
   if (provider === "zcode") return "zcode";
   if (provider === "cursor") return "cursor";
   if (provider === "mcode") return "mcode";
+  if (provider === "dsh") return "dsh";
   if (provider === "claude" || provider === "claude-ollama") return "claude";
   return null;
 }

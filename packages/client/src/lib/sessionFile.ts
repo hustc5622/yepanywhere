@@ -39,6 +39,11 @@ export function extractSessionIdFromFileEvent(
     }
   }
 
+  // DeepSeek Harness: <encoded-cwd>/<session-id>/session.v<N>.jsonl.zstd
+  if (event.provider === "dsh") {
+    return pathParts.length >= 2 ? (pathParts.at(-2) ?? null) : null;
+  }
+
   let base = filename;
   if (base.endsWith(".jsonl")) {
     base = base.slice(0, -6);

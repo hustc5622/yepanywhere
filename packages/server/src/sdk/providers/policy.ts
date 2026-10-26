@@ -13,6 +13,7 @@ const LIVE_PROVIDER_NAMES = new Set([
   "zcode",
   "cursor",
   "mcode",
+  "dsh",
 ]);
 
 export function isRetiredProviderName(value: unknown): value is "opencode" {

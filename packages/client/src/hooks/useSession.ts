@@ -485,7 +485,8 @@ export function shouldRefreshFullPersistedSession(
     provider === "codex-oss" ||
     provider === "pi" ||
     provider === "kimi" ||
-    provider === "mcode"
+    provider === "mcode" ||
+    provider === "dsh"
   );
 }
 

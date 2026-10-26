@@ -1,6 +1,7 @@
 import type { CodexSessionCatalog } from "../codex-history/CodexSessionCatalog.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { CursorSessionScanner } from "../projects/cursor-scanner.js";
+import type { DshSessionScanner } from "../projects/dsh-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
 import type { McodeSessionScanner } from "../projects/mcode-scanner.js";
@@ -18,6 +19,7 @@ export interface ProviderCatalogDeps {
   zcodeScanner?: ZCodeSessionScanner;
   cursorScanner?: CursorSessionScanner;
   mcodeScanner?: McodeSessionScanner;
+  dshScanner?: DshSessionScanner;
   projects?: Project[];
   codexSessionCatalog?: CodexSessionCatalog;
 }
@@ -30,6 +32,7 @@ export interface ProviderProjectCatalog {
   zcodePaths: Set<string>;
   cursorPaths: Set<string>;
   mcodePaths?: Set<string>;
+  dshPaths?: Set<string>;
   geminiHashToCwd?: Promise<Map<string, string>>;
   codexSessionsByPath?: Map<string, SessionSummary[]>;
   codexUnknownMessageCountIds?: ReadonlySet<string>;
@@ -43,11 +46,37 @@ export interface ProviderProjectCatalog {
 export async function buildProviderProjectCatalog(
   deps: ProviderCatalogDeps,
 ): Promise<ProviderProjectCatalog> {
-  const [base, mcodePaths] = await Promise.all([
+  const [base, mcodePaths, dshPaths] = await Promise.all([
     buildBaseProviderProjectCatalog(deps),
     buildMcodeProjectPaths(deps),
+    buildDshProjectPaths(deps),
   ]);
-  return { ...base, mcodePaths };
+  return { ...base, mcodePaths, dshPaths };
+}
+
+/** Read-only DeepSeek Harness paths; empty when the provider is disabled. */
+async function buildDshProjectPaths(
+  deps: ProviderCatalogDeps,
+): Promise<Set<string>> {
+  const paths = new Set<string>();
+  if (!deps.dshScanner) return paths;
+  for (const project of deps.projects ?? []) {
+    if (project.hasDshSessions === true || project.provider === "dsh") {
+      paths.add(canonicalizeProjectPath(project.path));
+    }
+  }
+  const needsScan =
+    !deps.projects ||
+    deps.projects.some(
+      (project) =>
+        project.provider !== "dsh" && project.hasDshSessions === undefined,
+    );
+  if (needsScan) {
+    for (const project of await deps.dshScanner.listProjects()) {
+      paths.add(canonicalizeProjectPath(project.path));
+    }
+  }
+  return paths;
 }
 
 /** MiniMax Code paths: project flags first, then the (cached) catalog scan. */

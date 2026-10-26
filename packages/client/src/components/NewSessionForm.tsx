@@ -107,6 +107,7 @@ const NEW_SESSION_PROVIDER_ACCENTS = {
   zcode: "var(--provider-zcode)",
   cursor: "var(--provider-cursor)",
   mcode: "var(--provider-mcode)",
+  dsh: "var(--provider-dsh)",
 } satisfies Record<LiveProviderName, string>;
 
 export function getNewSessionProviderAccent(

@@ -66,4 +66,9 @@ export type UnifiedSession =
    * `~/.minimax/v2/sessions/.../messages.jsonl`; the reader adapts them into
    * a linear Pi session so Pi's transcript projection can be reused.
    */
-  | { provider: "mcode"; session: PiSessionContent };
+  | { provider: "mcode"; session: PiSessionContent }
+  /**
+   * DeepSeek Harness logs (`~/.dsh/sessions/.../session.v*.jsonl.zstd`) are
+   * projected into a linear Pi session by the read-only dsh reader.
+   */
+  | { provider: "dsh"; session: PiSessionContent };

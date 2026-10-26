@@ -62,6 +62,7 @@ import type { SessionMetadataService } from "../metadata/index.js";
 import type { NotificationService } from "../notifications/index.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { CursorSessionScanner } from "../projects/cursor-scanner.js";
+import type { DshSessionScanner } from "../projects/dsh-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
 import type { McodeSessionScanner } from "../projects/mcode-scanner.js";
@@ -89,6 +90,7 @@ import {
   type SessionTitleService,
 } from "../services/SessionTitleService.js";
 import { CodexSessionReader } from "../sessions/codex-reader.js";
+import type { DshSessionReader } from "../sessions/dsh-reader.js";
 import { cloneClaudeSession, cloneCodexSession } from "../sessions/fork.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import { projectSessionInspectorMessages } from "../sessions/inspector-projection.js";
@@ -204,7 +206,9 @@ export interface SessionsDeps {
   kimiScanner?: KimiSessionScanner;
   cursorScanner?: CursorSessionScanner;
   mcodeScanner?: McodeSessionScanner;
+  dshScanner?: DshSessionScanner;
   mcodeReaderFactory?: (projectPath: string) => McodeSessionReader;
+  dshReaderFactory?: (projectPath: string) => DshSessionReader;
   kimiSessionsDir?: string;
   /** Optional shared Kimi reader factory for cross-provider session lookups */
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
@@ -664,6 +668,7 @@ function toProviderResolutionDeps(deps: SessionsDeps): ProviderResolutionDeps {
     kimiSessionsDir: deps.kimiSessionsDir,
     kimiReaderFactory: deps.kimiReaderFactory,
     mcodeReaderFactory: deps.mcodeReaderFactory,
+    dshReaderFactory: deps.dshReaderFactory,
     zcodeDbPath: deps.zcodeDbPath,
     zcodeReaderFactory: deps.zcodeReaderFactory,
   };
@@ -873,6 +878,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       kimiSessionsDir: deps.kimiSessionsDir,
       kimiReaderFactory: deps.kimiReaderFactory,
       mcodeReaderFactory: deps.mcodeReaderFactory,
+      dshReaderFactory: deps.dshReaderFactory,
     });
   const getCodexReader = (projectPath: string): CodexSessionReader | null =>
     deps.codexReaderFactory?.(projectPath) ??
@@ -3018,10 +3024,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         } else if (
           error instanceof ArchiveError &&
           error.code === "unsupported_provider" &&
-          target.provider === "mcode"
+          (target.provider === "mcode" || target.provider === "dsh")
         ) {
-          // MiniMax Code shares its store with the desktop App; Yep only
-          // hides the session through metadata and never moves its files.
+          // MiniMax Code and DeepSeek Harness share their stores with their
+          // own apps; Yep only hides the session through metadata and never
+          // moves their files.
         } else if (error instanceof ArchiveError) {
           return c.json(
             { error: error.message, code: error.code },

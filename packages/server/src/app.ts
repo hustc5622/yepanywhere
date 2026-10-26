@@ -53,6 +53,7 @@ import {
   CodexSessionScanner,
 } from "./projects/codex-scanner.js";
 import { CursorSessionScanner } from "./projects/cursor-scanner.js";
+import { DshSessionScanner } from "./projects/dsh-scanner.js";
 import {
   GEMINI_TMP_DIR,
   GeminiSessionScanner,
@@ -150,6 +151,8 @@ import {
   CURSOR_ACP_SESSIONS_DIR,
   CursorSessionReader,
 } from "./sessions/cursor-reader.js";
+import { DshSessionReader } from "./sessions/dsh-reader.js";
+import { DSH_SESSIONS_DIR } from "./sessions/dsh-store.js";
 import { GeminiSessionReader } from "./sessions/gemini-reader.js";
 import { KimiSessionReader } from "./sessions/kimi-reader.js";
 import { McodeSessionReader } from "./sessions/mcode-reader.js";
@@ -513,6 +516,11 @@ export function createApp(options: AppOptions): AppResult {
   const mcodeScanner = providerEnabled("mcode")
     ? new McodeSessionScanner()
     : undefined;
+  // DeepSeek Harness is read-only: sessions are listed and displayed, while
+  // the embedded dsh Web UI owns every mutation.
+  const dshScanner = providerEnabled("dsh")
+    ? new DshSessionScanner()
+    : undefined;
   const scanner = new ProjectScanner({
     projectsDir: options.projectsDir,
     remoteExecutors:
@@ -524,6 +532,7 @@ export function createApp(options: AppOptions): AppResult {
     zcodeScanner,
     cursorScanner,
     mcodeScanner,
+    dshScanner,
     enableCodex: codexEnabled,
     enableGemini: geminiEnabled,
     enableKimi: Boolean(kimiScanner),
@@ -531,6 +540,7 @@ export function createApp(options: AppOptions): AppResult {
     enableZCode: Boolean(zcodeScanner),
     enableCursor: Boolean(cursorScanner),
     enableMcode: Boolean(mcodeScanner),
+    enableDsh: Boolean(dshScanner),
     projectMetadataService: options.projectMetadataService,
     eventBus: options.eventBus,
     cacheTtlMs: options.projectScanCacheTtlMs,
@@ -670,6 +680,15 @@ export function createApp(options: AppOptions): AppResult {
           () =>
             new CursorSessionReader({
               sessionsDir: CURSOR_ACP_SESSIONS_DIR,
+              projectPath: project.path,
+            }),
+        );
+      case "dsh":
+        return getOrCreateReader(
+          `dsh::${DSH_SESSIONS_DIR}::${project.path}`,
+          () =>
+            new DshSessionReader({
+              sessionsDir: DSH_SESSIONS_DIR,
               projectPath: project.path,
             }),
         );
@@ -842,6 +861,17 @@ export function createApp(options: AppOptions): AppResult {
         });
       },
     );
+  const dshReaderFactory = dshScanner
+    ? (projectPath: string): DshSessionReader =>
+        getOrCreateReader(
+          `dsh-extra::${DSH_SESSIONS_DIR}::${projectPath}`,
+          () =>
+            new DshSessionReader({
+              sessionsDir: DSH_SESSIONS_DIR,
+              projectPath,
+            }),
+        )
+    : undefined;
   const zcodeReaderFactory = (projectPath: string): ZCodeSessionReader =>
     getOrCreateReader(`zcode-extra::${ZCODE_DB_PATH}::${projectPath}`, () => {
       const mis = options.modelInfoService;
@@ -878,6 +908,7 @@ export function createApp(options: AppOptions): AppResult {
         kimiSessionsDir: KIMI_SESSIONS_DIR,
         kimiReaderFactory,
         mcodeReaderFactory,
+        dshReaderFactory,
         cursorSessionsDir: CURSOR_ACP_SESSIONS_DIR,
         cursorReaderFactory,
       },
@@ -957,6 +988,7 @@ export function createApp(options: AppOptions): AppResult {
     kimiSessionsDir: KIMI_SESSIONS_DIR,
     kimiReaderFactory,
     mcodeReaderFactory,
+    dshReaderFactory,
     enabledProviders: options.enabledProviders,
   });
 
@@ -1021,6 +1053,7 @@ export function createApp(options: AppOptions): AppResult {
             kimiSessionsDir: KIMI_SESSIONS_DIR,
             kimiReaderFactory,
             mcodeReaderFactory,
+            dshReaderFactory,
           },
           options.sessionMetadataService?.getProvider(sessionId),
         );
@@ -1082,6 +1115,7 @@ export function createApp(options: AppOptions): AppResult {
         kimiScanner,
         cursorScanner,
         mcodeScanner,
+        dshScanner,
       });
       const roots = {
         claudeProjectsDir: options.projectsDir ?? CLAUDE_PROJECTS_DIR,
@@ -1101,6 +1135,7 @@ export function createApp(options: AppOptions): AppResult {
         kimiSessionsDir: KIMI_SESSIONS_DIR,
         kimiReaderFactory,
         mcodeReaderFactory,
+        dshReaderFactory,
         cursorSessionsDir: CURSOR_ACP_SESSIONS_DIR,
         cursorReaderFactory,
       };
@@ -1417,6 +1452,7 @@ export function createApp(options: AppOptions): AppResult {
       kimiScanner,
       cursorScanner,
       mcodeScanner,
+      dshScanner,
       piSessionsDir: PI_SESSIONS_DIR,
       zcodeDbPath: ZCODE_DB_PATH,
       piReaderFactory,
@@ -1424,6 +1460,7 @@ export function createApp(options: AppOptions): AppResult {
       kimiSessionsDir: KIMI_SESSIONS_DIR,
       kimiReaderFactory,
       mcodeReaderFactory,
+      dshReaderFactory,
       codexBridgeService: options.codexBridgeService,
     }),
   );
@@ -1454,6 +1491,7 @@ export function createApp(options: AppOptions): AppResult {
       kimiScanner,
       cursorScanner,
       mcodeScanner,
+      dshScanner,
       piSessionsDir: PI_SESSIONS_DIR,
       zcodeDbPath: ZCODE_DB_PATH,
       piReaderFactory,
@@ -1461,6 +1499,7 @@ export function createApp(options: AppOptions): AppResult {
       kimiSessionsDir: KIMI_SESSIONS_DIR,
       kimiReaderFactory,
       mcodeReaderFactory,
+      dshReaderFactory,
       serverSettingsService: options.serverSettingsService,
       modelInfoService: options.modelInfoService,
       recentsService: options.recentsService,
@@ -1556,6 +1595,7 @@ export function createApp(options: AppOptions): AppResult {
       kimiScanner,
       cursorScanner,
       mcodeScanner,
+      dshScanner,
       piSessionsDir: PI_SESSIONS_DIR,
       zcodeDbPath: ZCODE_DB_PATH,
       piReaderFactory,
@@ -1563,6 +1603,7 @@ export function createApp(options: AppOptions): AppResult {
       kimiSessionsDir: KIMI_SESSIONS_DIR,
       kimiReaderFactory,
       mcodeReaderFactory,
+      dshReaderFactory,
       codexBridgeService: options.codexBridgeService,
     }),
   );
@@ -1590,6 +1631,7 @@ export function createApp(options: AppOptions): AppResult {
       kimiScanner,
       cursorScanner,
       mcodeScanner,
+      dshScanner,
       piSessionsDir: PI_SESSIONS_DIR,
       zcodeDbPath: ZCODE_DB_PATH,
       piReaderFactory,
@@ -1597,6 +1639,7 @@ export function createApp(options: AppOptions): AppResult {
       kimiSessionsDir: KIMI_SESSIONS_DIR,
       kimiReaderFactory,
       mcodeReaderFactory,
+      dshReaderFactory,
       eventBus: options.eventBus,
       codexBridgeService: options.codexBridgeService,
     }),
@@ -1626,6 +1669,7 @@ export function createApp(options: AppOptions): AppResult {
         kimiScanner,
         cursorScanner,
         mcodeScanner,
+        dshScanner,
         piSessionsDir: PI_SESSIONS_DIR,
         zcodeDbPath: ZCODE_DB_PATH,
         piReaderFactory,
@@ -1633,6 +1677,7 @@ export function createApp(options: AppOptions): AppResult {
         kimiSessionsDir: KIMI_SESSIONS_DIR,
         kimiReaderFactory,
         mcodeReaderFactory,
+        dshReaderFactory,
         cursorSessionsDir: CURSOR_ACP_SESSIONS_DIR,
         cursorReaderFactory,
       }),
@@ -1666,6 +1711,7 @@ export function createApp(options: AppOptions): AppResult {
         kimiScanner,
         cursorScanner,
         mcodeScanner,
+        dshScanner,
         piSessionsDir: PI_SESSIONS_DIR,
         zcodeDbPath: ZCODE_DB_PATH,
         piReaderFactory,
@@ -1673,6 +1719,7 @@ export function createApp(options: AppOptions): AppResult {
         kimiSessionsDir: KIMI_SESSIONS_DIR,
         kimiReaderFactory,
         mcodeReaderFactory,
+        dshReaderFactory,
         cursorSessionsDir: CURSOR_ACP_SESSIONS_DIR,
         cursorReaderFactory,
       }),

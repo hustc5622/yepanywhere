@@ -238,6 +238,8 @@ describe("compressed rollout format ownership", () => {
       }
     }
 
-    expect(owners).toEqual([OWNER]);
+    // DeepSeek Harness logs are a different, read-only format with their own
+    // single owner; they never touch Codex rollouts.
+    expect(owners).toEqual([OWNER, "sessions/dsh-store.ts"]);
   });
 });

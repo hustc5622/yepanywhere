@@ -4,6 +4,7 @@ import { basename, dirname, join } from "node:path";
 import type { UrlProjectId } from "@yep-anywhere/shared";
 import type { ZCodeSessionInfo } from "../projects/zcode-scanner.js";
 import { CURSOR_ACP_SESSIONS_DIR } from "../sessions/cursor-reader.js";
+import { findDshSessionRecord } from "../sessions/dsh-store.js";
 import { findMcodeSessionRecord } from "../sessions/mcode-store.js";
 import { normalizeProviderGroup } from "../sessions/provider-groups.js";
 import type { Project } from "../supervisor/types.js";
@@ -16,7 +17,8 @@ type WatchProvider =
   | "kimi"
   | "zcode"
   | "cursor"
-  | "mcode";
+  | "mcode"
+  | "dsh";
 type ChangeSource = "fs-watch" | "poll";
 
 interface CodexSessionInfo {
@@ -479,6 +481,14 @@ export class FocusedSessionWatchManager {
         continue;
       }
 
+      if (provider === "dsh") {
+        const record = await findDshSessionRecord(target.sessionId);
+        if (record && (await this.fileExists(record.logPath))) {
+          return { filePath: record.logPath, provider };
+        }
+        continue;
+      }
+
       if (provider === "zcode") {
         const sessions =
           (await this.zcodeScanner?.getSessionsForProject(project.path)) ?? [];
@@ -517,6 +527,7 @@ export class FocusedSessionWatchManager {
     pushCandidate("zcode");
     pushCandidate("cursor");
     pushCandidate("mcode");
+    pushCandidate("dsh");
     return candidates;
   }
 

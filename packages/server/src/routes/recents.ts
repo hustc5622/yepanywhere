@@ -10,6 +10,7 @@ import type { SessionMetadataService } from "../metadata/index.js";
 import type { NotificationService } from "../notifications/index.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { CursorSessionScanner } from "../projects/cursor-scanner.js";
+import type { DshSessionScanner } from "../projects/dsh-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
 import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
 import type { McodeSessionScanner } from "../projects/mcode-scanner.js";
@@ -19,6 +20,7 @@ import type { ProjectScanner } from "../projects/scanner.js";
 import type { RecentsService } from "../recents/index.js";
 import type { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { CursorSessionReader } from "../sessions/cursor-reader.js";
+import type { DshSessionReader } from "../sessions/dsh-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import type { KimiSessionReader } from "../sessions/kimi-reader.js";
 import type { McodeSessionReader } from "../sessions/mcode-reader.js";
@@ -49,7 +51,9 @@ export interface RecentsDeps {
   kimiScanner?: KimiSessionScanner;
   cursorScanner?: CursorSessionScanner;
   mcodeScanner?: McodeSessionScanner;
+  dshScanner?: DshSessionScanner;
   mcodeReaderFactory?: (projectPath: string) => McodeSessionReader;
+  dshReaderFactory?: (projectPath: string) => DshSessionReader;
   kimiSessionsDir?: string;
   kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
   cursorSessionsDir?: string;
@@ -106,6 +110,7 @@ export function createRecentsRoutes(deps: RecentsDeps): Hono {
           kimiSessionsDir: deps.kimiSessionsDir,
           kimiReaderFactory: deps.kimiReaderFactory,
           mcodeReaderFactory: deps.mcodeReaderFactory,
+          dshReaderFactory: deps.dshReaderFactory,
           cursorSessionsDir: deps.cursorSessionsDir,
           cursorReaderFactory: deps.cursorReaderFactory,
         },

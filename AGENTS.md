@@ -46,6 +46,8 @@ Yep Anywhere 是一个面向移动端优先的 coding agent 监督器。核心�
 
 涉及 MiniMax Code（`mcode` provider、`mcode acp`、`~/.minimax` 会话目录/transcript、App 会话接管）改动时，协议事实以本机真实 CLI（`mcode`，npm 包 `@minimax/code`）和 `references/minimax/` 为准；ACP 服务端行为看 `references/minimax/pretty/run-acp-command.js`，存储/权限看 `references/minimax/app/mavis/`。CLI 与桌面 App 共用 `~/.minimax`，Yep 只读其数据库与 transcript，不要写入。实现入口：`packages/server/src/sdk/providers/mcode*.ts`、`packages/server/src/sessions/mcode-*.ts`、`packages/server/src/projects/mcode-scanner.ts`。真实联调脚本 `scripts/smoke-mcode-provider.ts` 会发起模型请求，需用户授权。说明见 `docs/project/mcode.md`。
 
+涉及 DeepSeek Harness（`dsh`）时：Yep 有两部分集成，一是内嵌 `dsh web` 页面（`packages/server/src/dsh/`、`packages/client/src/pages/DshPage.tsx`），二是只读 provider `dsh`，只解析 `~/.dsh/sessions` 下的 zstd 帧日志，不启动、不续接、不写入（`packages/server/src/sessions/dsh-*.ts`、`packages/server/src/projects/dsh-scanner.ts`）。存储格式、事件和 Web 行为以 `references/dsh/`（`deepseek-harness` 源码，按本机 dsh 版本对应的 tag 拉取）为准，不要凭印象实现。说明见 `docs/project/dsh-web.md`。
+
 设备桥接与 Android／ChromeOS 远程串流功能已移除；手机客户端、浏览器设备管理和通知仍保留。只有用户要求，或任务直接涉及 mobile-shell 行为时，才使用 adb、emulator 或 APK 安装流程。
 
 ## 端口与 Profile
@@ -70,7 +72,7 @@ PORT=4000 YEP_ANYWHERE_PROFILE=dev pnpm dev
 - `YEP_ANYWHERE_PROFILE`：创建 `~/.yep-anywhere-{profile}/`。
 - `YEP_ANYWHERE_DATA_DIR`：显式覆盖数据目录。
 - `CLAUDE_CONFIG_DIR`：Claude Code 配置/session 根目录，默认 `~/.claude`。
-- `ENABLED_PROVIDERS`：逗号分隔的 provider allowlist。有效值包括 `claude`、`claude-ollama`、`codex`、`codex-oss`、`gemini`、`gemini-acp`、`pi`、`kimi`、`zcode`、`mcode`。
+- `ENABLED_PROVIDERS`：逗号分隔的 provider allowlist。有效值包括 `claude`、`claude-ollama`、`codex`、`codex-oss`、`gemini`、`gemini-acp`、`pi`、`kimi`、`zcode`、`mcode`、`dsh`（只读）。
 - `VOICE_INPUT=false`：在服务端禁用语音输入按钮。
 - `YEP_RUNTIME_EXTERNAL=true`：部署时把 agent runtime 拆成独立进程（见下面的热叠加章节）。
 - `YEP_RUNTIME_MODE`：`embedded`（默认）或 `external`，运行时形态。

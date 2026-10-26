@@ -1,4 +1,7 @@
-import { parseSideConversationCommand } from "@yep-anywhere/shared";
+import {
+  isReadOnlyProvider,
+  parseSideConversationCommand,
+} from "@yep-anywhere/shared";
 import type {
   ProviderName,
   SessionDisplayPage,
@@ -21,6 +24,7 @@ import type { UploadProgress } from "../components/MessageInput";
 import { ModelSwitchModal } from "../components/ModelSwitchModal";
 import { PinIcon } from "../components/PinIcon";
 import { ProcessInfoModal } from "../components/ProcessInfoModal";
+import { ReadOnlySessionBar } from "../components/ReadOnlySessionBar";
 import { RemoteProjectIcon } from "../components/RemoteProjectIcon";
 import { SessionInspector } from "../components/SessionInspector";
 import { SessionMenu } from "../components/SessionMenu";
@@ -208,6 +212,8 @@ function getApprovalAgentName(
       return "Cursor";
     case "mcode":
       return "MiniMax Code";
+    case "dsh":
+      return "dsh";
     default:
       return "Claude";
   }
@@ -407,6 +413,8 @@ function SessionPageContent({
   // Effective provider for immediate display before session data loads
   const effectiveProvider = session?.provider ?? initialProvider;
   const approvalAgentName = getApprovalAgentName(effectiveProvider);
+  // dsh sessions are displayed read-only; the embedded dsh page owns input.
+  const isReadOnlySession = isReadOnlyProvider(effectiveProvider);
   useEffect(() => {
     if (effectiveProvider !== "cursor" || !session?.id) return;
     void api.warmCursorSession({ model: session.model }).catch(() => undefined);
@@ -2581,7 +2589,7 @@ function SessionPageContent({
           />
         )}
 
-        {status.owner === "external" && (
+        {status.owner === "external" && !isReadOnlySession && (
           <div className="external-session-warning">
             {t("sessionExternalWarning")}
           </div>
@@ -2644,63 +2652,72 @@ function SessionPageContent({
           sessionUpdatesConnected={sessionUpdatesConnected}
           selectedBranchId={selectedBranchId}
         />
-        <SessionComposer
-          sessionConnectionStatus={sessionConnectionStatus}
-          pendingInputRequest={pendingInputRequest}
-          actualSessionId={actualSessionId}
-          sessionId={sessionId}
-          projectId={projectId}
-          isAskUserQuestion={isAskUserQuestion}
-          isPersistedInputRequest={isPersistedInputRequest}
-          hasSideConversation={hasSideConversation}
-          sideVisible={sideVisible}
-          openSideConversation={openSideConversation}
-          approvalAgentName={approvalAgentName}
-          provider={effectiveProvider}
-          approvalCollapsed={approvalCollapsed}
-          setApprovalCollapsed={setApprovalCollapsed}
-          permissionMode={permissionMode}
-          setPermissionMode={setPermissionMode}
-          holdModeEnabled={holdModeEnabled}
-          isHeld={isHeld}
-          setHold={setHold}
-          supportsPermissionMode={supportsPermissionMode}
-          permissionModes={permissionModes}
-          supportsThinkingToggle={supportsThinkingToggle}
-          contextUsage={session?.contextUsage}
-          status={status}
-          processState={processState}
-          onAbort={abortTurn}
-          turnHealth={turnHealth}
-          retryActionLink={retryActionLink}
-          isRestoringEdit={isRestoringEdit}
-          onCancelEdit={handleCancelEdit}
-          historyRewritePending={historyRewritePending}
-          onSend={sendMessage}
-          onQueue={queueMessage}
-          editRewindActive={Boolean(editRewind)}
-          attachments={attachments}
-          onAttach={handleAttach}
-          onRemoveAttachment={handleRemoveAttachment}
-          onRestoreAttachment={restoreAttachment}
-          attachmentOrder={attachmentOrderRef.current}
-          uploadProgress={uploadProgress}
-          commandPrefix={commandPrefix}
-          commandLabel={commandLabel}
-          commands={activeCommands}
-          showCommandButton={showCommandButton}
-          commandButtons={commandButtons}
-          onCustomCommand={handleCustomCommand}
-          onDraftControlsReady={handleDraftControlsReady}
-          onQuestionSubmit={handleQuestionSubmit}
-          onDeny={handleDeny}
-          onApprove={handleApprove}
-          onApproveAcceptEdits={handleApproveAcceptEdits}
-          onApproveForSession={handleApproveForSession}
-          onApproveStrictAutoReview={handleApproveStrictAutoReview}
-          onApproveAlways={handleApproveAlways}
-          onDenyWithFeedback={handleDenyWithFeedback}
-        />
+        {isReadOnlySession ? (
+          <ReadOnlySessionBar
+            sessionId={actualSessionId ?? sessionId}
+            basePath={basePath}
+            status={status}
+            processState={processState}
+          />
+        ) : (
+          <SessionComposer
+            sessionConnectionStatus={sessionConnectionStatus}
+            pendingInputRequest={pendingInputRequest}
+            actualSessionId={actualSessionId}
+            sessionId={sessionId}
+            projectId={projectId}
+            isAskUserQuestion={isAskUserQuestion}
+            isPersistedInputRequest={isPersistedInputRequest}
+            hasSideConversation={hasSideConversation}
+            sideVisible={sideVisible}
+            openSideConversation={openSideConversation}
+            approvalAgentName={approvalAgentName}
+            provider={effectiveProvider}
+            approvalCollapsed={approvalCollapsed}
+            setApprovalCollapsed={setApprovalCollapsed}
+            permissionMode={permissionMode}
+            setPermissionMode={setPermissionMode}
+            holdModeEnabled={holdModeEnabled}
+            isHeld={isHeld}
+            setHold={setHold}
+            supportsPermissionMode={supportsPermissionMode}
+            permissionModes={permissionModes}
+            supportsThinkingToggle={supportsThinkingToggle}
+            contextUsage={session?.contextUsage}
+            status={status}
+            processState={processState}
+            onAbort={abortTurn}
+            turnHealth={turnHealth}
+            retryActionLink={retryActionLink}
+            isRestoringEdit={isRestoringEdit}
+            onCancelEdit={handleCancelEdit}
+            historyRewritePending={historyRewritePending}
+            onSend={sendMessage}
+            onQueue={queueMessage}
+            editRewindActive={Boolean(editRewind)}
+            attachments={attachments}
+            onAttach={handleAttach}
+            onRemoveAttachment={handleRemoveAttachment}
+            onRestoreAttachment={restoreAttachment}
+            attachmentOrder={attachmentOrderRef.current}
+            uploadProgress={uploadProgress}
+            commandPrefix={commandPrefix}
+            commandLabel={commandLabel}
+            commands={activeCommands}
+            showCommandButton={showCommandButton}
+            commandButtons={commandButtons}
+            onCustomCommand={handleCustomCommand}
+            onDraftControlsReady={handleDraftControlsReady}
+            onQuestionSubmit={handleQuestionSubmit}
+            onDeny={handleDeny}
+            onApprove={handleApprove}
+            onApproveAcceptEdits={handleApproveAcceptEdits}
+            onApproveForSession={handleApproveForSession}
+            onApproveStrictAutoReview={handleApproveStrictAutoReview}
+            onApproveAlways={handleApproveAlways}
+            onDenyWithFeedback={handleDenyWithFeedback}
+          />
+        )}
       </div>
       <SideConversationPanel
         side={side}

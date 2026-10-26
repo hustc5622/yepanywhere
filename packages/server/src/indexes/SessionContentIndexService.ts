@@ -425,6 +425,11 @@ export class SessionContentIndexService {
 
     if (event.provider === "mcode") {
       this.markMatchingScopesDirty("mcode::");
+      return;
+    }
+
+    if (event.provider === "dsh") {
+      this.markMatchingScopesDirty("dsh::");
     }
   }
 

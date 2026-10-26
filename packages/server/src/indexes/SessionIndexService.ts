@@ -895,6 +895,11 @@ export class SessionIndexService implements ISessionIndexService {
       // MiniMax Code transcripts share one dated tree; the catalog cwd
       // decides the project scope.
       this.markMatchingScopesDirty("mcode::");
+      return;
+    }
+
+    if (event.provider === "dsh") {
+      this.markMatchingScopesDirty("dsh::");
     }
   }
 

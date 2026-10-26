@@ -804,6 +804,70 @@ describe("SessionCommandService runtime boundary", () => {
     }
   });
 
+  it("refuses to resume read-only dsh sessions", async () => {
+    const projectPath = mkdtempSync(join(tmpdir(), "session-command-dsh-"));
+    try {
+      const projectId = encodeProjectId(projectPath);
+      const project = {
+        id: projectId,
+        path: projectPath,
+        name: "session-command-dsh",
+        sessionCount: 1,
+        sessionDir: join(projectPath, "sessions"),
+        activeOwnedCount: 0,
+        activeExternalCount: 0,
+        lastActivity: null,
+        provider: "dsh" as const,
+      } satisfies Project;
+      const resumeSession = vi.fn(async () => processSnapshot());
+      const dshReader = {
+        getSessionSummary: vi.fn(async (sessionId: string) => ({
+          id: sessionId,
+          projectId,
+          title: "dsh",
+          fullTitle: "dsh",
+          createdAt: "2026-10-23T00:00:00.000Z",
+          updatedAt: "2026-10-23T00:00:00.000Z",
+          messageCount: 2,
+          ownership: { owner: "none" as const },
+          provider: "dsh" as const,
+        })),
+      };
+      const service = new SessionCommandService({
+        runtimeController: { resumeSession } as unknown as RuntimeController,
+        scanner: {
+          getOrCreateProject: vi.fn(async () => project),
+          mapSessionCwdToLocal: vi.fn((cwd: string) => cwd),
+        } as unknown as ProjectScanner,
+        readerFactory: () => dshReader as unknown as ISessionReader,
+        dshReaderFactory: () => dshReader as never,
+        sessionInteractionService: interactionService(),
+      });
+
+      await expect(
+        service.resume({
+          projectId,
+          sessionId: "session-dsh",
+          body: { message: "continue" },
+        }),
+      ).resolves.toMatchObject({
+        ok: false,
+        status: 409,
+        body: { code: "read_only_provider" },
+      });
+      await expect(
+        service.create({ projectId, body: { provider: "dsh" } }),
+      ).resolves.toMatchObject({
+        ok: false,
+        status: 409,
+        body: { code: "read_only_provider" },
+      });
+      expect(resumeSession).not.toHaveBeenCalled();
+    } finally {
+      rmSync(projectPath, { recursive: true, force: true });
+    }
+  });
+
   it("persists channel origin and scopes Codex rollout by stable account key", async () => {
     const projectPath = mkdtempSync(join(tmpdir(), "session-command-channel-"));
     try {

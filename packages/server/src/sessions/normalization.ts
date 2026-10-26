@@ -500,7 +500,8 @@ export function normalizeSession(
         ...summary,
         messages: convertKimiMessages(data.session),
       });
-    case "mcode": {
+    case "mcode":
+    case "dsh": {
       const precomputed = loaded.precomputedPiMessages;
       const deferMedia =
         options?.deferMedia ?? precomputed?.deferMedia ?? false;

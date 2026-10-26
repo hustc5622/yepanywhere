@@ -17,6 +17,7 @@ import {
   type PermissionMode,
   type RemoteExecutorConfig,
   type ThinkingOption,
+  isReadOnlyProvider,
   mergeNewSessionDefaults,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
@@ -381,6 +382,7 @@ function parseNewSessionProviderDefaults(
 function isSavedNewSessionProvider(value: string): value is LiveProviderName {
   return (
     value !== "claude-ollama" &&
+    !isReadOnlyProvider(value) &&
     ALL_PROVIDERS.includes(value as LiveProviderName)
   );
 }

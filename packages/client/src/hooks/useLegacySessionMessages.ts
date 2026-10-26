@@ -1262,7 +1262,8 @@ export function useLegacySessionMessages(
       if (
         data.session.provider === "pi" ||
         data.session.provider === "kimi" ||
-        data.session.provider === "mcode"
+        data.session.provider === "mcode" ||
+        data.session.provider === "dsh"
       ) {
         // Pi and Kimi cannot correlate their persisted entry ids with live
         // process UUIDs, and their readers return a full transcript even when
@@ -1286,7 +1287,8 @@ export function useLegacySessionMessages(
       if (
         data.session.provider !== "pi" &&
         data.session.provider !== "kimi" &&
-        data.session.provider !== "mcode"
+        data.session.provider !== "mcode" &&
+        data.session.provider !== "dsh"
       ) {
         applySessionMetadata(data.session);
       }

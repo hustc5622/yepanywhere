@@ -189,6 +189,8 @@ export {
 } from "./tool-approval.js";
 export {
   ALL_PROVIDERS,
+  READ_ONLY_PROVIDERS,
+  isReadOnlyProvider,
   DEFAULT_PERMISSION_MODE,
   ALL_PERMISSION_MODES,
   ALL_CODEX_MCP_MODES,

@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useState } from "react";
+import { useSearchParams } from "react-router-dom";
 import { fetchJSON } from "../api/client";
 import { PageHeader } from "../components/PageHeader";
 import { useI18n } from "../i18n";
@@ -15,7 +16,28 @@ function launchDsh() {
   return pendingLaunch;
 }
 
+/**
+ * dsh Web persists its main selection in this localStorage key and restores
+ * it when the app boots (references/dsh/packages/client/ui-workspace/src/
+ * client/navigation.ts). The proxied page shares Yep's origin, so writing it
+ * before the iframe loads opens that session in the native UI.
+ */
+const DSH_SELECTION_STORAGE_KEY = "dsh.sessions.current";
+
+function preselectDshSession(sessionId: string): void {
+  try {
+    localStorage.setItem(
+      DSH_SELECTION_STORAGE_KEY,
+      JSON.stringify({ sessionId }),
+    );
+  } catch {
+    // Storage may be unavailable (private mode); dsh opens its default view.
+  }
+}
+
 export function DshPage() {
+  const [searchParams] = useSearchParams();
+  const requestedSessionId = searchParams.get("session") ?? undefined;
   const { t } = useI18n();
   const { openSidebar, isWideScreen } = useNavigationLayout();
   const [url, setUrl] = useState<string>();
@@ -23,14 +45,16 @@ export function DshPage() {
   const [attempt, setAttempt] = useState(0);
   const retry = useCallback(() => setAttempt((value) => value + 1), []);
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: attempt explicitly retries a failed launch.
+  // biome-ignore lint/correctness/useExhaustiveDependencies: attempt explicitly retries a failed launch; a new session request reloads the frame.
   useEffect(() => {
     let cancelled = false;
     setError(undefined);
     setUrl(undefined);
     launchDsh()
       .then(({ url }) => {
-        if (!cancelled) setUrl(url);
+        if (cancelled) return;
+        if (requestedSessionId) preselectDshSession(requestedSessionId);
+        setUrl(url);
       })
       .catch((error: unknown) => {
         if (!cancelled)
@@ -39,7 +63,7 @@ export function DshPage() {
     return () => {
       cancelled = true;
     };
-  }, [attempt]);
+  }, [attempt, requestedSessionId]);
 
   return (
     <div className="main-content-wrapper dsh-page">
@@ -52,7 +76,7 @@ export function DshPage() {
       )}
       {url ? (
         <iframe
-          key={attempt}
+          key={`${attempt}:${requestedSessionId ?? ""}`}
           className="dsh-frame"
           src={url}
           title={t("sidebarDsh")}

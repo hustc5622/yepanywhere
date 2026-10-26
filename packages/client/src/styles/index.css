@@ -26,6 +26,7 @@
   --provider-zcode: #6366f1;
   --provider-cursor: #7c3aed;
   --provider-mcode: #e5326b;
+  --provider-dsh: #4d6bfe;
 
   /* Semantic Colors */
   --thinking-color: var(--app-claude-orange);
@@ -6151,6 +6152,62 @@ a.sidebar-nav-item {
   color: var(--status-badge-input-text);
 }
 
+/* Read-only provider sessions (dsh): status line + open-in-provider link */
+.read-only-session-bar-inner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-secondary);
+}
+
+.read-only-session-bar-text {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  margin: 0;
+  min-width: 0;
+  color: var(--text-secondary);
+}
+
+.read-only-session-bar-inner.running .read-only-session-bar-text {
+  color: var(--status-badge-running-text);
+}
+
+.read-only-session-bar-inner.waiting .read-only-session-bar-text {
+  color: var(--status-badge-input-text);
+}
+
+.read-only-session-bar-dot {
+  flex-shrink: 0;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  animation: read-only-session-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes read-only-session-pulse {
+  50% {
+    opacity: 0.35;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .read-only-session-bar-dot {
+    animation: none;
+  }
+}
+
+.read-only-session-bar-open {
+  flex-shrink: 0;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
 /* Subagent → parent session banner */
 .subagent-parent-banner {
   display: flex;
@@ -10327,6 +10384,10 @@ button.context-usage-indicator--button:focus-visible {
 
 .provider-option-dot.provider-mcode {
   background: var(--provider-mcode);
+}
+
+.provider-option-dot.provider-dsh {
+  background: var(--provider-dsh);
 }
 
 .provider-option-dot.provider-local {

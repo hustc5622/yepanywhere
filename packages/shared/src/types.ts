@@ -8,6 +8,8 @@
  * - "kimi": Kimi Code CLI via Agent Client Protocol (`kimi acp`)
  * - "cursor": Cursor CLI via Agent Client Protocol (`agent acp`)
  * - "mcode": MiniMax Code CLI via Agent Client Protocol (`mcode acp`)
+ * - "dsh": DeepSeek Harness. Read-only: Yep lists and displays sessions from
+ *   `~/.dsh`; continuing a conversation happens in the embedded dsh Web UI.
  */
 export type ProviderName =
   | "claude"
@@ -20,7 +22,8 @@ export type ProviderName =
   | "kimi"
   | "zcode"
   | "cursor"
-  | "mcode";
+  | "mcode"
+  | "dsh";
 
 /** Providers that can be registered or selected by the current product. */
 export type LiveProviderName = ProviderName;
@@ -45,7 +48,25 @@ export const ALL_PROVIDERS: readonly LiveProviderName[] = [
   "zcode",
   "cursor",
   "mcode",
+  "dsh",
 ] as const;
+
+/**
+ * Providers whose sessions Yep only reads. They cannot start, resume or
+ * receive messages through Yep; the provider's own UI owns every mutation.
+ */
+export const READ_ONLY_PROVIDERS: readonly LiveProviderName[] = [
+  "dsh",
+] as const;
+
+export function isReadOnlyProvider(
+  provider: string | null | undefined,
+): boolean {
+  return (
+    typeof provider === "string" &&
+    (READ_ONLY_PROVIDERS as readonly string[]).includes(provider)
+  );
+}
 
 /**
  * The default provider when none is specified.
