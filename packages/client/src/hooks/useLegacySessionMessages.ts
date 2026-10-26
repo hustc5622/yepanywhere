@@ -1261,11 +1261,10 @@ export function useLegacySessionMessages(
       );
       if (
         data.session.provider === "pi" ||
-        data.session.provider === "kimi" ||
         data.session.provider === "mcode" ||
         data.session.provider === "dsh"
       ) {
-        // Pi and Kimi cannot correlate their persisted entry ids with live
+        // Pi and MiniMax Code cannot correlate their persisted entry ids with live
         // process UUIDs, and their readers return a full transcript even when
         // `afterMessageId` is supplied. Treat it as an authoritative snapshot;
         // merging would append persisted copies of old user turns at the tail.
@@ -1286,7 +1285,6 @@ export function useLegacySessionMessages(
       // For new sessions, prev may be null if JSONL didn't exist on initial load
       if (
         data.session.provider !== "pi" &&
-        data.session.provider !== "kimi" &&
         data.session.provider !== "mcode" &&
         data.session.provider !== "dsh"
       ) {

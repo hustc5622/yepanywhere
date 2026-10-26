@@ -2,7 +2,6 @@ import type { CodexSessionEntry } from "@yep-anywhere/shared";
 import {
   SESSION_DISPLAY_MAX_NOTICE_LENGTH,
   SESSION_DISPLAY_THINKING_PREVIEW_MAX_LENGTH,
-  parseKimiWireJsonl,
   parsePiSessionJsonl,
 } from "@yep-anywhere/shared";
 import { describe, expect, it } from "vitest";
@@ -20,7 +19,6 @@ import {
 } from "../../src/sessions/display-projection.js";
 import {
   convertCodexEntries,
-  convertKimiMessages,
   convertPiSession,
 } from "../../src/sessions/normalization.js";
 import type { Message } from "../../src/supervisor/types.js";
@@ -589,11 +587,6 @@ describe("session display projection", () => {
         codexThreadItemLifecycle: "completed",
         codexThreadItem: { type: "plan", text: "1. Inspect\n2. Fix" },
       },
-      {
-        uuid: "goal-1",
-        type: "kimi_goal",
-        goal: { status: "active", objective: "Finish the task" },
-      },
     ];
 
     const projection = buildSessionDisplayProjection({
@@ -621,7 +614,6 @@ describe("session display projection", () => {
         }),
         expect.objectContaining({ type: "notice", kind: "warning" }),
         expect.objectContaining({ type: "notice", kind: "plan" }),
-        expect.objectContaining({ type: "notice", kind: "goal" }),
         expect.objectContaining({
           type: "action_required",
           action: "approval",
@@ -754,7 +746,7 @@ describe("session display projection", () => {
     expect(closedGroup).not.toHaveProperty("liveTail");
   });
 
-  it("matches the existing renderer oracle for Codex, Pi, and Kimi normalization", () => {
+  it("matches the existing renderer oracle for Codex and Pi normalization", () => {
     const codexEntries: CodexSessionEntry[] = [
       {
         type: "response_item",
@@ -878,62 +870,8 @@ describe("session display projection", () => {
     if (!pi) throw new Error("Pi display fixture did not parse");
     const piMessages = convertPiSession(pi).messages;
 
-    const kimiRecords = parseKimiWireJsonl(
-      [
-        { type: "metadata", protocol_version: "1.4", created_at: 1 },
-        {
-          type: "turn.prompt",
-          input: [{ type: "text", text: "Inspect Kimi" }],
-          time: 1,
-        },
-        {
-          type: "context.append_loop_event",
-          event: {
-            type: "content.part",
-            part: { type: "text", text: "Checking Kimi." },
-          },
-          time: 2,
-        },
-        {
-          type: "context.append_loop_event",
-          event: {
-            type: "tool.call",
-            toolCallId: "kimi-tool",
-            name: "Bash",
-            args: { command: "pnpm test" },
-          },
-          time: 3,
-        },
-        {
-          type: "context.append_loop_event",
-          event: {
-            type: "tool.result",
-            toolCallId: "kimi-tool",
-            result: { output: "ok" },
-          },
-          time: 4,
-        },
-        {
-          type: "context.append_loop_event",
-          event: {
-            type: "content.part",
-            part: { type: "text", text: "Kimi done." },
-          },
-          time: 5,
-        },
-      ]
-        .map((record) => JSON.stringify(record))
-        .join("\n"),
-    );
-    const kimiMessages = convertKimiMessages({
-      sessionId: "kimi-fixture",
-      workDir: "/fixture",
-      records: kimiRecords,
-    });
-
     expectOracleParity(codexMessages);
     expectOracleParity(piMessages);
-    expectOracleParity(kimiMessages);
   });
   it("projects Pi reasoning as rows that split tool batches with stable detail refs", () => {
     const longReasoning = `long-${"r".repeat(900)}`;

@@ -303,7 +303,7 @@ export interface SearchResponse {
   searchDurationMs: number;
 }
 
-export type ArchiveProvider = "claude" | "codex" | "pi" | "kimi" | "cursor";
+export type ArchiveProvider = "claude" | "codex" | "pi" | "cursor";
 export type ArchiveReason = "manual" | "auto";
 
 export interface ArchivedFileRecord {

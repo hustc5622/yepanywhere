@@ -58,10 +58,6 @@ import {
   GEMINI_TMP_DIR,
   GeminiSessionScanner,
 } from "./projects/gemini-scanner.js";
-import {
-  KIMI_SESSIONS_DIR,
-  KimiSessionScanner,
-} from "./projects/kimi-scanner.js";
 import { McodeSessionScanner } from "./projects/mcode-scanner.js";
 import { CLAUDE_PROJECTS_DIR } from "./projects/paths.js";
 import { PiSessionScanner } from "./projects/pi-scanner.js";
@@ -152,7 +148,6 @@ import {
 import { DshSessionReader } from "./sessions/dsh-reader.js";
 import { DSH_SESSIONS_DIR } from "./sessions/dsh-store.js";
 import { GeminiSessionReader } from "./sessions/gemini-reader.js";
-import { KimiSessionReader } from "./sessions/kimi-reader.js";
 import { McodeSessionReader } from "./sessions/mcode-reader.js";
 import { MCODE_SESSIONS_DIR } from "./sessions/mcode-store.js";
 import { PI_SESSIONS_DIR } from "./sessions/pi-files.js";
@@ -496,9 +491,6 @@ export function createApp(options: AppOptions): AppResult {
     providerEnabled("gemini") || providerEnabled("gemini-acp");
   const codexScanner = codexEnabled ? new CodexSessionScanner() : undefined;
   const geminiScanner = geminiEnabled ? new GeminiSessionScanner() : undefined;
-  const kimiScanner = providerEnabled("kimi")
-    ? new KimiSessionScanner()
-    : undefined;
   const piScanner = providerEnabled("pi")
     ? new PiSessionScanner({ sessionsDir: PI_SESSIONS_DIR })
     : undefined;
@@ -519,14 +511,12 @@ export function createApp(options: AppOptions): AppResult {
       options.serverSettingsService?.getSetting("remoteExecutors") ?? [],
     codexScanner,
     geminiScanner,
-    kimiScanner,
     piScanner,
     cursorScanner,
     mcodeScanner,
     dshScanner,
     enableCodex: codexEnabled,
     enableGemini: geminiEnabled,
-    enableKimi: Boolean(kimiScanner),
     enablePi: Boolean(piScanner),
     enableCursor: Boolean(cursorScanner),
     enableMcode: Boolean(mcodeScanner),
@@ -553,21 +543,15 @@ export function createApp(options: AppOptions): AppResult {
   const readerCache = new Map<string, ISessionReader>();
   const maxReaderCacheSize = 500;
 
-  // Kimi and Pi readers cache their shared-tree directory scans briefly. Pi's
-  // parsed-session cache is much larger, so invalidate only the file that
-  // changed instead of making every project reparse its whole history.
+  // Pi readers cache parsed sessions. That cache is large, so invalidate only
+  // the file that changed instead of making every project reparse its whole
+  // history.
   options.eventBus?.subscribe((event) => {
-    if (
-      event.type !== "file-change" ||
-      (event.provider !== "kimi" && event.provider !== "pi")
-    ) {
+    if (event.type !== "file-change" || event.provider !== "pi") {
       return;
     }
     for (const reader of readerCache.values()) {
-      if (event.provider === "kimi" && reader instanceof KimiSessionReader) {
-        reader.invalidateCache();
-      }
-      if (event.provider === "pi" && reader instanceof PiSessionReader) {
+      if (reader instanceof PiSessionReader) {
         reader.invalidateFile(event.path);
       }
     }
@@ -655,15 +639,6 @@ export function createApp(options: AppOptions): AppResult {
             }),
         );
       }
-      case "kimi":
-        return getOrCreateReader(
-          `kimi::${KIMI_SESSIONS_DIR}::${project.path}`,
-          () =>
-            new KimiSessionReader({
-              sessionsDir: KIMI_SESSIONS_DIR,
-              projectPath: project.path,
-            }),
-        );
       case "cursor":
         return getOrCreateReader(
           `cursor::${CURSOR_ACP_SESSIONS_DIR}::${project.path}`,
@@ -800,15 +775,6 @@ export function createApp(options: AppOptions): AppResult {
           : undefined,
       });
     });
-  const kimiReaderFactory = (projectPath: string): KimiSessionReader =>
-    getOrCreateReader(
-      `kimi-extra::${KIMI_SESSIONS_DIR}::${projectPath}`,
-      () =>
-        new KimiSessionReader({
-          sessionsDir: KIMI_SESSIONS_DIR,
-          projectPath,
-        }),
-    );
   const cursorReaderFactory = (projectPath: string): CursorSessionReader =>
     getOrCreateReader(
       `cursor-extra::${CURSOR_ACP_SESSIONS_DIR}::${projectPath}`,
@@ -861,8 +827,6 @@ export function createApp(options: AppOptions): AppResult {
         geminiHashToCwd: geminiScanner?.getHashToCwd(),
         piSessionsDir: PI_SESSIONS_DIR,
         piReaderFactory,
-        kimiSessionsDir: KIMI_SESSIONS_DIR,
-        kimiReaderFactory,
         mcodeReaderFactory,
         dshReaderFactory,
         cursorSessionsDir: CURSOR_ACP_SESSIONS_DIR,
@@ -939,8 +903,6 @@ export function createApp(options: AppOptions): AppResult {
     geminiReaderFactory,
     piSessionsDir: PI_SESSIONS_DIR,
     piReaderFactory,
-    kimiSessionsDir: KIMI_SESSIONS_DIR,
-    kimiReaderFactory,
     mcodeReaderFactory,
     dshReaderFactory,
     enabledProviders: options.enabledProviders,
@@ -1002,8 +964,6 @@ export function createApp(options: AppOptions): AppResult {
             geminiHashToCwd: geminiScanner?.getHashToCwd(),
             piSessionsDir: PI_SESSIONS_DIR,
             piReaderFactory,
-            kimiSessionsDir: KIMI_SESSIONS_DIR,
-            kimiReaderFactory,
             mcodeReaderFactory,
             dshReaderFactory,
           },
@@ -1064,7 +1024,6 @@ export function createApp(options: AppOptions): AppResult {
         codexScanner,
         geminiScanner,
         piScanner,
-        kimiScanner,
         cursorScanner,
         mcodeScanner,
         dshScanner,
@@ -1082,8 +1041,6 @@ export function createApp(options: AppOptions): AppResult {
         geminiHashToCwd: geminiScanner?.getHashToCwd(),
         piSessionsDir: PI_SESSIONS_DIR,
         piReaderFactory,
-        kimiSessionsDir: KIMI_SESSIONS_DIR,
-        kimiReaderFactory,
         mcodeReaderFactory,
         dshReaderFactory,
         cursorSessionsDir: CURSOR_ACP_SESSIONS_DIR,
@@ -1399,14 +1356,11 @@ export function createApp(options: AppOptions): AppResult {
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
       piScanner,
-      kimiScanner,
       cursorScanner,
       mcodeScanner,
       dshScanner,
       piSessionsDir: PI_SESSIONS_DIR,
       piReaderFactory,
-      kimiSessionsDir: KIMI_SESSIONS_DIR,
-      kimiReaderFactory,
       mcodeReaderFactory,
       dshReaderFactory,
       codexBridgeService: options.codexBridgeService,
@@ -1436,14 +1390,11 @@ export function createApp(options: AppOptions): AppResult {
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
       piScanner,
-      kimiScanner,
       cursorScanner,
       mcodeScanner,
       dshScanner,
       piSessionsDir: PI_SESSIONS_DIR,
       piReaderFactory,
-      kimiSessionsDir: KIMI_SESSIONS_DIR,
-      kimiReaderFactory,
       mcodeReaderFactory,
       dshReaderFactory,
       serverSettingsService: options.serverSettingsService,
@@ -1488,11 +1439,6 @@ export function createApp(options: AppOptions): AppResult {
               reader: piReaderFactory(project.path),
               sessionDir: PI_SESSIONS_DIR,
             };
-          case "kimi":
-            return {
-              reader: kimiReaderFactory(project.path),
-              sessionDir: KIMI_SESSIONS_DIR,
-            };
           case "cursor":
             return {
               reader: cursorReaderFactory(project.path),
@@ -1533,14 +1479,11 @@ export function createApp(options: AppOptions): AppResult {
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
       piScanner,
-      kimiScanner,
       cursorScanner,
       mcodeScanner,
       dshScanner,
       piSessionsDir: PI_SESSIONS_DIR,
       piReaderFactory,
-      kimiSessionsDir: KIMI_SESSIONS_DIR,
-      kimiReaderFactory,
       mcodeReaderFactory,
       dshReaderFactory,
       codexBridgeService: options.codexBridgeService,
@@ -1567,14 +1510,11 @@ export function createApp(options: AppOptions): AppResult {
       geminiSessionsDir: GEMINI_TMP_DIR,
       geminiReaderFactory,
       piScanner,
-      kimiScanner,
       cursorScanner,
       mcodeScanner,
       dshScanner,
       piSessionsDir: PI_SESSIONS_DIR,
       piReaderFactory,
-      kimiSessionsDir: KIMI_SESSIONS_DIR,
-      kimiReaderFactory,
       mcodeReaderFactory,
       dshReaderFactory,
       eventBus: options.eventBus,
@@ -1603,14 +1543,11 @@ export function createApp(options: AppOptions): AppResult {
         geminiSessionsDir: GEMINI_TMP_DIR,
         geminiReaderFactory,
         piScanner,
-        kimiScanner,
         cursorScanner,
         mcodeScanner,
         dshScanner,
         piSessionsDir: PI_SESSIONS_DIR,
         piReaderFactory,
-        kimiSessionsDir: KIMI_SESSIONS_DIR,
-        kimiReaderFactory,
         mcodeReaderFactory,
         dshReaderFactory,
         cursorSessionsDir: CURSOR_ACP_SESSIONS_DIR,
@@ -1643,14 +1580,11 @@ export function createApp(options: AppOptions): AppResult {
         geminiSessionsDir: GEMINI_TMP_DIR,
         geminiReaderFactory,
         piScanner,
-        kimiScanner,
         cursorScanner,
         mcodeScanner,
         dshScanner,
         piSessionsDir: PI_SESSIONS_DIR,
         piReaderFactory,
-        kimiSessionsDir: KIMI_SESSIONS_DIR,
-        kimiReaderFactory,
         mcodeReaderFactory,
         dshReaderFactory,
         cursorSessionsDir: CURSOR_ACP_SESSIONS_DIR,

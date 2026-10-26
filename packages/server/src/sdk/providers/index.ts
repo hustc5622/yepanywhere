@@ -62,14 +62,6 @@ export {
 import { piProvider } from "./pi.js";
 export { PiProvider, piProvider, type PiProviderConfig } from "./pi.js";
 
-// Kimi provider (uses `kimi acp` for ACP-based agent execution)
-import { kimiProvider } from "./kimi.js";
-export {
-  KimiProvider,
-  kimiProvider,
-  type KimiProviderConfig,
-} from "./kimi.js";
-
 import { cursorProvider } from "./cursor.js";
 export { CursorProvider, cursorProvider } from "./cursor.js";
 
@@ -95,7 +87,6 @@ export function getAllProviders(): AgentProvider[] {
     geminiProvider,
     geminiACPProvider,
     piProvider,
-    kimiProvider,
     cursorProvider,
     mcodeProvider,
   ];
@@ -122,8 +113,6 @@ export function getProvider(name: ProviderName | string): AgentProvider | null {
       return geminiACPProvider;
     case "pi":
       return piProvider;
-    case "kimi":
-      return kimiProvider;
     case "cursor":
       return cursorProvider;
     case "mcode":

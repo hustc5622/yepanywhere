@@ -444,46 +444,6 @@ describe("SessionInteractionService", () => {
       "acceptEdits",
     );
   });
-
-  it("preserves Kimi's mode when a legacy client approves ExitPlanMode with acceptEdits", async () => {
-    const request = makeRequest({
-      toolName: "ExitPlanMode",
-      prompt: "Accept this plan?",
-      toolInput: { kind: "switch_mode", title: "ExitPlanMode" },
-    });
-    const providerResponse = vi.fn(async () => ({ accepted: true }));
-    const setPermissionMode = vi.fn(async () => ({
-      ok: true,
-      permissionMode: "acceptEdits" as const,
-      modeVersion: 1,
-    }));
-    const service = createService(services, brokers, {
-      getProcessSnapshotForSession: vi.fn(async () =>
-        processSnapshot(request, "kimi"),
-      ),
-      respondToInput: providerResponse,
-      setPermissionMode,
-    });
-    const pending = await service.getPendingInput(request.sessionId);
-
-    await expect(
-      service.respondToInput(request.sessionId, {
-        requestId: request.id,
-        response: "approve_accept_edits",
-        operationId: pending?.interaction?.operationId,
-        operationVersion: pending?.interaction?.version,
-        actor: { id: "legacy-yep-client", channel: "yep" },
-      }),
-    ).resolves.toMatchObject({ ok: true });
-    expect(providerResponse).toHaveBeenCalledWith(
-      expect.objectContaining({
-        sessionId: request.sessionId,
-        requestId: request.id,
-        response: "approve",
-      }),
-    );
-    expect(setPermissionMode).not.toHaveBeenCalled();
-  });
 });
 
 function makeRequest(overrides: Partial<InputRequest> = {}): InputRequest {

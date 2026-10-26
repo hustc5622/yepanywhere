@@ -849,7 +849,7 @@ export class SessionDisplayReducer {
     }
     if (runId) this.currentRun = runId;
     const effectiveRun = runId ?? this.currentRun;
-    if (message.type === "system" || message.type === "kimi_goal") {
+    if (message.type === "system") {
       const nativeItem = record(message.codexThreadItem);
       const nativeId = string(nativeItem?.id);
       const collaborationTool =
@@ -1076,7 +1076,7 @@ export class SessionDisplayReducer {
    * A step normally ends on its `tool_result`, or on a terminal turn status via
    * `closeRun`. Neither arrives when a provider stream dies mid tool call: Pi
    * persists the half-built call from a broken upstream stream.
-   * Providers without native turn ids (Pi, Kimi) make this
+   * Providers without native turn ids (Pi, MiniMax Code) make this
    * worse, because every run collapses onto `session` and `closeRun` can only
    * fire once the whole session goes idle. The orphan then spins as a bogus
    * "still running" row for the rest of the session.

@@ -299,8 +299,6 @@ export class FileWatcher {
         return this.parseCodexFileType(relativePath);
       case "pi":
         return relativePath.endsWith(".jsonl") ? "session" : "other";
-      case "kimi":
-        return this.parseKimiFileType(relativePath);
       case "cursor":
         return /(?:^|\/)(?:store\.db(?:-wal)?|meta\.json)$/.test(relativePath)
           ? "session"
@@ -318,19 +316,6 @@ export class FileWatcher {
           ? "session"
           : "other";
     }
-  }
-
-  private parseKimiFileType(relativePath: string): FileChangeEvent["fileType"] {
-    // Watching ~/.kimi-code/sessions - session logs are
-    // {workspace}/session_{uuid}/agents/{agentId}/wire.jsonl and metadata is
-    // {workspace}/session_{uuid}/state.json. Both affect session listings.
-    if (
-      relativePath.endsWith("wire.jsonl") ||
-      path.basename(relativePath) === "state.json"
-    ) {
-      return "session";
-    }
-    return "other";
   }
 
   private parseClaudeFileType(

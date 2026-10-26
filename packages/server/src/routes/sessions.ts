@@ -64,7 +64,6 @@ import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { CursorSessionScanner } from "../projects/cursor-scanner.js";
 import type { DshSessionScanner } from "../projects/dsh-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
-import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
 import type { McodeSessionScanner } from "../projects/mcode-scanner.js";
 import { canonicalizeProjectPath, encodeProjectId } from "../projects/paths.js";
 import type { PiSessionScanner } from "../projects/pi-scanner.js";
@@ -94,7 +93,6 @@ import type { DshSessionReader } from "../sessions/dsh-reader.js";
 import { cloneClaudeSession, cloneCodexSession } from "../sessions/fork.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
 import { projectSessionInspectorMessages } from "../sessions/inspector-projection.js";
-import type { KimiSessionReader } from "../sessions/kimi-reader.js";
 import type { McodeSessionReader } from "../sessions/mcode-reader.js";
 import {
   annotateBranchMessages,
@@ -200,15 +198,11 @@ export interface SessionsDeps {
   piScanner?: PiSessionScanner;
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
-  kimiScanner?: KimiSessionScanner;
   cursorScanner?: CursorSessionScanner;
   mcodeScanner?: McodeSessionScanner;
   dshScanner?: DshSessionScanner;
   mcodeReaderFactory?: (projectPath: string) => McodeSessionReader;
   dshReaderFactory?: (projectPath: string) => DshSessionReader;
-  kimiSessionsDir?: string;
-  /** Optional shared Kimi reader factory for cross-provider session lookups */
-  kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
   /** Server-wide settings service */
   serverSettingsService?: ServerSettingsService;
   /** ModelInfoService for context window lookups */
@@ -627,12 +621,11 @@ interface ArchiveTarget {
  * Resolve the reader that actually owns `sessionId`.
  *
  * A project id is derived purely from the working directory, so a single path
- * can host sessions from several providers (e.g. Claude + Codex + Kimi under
+ * can host sessions from several providers (e.g. Claude + Codex + Pi under
  * the same repo). `readerFactory(project)` only yields the project's primary
  * provider reader, which returns nothing for a session owned by a different
- * provider — this is why the subagent (Agent/AgentSwarm) endpoints returned an
- * empty result for Kimi sessions living under a Claude-primary project. Resolve
- * the owning provider's reader by session instead, falling back to the primary.
+ * provider. Resolve the owning provider's reader by session instead, falling
+ * back to the primary.
  */
 async function resolveReaderForSession(
   deps: SessionsDeps,
@@ -662,8 +655,6 @@ function toProviderResolutionDeps(deps: SessionsDeps): ProviderResolutionDeps {
     geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
     piSessionsDir: deps.piSessionsDir,
     piReaderFactory: deps.piReaderFactory,
-    kimiSessionsDir: deps.kimiSessionsDir,
-    kimiReaderFactory: deps.kimiReaderFactory,
     mcodeReaderFactory: deps.mcodeReaderFactory,
     dshReaderFactory: deps.dshReaderFactory,
   };
@@ -765,9 +756,7 @@ function emitArchiveFileEvents(
         ? deps.codexSessionsDir
         : record.provider === "pi"
           ? deps.piSessionsDir
-          : record.provider === "kimi"
-            ? deps.kimiSessionsDir
-            : deps.claudeProjectsDir;
+          : deps.claudeProjectsDir;
   if (!providerRoot) return;
 
   for (const file of record.files) {
@@ -870,8 +859,6 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       geminiReaderFactory: deps.geminiReaderFactory,
       piSessionsDir: deps.piSessionsDir,
       piReaderFactory: deps.piReaderFactory,
-      kimiSessionsDir: deps.kimiSessionsDir,
-      kimiReaderFactory: deps.kimiReaderFactory,
       mcodeReaderFactory: deps.mcodeReaderFactory,
       dshReaderFactory: deps.dshReaderFactory,
     });

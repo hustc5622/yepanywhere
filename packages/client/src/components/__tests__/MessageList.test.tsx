@@ -191,7 +191,7 @@ function codexNativeGoalItem(id: string): RenderItem {
   };
 }
 
-function kimiTodoListItem(
+function todoListItem(
   id: string,
   todos?: Array<{ title: string; status: string }>,
 ): RenderItem {
@@ -385,21 +385,21 @@ describe("MessageList inspector state", () => {
     expect(screen.queryByTestId("render-item-current-thread-goal")).toBeNull();
   });
 
-  it("hides Kimi TodoList writes but keeps TodoList reads visible", () => {
+  it("hides TodoList writes but keeps TodoList reads visible", () => {
     render(
       <MessageList
         messages={[]}
         preprocessedItems={[
-          kimiTodoListItem("kimi-todo-write", [
+          todoListItem("native-todo-write", [
             { title: "Fix the renderer", status: "in_progress" },
           ]),
-          kimiTodoListItem("kimi-todo-read"),
+          todoListItem("native-todo-read"),
         ]}
       />,
     );
 
-    expect(screen.queryByTestId("render-item-kimi-todo-write")).toBeNull();
-    expect(screen.getByTestId("render-item-kimi-todo-read")).not.toBeNull();
+    expect(screen.queryByTestId("render-item-native-todo-write")).toBeNull();
+    expect(screen.getByTestId("render-item-native-todo-read")).not.toBeNull();
   });
 });
 

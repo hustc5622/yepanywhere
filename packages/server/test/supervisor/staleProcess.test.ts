@@ -10,16 +10,16 @@ import {
  * Regression coverage for the stale-process watchdog
  * (`Supervisor.terminateStaleProcesses`).
  *
- * Background: Kimi orchestrates work through AgentSwarm / explore subagents.
- * While a subagent runs (often several minutes), the parent ACP prompt emits
- * no SDK messages even though the underlying `kimi acp` process is very much
- * alive. Before the fix the Kimi provider did not report process liveness, so
+ * Background: ACP agents can orchestrate work through subagents. While a
+ * subagent runs (often several minutes), the parent ACP prompt emits no SDK
+ * messages even though the underlying ACP process is very much alive. Before
+ * the fix ACP providers did not report process liveness, so
  * the watchdog fell back to a pure time-based heuristic and killed the healthy
  * process after ~5 minutes of silence — aborting the in-flight turn (observed
  * in logs as "Terminating stale process (no liveness check) ... no messages
  * for 304s").
  *
- * The fix makes ACP-backed providers (kimi, gemini-acp) report
+ * The fix makes ACP-backed providers (e.g. gemini-acp) report
  * `isProcessAlive`, so a live-but-silent process short-circuits at
  * `if (alive === true) continue;` exactly like other long-lived providers.
  */
@@ -94,40 +94,45 @@ describe("Supervisor stale-process watchdog", () => {
     it("gives codex a long threshold and everyone else the default", () => {
       expect(getStaleInTurnThresholdMs("codex")).toBe(SIXTY_MIN);
       expect(getStaleInTurnThresholdMs("codex-oss")).toBe(SIXTY_MIN);
-      expect(getStaleInTurnThresholdMs("kimi")).toBe(FIVE_MIN);
       expect(getStaleInTurnThresholdMs("gemini-acp")).toBe(FIVE_MIN);
       expect(getStaleInTurnThresholdMs("claude")).toBe(FIVE_MIN);
     });
   });
 
   describe("liveness short-circuit (the fix)", () => {
-    it("does NOT terminate a live-but-silent kimi process past the threshold", () => {
-      const proc = makeStubProcess({ provider: "kimi", isProcessAlive: true });
+    it("does NOT terminate a live-but-silent ACP process past the threshold", () => {
+      const proc = makeStubProcess({
+        provider: "gemini-acp",
+        isProcessAlive: true,
+      });
       runStaleCheck(proc);
       expect(proc.terminate).not.toHaveBeenCalled();
     });
 
-    it("terminates a kimi process that reports no liveness (undefined)", () => {
+    it("terminates an ACP process that reports no liveness (undefined)", () => {
       // Pre-fix behavior: no isProcessAlive => time-based heuristic kills it.
       const proc = makeStubProcess({
-        provider: "kimi",
+        provider: "gemini-acp",
         isProcessAlive: undefined,
       });
       runStaleCheck(proc);
       expect(proc.terminate).toHaveBeenCalledTimes(1);
     });
 
-    it("terminates a kimi process confirmed dead (isProcessAlive=false)", () => {
-      const proc = makeStubProcess({ provider: "kimi", isProcessAlive: false });
+    it("terminates an ACP process confirmed dead (isProcessAlive=false)", () => {
+      const proc = makeStubProcess({
+        provider: "gemini-acp",
+        isProcessAlive: false,
+      });
       runStaleCheck(proc);
       expect(proc.terminate).toHaveBeenCalledTimes(1);
     });
   });
 
   describe("threshold gating", () => {
-    it("does not terminate a kimi process still within the 5-minute window", () => {
+    it("does not terminate an ACP process still within the 5-minute window", () => {
       const proc = makeStubProcess({
-        provider: "kimi",
+        provider: "gemini-acp",
         isProcessAlive: undefined,
         lastMessageTime: new Date(Date.now() - (FIVE_MIN - 60_000)),
       });
@@ -136,7 +141,7 @@ describe("Supervisor stale-process watchdog", () => {
     });
 
     it("does not terminate a silent codex process below its 60-minute threshold", () => {
-      // 6 minutes of silence: past kimi's threshold, well within codex's.
+      // 6 minutes of silence: past the default threshold, well within codex's.
       const proc = makeStubProcess({
         provider: "codex",
         isProcessAlive: undefined,
@@ -150,7 +155,7 @@ describe("Supervisor stale-process watchdog", () => {
   describe("state gating", () => {
     it("ignores processes that are not in-turn", () => {
       const proc = makeStubProcess({
-        provider: "kimi",
+        provider: "gemini-acp",
         isProcessAlive: undefined,
         state: { type: "idle" },
       });
@@ -160,7 +165,7 @@ describe("Supervisor stale-process watchdog", () => {
 
     it("ignores held processes", () => {
       const proc = makeStubProcess({
-        provider: "kimi",
+        provider: "gemini-acp",
         isProcessAlive: undefined,
         isHeld: true,
       });

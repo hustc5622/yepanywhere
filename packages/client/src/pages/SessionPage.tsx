@@ -204,8 +204,6 @@ function getApprovalAgentName(
       return "Gemini";
     case "pi":
       return "Pi";
-    case "kimi":
-      return "Kimi";
     case "cursor":
       return "Cursor";
     case "mcode":

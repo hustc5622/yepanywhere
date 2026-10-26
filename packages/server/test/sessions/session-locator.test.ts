@@ -324,7 +324,7 @@ describe("locateSession", () => {
       ),
       sessionMetadataService: {
         getCanonicalSessionId: vi.fn((id: string) => id),
-        getProvider: vi.fn(() => "kimi"),
+        getProvider: vi.fn(() => "mcode"),
         getProjectLocation: vi.fn(() => undefined),
       } as unknown as SessionMetadataService,
     });
@@ -368,11 +368,11 @@ describe("locateSession via recorded metadata", () => {
 
     await expect(
       locateSession(
-        metadataDeps(projectPath, "kimi", { readerFactory }),
+        metadataDeps(projectPath, "mcode", { readerFactory }),
         "ses_rec",
       ),
     ).resolves.toMatchObject({
-      provider: "kimi",
+      provider: "mcode",
       projectPath,
       projectId: encodeProjectId(projectPath),
       source: "metadata",
@@ -381,7 +381,7 @@ describe("locateSession via recorded metadata", () => {
   });
 
   it("ignores a recorded project whose directory no longer exists", async () => {
-    const deps = metadataDeps("/nonexistent/moved-away", "kimi");
+    const deps = metadataDeps("/nonexistent/moved-away", "mcode");
     await expect(locateSession(deps, "ses_stale")).resolves.toBeNull();
   });
 

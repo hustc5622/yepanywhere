@@ -50,7 +50,7 @@
 | Codex OSS | 独立 active provider，不能自动套用 Codex app-server 的编辑与审批契约 | `sdk/providers/codex-oss.ts`；客户端 `CodexOssProvider` |
 | Gemini | registry 同时包含 legacy Gemini 与 ACP；`getProvider("gemini")` 和 `getProvider("gemini-acp")` 都返回 ACP 实例 | `sdk/providers/index.ts` `getProvider`；`gemini-acp.ts`、`sessions/gemini-reader.ts` |
 | Pi | active；RPC 执行路径和原生 session tree；网关配置可按 session 保存 | `sdk/providers/pi.ts`、`sessions/pi-reader.ts`；参考 `references/pi/.../rpc-types.ts`，本轮只抽查命令定义 |
-| Kimi | active；ACP 适配，独立 scanner/reader | `sdk/providers/kimi.ts`、`projects/kimi-scanner.ts`、`sessions/kimi-reader.ts` |
+| Kimi | retired（2026-10 移除）；旧数据中的 `kimi` 按 retired provider 处理，接口返回 410 | `sdk/providers/policy.ts` `RETIRED_PROVIDER_NAMES` |
 | ZCode | retired（2026-10 移除）；旧数据中的 `zcode` 按 retired provider 处理，接口返回 410 | `sdk/providers/policy.ts` `RETIRED_PROVIDER_NAMES` |
 | Cursor | **实际 active registry 成员**，有 ACP adapter 与 SQLite/blob 历史读取；旧总览未列全 | `sdk/providers/cursor.ts`、`sessions/cursor-store.ts`、`sessions/cursor-reader.ts` |
 | Claude | 不在 active discovery；`getProvider("claude")` 仍能解析，供既有会话兼容 | `sdk/providers/index.ts` `getAllProviders/getProvider`；`claude.ts`、`sessions/reader.ts` |

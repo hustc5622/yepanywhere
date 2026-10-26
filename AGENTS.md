@@ -29,7 +29,7 @@ Yep Anywhere 是一个面向移动端优先的 coding agent 监督器。核心�
 - Hono 服务端管理 provider 进程，并暴露 REST/WebSocket API。
 - React 客户端通过 WebSocket 流式展示 session 状态。
 - session 数据以 provider JSONL/session 文件持久化，并在展示前做 normalize。
-- 支持多个 provider：Claude Code、Codex、Gemini、Pi、Kimi、MiniMax Code、DeepSeek Harness（只读）以及相关 bridge 模式。ZCode provider 已移除，旧数据中的 `zcode` 按 retired provider 处理。
+- 支持多个 provider：Claude Code、Codex、Gemini、Pi、MiniMax Code、DeepSeek Harness（只读）以及相关 bridge 模式。ZCode 与 Kimi provider 已移除，旧数据中的 `zcode`、`kimi` 按 retired provider 处理。
 
 从过去的 Codex session 看，本仓库高频工作主要集中在：
 - Codex bridge / remote app-server 行为（`4510`、`cf`、MCP profiles）。
@@ -70,7 +70,7 @@ PORT=4000 YEP_ANYWHERE_PROFILE=dev pnpm dev
 - `YEP_ANYWHERE_PROFILE`：创建 `~/.yep-anywhere-{profile}/`。
 - `YEP_ANYWHERE_DATA_DIR`：显式覆盖数据目录。
 - `CLAUDE_CONFIG_DIR`：Claude Code 配置/session 根目录，默认 `~/.claude`。
-- `ENABLED_PROVIDERS`：逗号分隔的 provider allowlist。有效值包括 `claude`、`claude-ollama`、`codex`、`codex-oss`、`gemini`、`gemini-acp`、`pi`、`kimi`、`mcode`、`dsh`（只读）。
+- `ENABLED_PROVIDERS`：逗号分隔的 provider allowlist。有效值包括 `claude`、`claude-ollama`、`codex`、`codex-oss`、`gemini`、`gemini-acp`、`pi`、`mcode`、`dsh`（只读）。
 - `VOICE_INPUT=false`：在服务端禁用语音输入按钮。
 - `YEP_RUNTIME_EXTERNAL=true`：部署时把 agent runtime 拆成独立进程（见下面的热叠加章节）。
 - `YEP_RUNTIME_MODE`：`embedded`（默认）或 `external`，运行时形态。

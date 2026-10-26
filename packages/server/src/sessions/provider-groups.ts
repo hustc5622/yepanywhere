@@ -12,7 +12,6 @@ export type ProviderGroup =
   | "codex"
   | "gemini"
   | "pi"
-  | "kimi"
   | "cursor"
   | "mcode"
   | "dsh";
@@ -24,7 +23,6 @@ export function normalizeProviderGroup(
   if (provider === "codex" || provider === "codex-oss") return "codex";
   if (provider === "gemini" || provider === "gemini-acp") return "gemini";
   if (provider === "pi") return "pi";
-  if (provider === "kimi") return "kimi";
   if (provider === "cursor") return "cursor";
   if (provider === "mcode") return "mcode";
   if (provider === "dsh") return "dsh";

@@ -118,7 +118,7 @@ describe("provider routes", () => {
     expect(getProvider("claude")?.name).toBe("claude");
   });
 
-  it.each(["opencode", "zcode"])(
+  it.each(["opencode", "zcode", "kimi"])(
     "does not expose the retired %s provider",
     (name) => {
       expect(getAllProviders().map((provider) => provider.name)).not.toContain(

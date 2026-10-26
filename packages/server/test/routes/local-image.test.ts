@@ -166,7 +166,7 @@ describe("Local image routes", () => {
     expect(await response.text()).toBe("png-bytes");
   });
 
-  it("serves extensionless Kimi blobs by sniffing the image signature", async () => {
+  it("serves extensionless blobs by sniffing the image signature", async () => {
     const blobsDir = path.join(
       tempDir,
       "sessions",

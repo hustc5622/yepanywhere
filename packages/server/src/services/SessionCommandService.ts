@@ -78,7 +78,6 @@ import { CodexSessionReader } from "../sessions/codex-reader.js";
 import { computeCodexRollbackNumTurns } from "../sessions/codex-rollback.js";
 import type { DshSessionReader } from "../sessions/dsh-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
-import type { KimiSessionReader } from "../sessions/kimi-reader.js";
 import type { McodeSessionReader } from "../sessions/mcode-reader.js";
 import type { PiSessionReader } from "../sessions/pi-reader.js";
 import {
@@ -120,8 +119,6 @@ export interface SessionCommandServiceDeps {
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
-  kimiSessionsDir?: string;
-  kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
   mcodeReaderFactory?: (projectPath: string) => McodeSessionReader;
   dshReaderFactory?: (projectPath: string) => DshSessionReader;
   enabledProviders?: readonly string[];
@@ -1240,9 +1237,7 @@ export class SessionCommandService {
     );
 
     const providerRestoresReasoningEffort =
-      providerName === "codex" ||
-      providerName === "pi" ||
-      providerName === "kimi";
+      providerName === "codex" || providerName === "pi";
     const resumeReasoningEffort =
       parsedReasoningEffort.reasoningEffort ??
       (providerRestoresReasoningEffort
@@ -2354,8 +2349,6 @@ export class SessionCommandService {
       geminiHashToCwd: this.deps.geminiScanner?.getHashToCwd(),
       piSessionsDir: this.deps.piSessionsDir,
       piReaderFactory: this.deps.piReaderFactory,
-      kimiSessionsDir: this.deps.kimiSessionsDir,
-      kimiReaderFactory: this.deps.kimiReaderFactory,
       mcodeReaderFactory: this.deps.mcodeReaderFactory,
       dshReaderFactory: this.deps.dshReaderFactory,
       sessionMetadataService: this.deps.sessionMetadataService,

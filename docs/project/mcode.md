@@ -26,7 +26,7 @@ MiniMax Code（provider 名 `mcode`）通过本机 CLI `mcode acp`（Agent Clien
 - 中断：`session/cancel`。Steer：mcode 扩展方法 `mcode/session/steer`，只在 prompt 进行中可用。
 - 提问（`ask_user`）：Yep 声明了 `elicitation.form` 能力，mcode 会通过 `elicitation/create` 发送完整问卷（多步骤、多选、Other 自由输入），映射到 Yep 的 AskUserQuestion 面板。回答之后，mcode 在 ACP prompt 返回后再起一个后台 turn 续跑，期间 ACP 不推送正文。provider 会等到 `messages.jsonl` 出现回答时间之后的最终 assistant 消息才结束本轮；transcript 90 秒无变化或队列里有积压时提前结束。
 - 队列竞态：问卷回答如果赶在提问的那个 turn 结束之前到达，mcode 会把它放进自己的 Queue，下一次 `session/prompt` 会被 `An earlier queued message has priority` 拒绝。provider 会把积压消息（问卷取 Q/A 摘要）按顺序拼到本次 prompt 前面，从 Queue 删除后重发一次。
-- 实时流的正文 ID 与持久化 ID 不对应，展示层按 pi/kimi 的方式处理：实时 overlay 只保留工具块，正文以磁盘快照为准。
+- 实时流的正文 ID 与持久化 ID 不对应，展示层按 pi 的方式处理：实时 overlay 只保留工具块，正文以磁盘快照为准。
 - App 或终端正在运行的会话会被 ExternalSessionTracker 标记为外部活动。
 
 ## 当前不支持

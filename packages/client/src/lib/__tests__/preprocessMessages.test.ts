@@ -226,15 +226,15 @@ describe("preprocessMessages", () => {
     });
   });
 
-  it("normalizes Kimi native file-tool fields and string results", () => {
+  it("normalizes native file-tool fields and string results", () => {
     const messages: Message[] = [
       {
-        id: "msg-kimi-write",
+        id: "msg-native-write",
         role: "assistant",
         content: [
           {
             type: "tool_use",
-            id: "kimi-write",
+            id: "native-write",
             name: "Write",
             input: {
               path: "src/app.ts",
@@ -245,24 +245,24 @@ describe("preprocessMessages", () => {
         timestamp: "2026-07-25T00:00:00Z",
       },
       {
-        id: "result-kimi-write",
+        id: "result-native-write",
         role: "user",
         content: [
           {
             type: "tool_result",
-            tool_use_id: "kimi-write",
+            tool_use_id: "native-write",
             content: "Wrote 24 bytes to src/app.ts",
           },
         ],
         timestamp: "2026-07-25T00:00:01Z",
       },
       {
-        id: "msg-kimi-read",
+        id: "msg-native-read",
         role: "assistant",
         content: [
           {
             type: "tool_use",
-            id: "kimi-read",
+            id: "native-read",
             name: "Read",
             input: {
               path: "src/app.ts",
@@ -274,12 +274,12 @@ describe("preprocessMessages", () => {
         timestamp: "2026-07-25T00:00:02Z",
       },
       {
-        id: "result-kimi-read",
+        id: "result-native-read",
         role: "user",
         content: [
           {
             type: "tool_result",
-            tool_use_id: "kimi-read",
+            tool_use_id: "native-read",
             content: "3\texport const value = 2;\n4\treturn value;",
           },
         ],
@@ -292,7 +292,7 @@ describe("preprocessMessages", () => {
     expect(items).toHaveLength(2);
     expect(items[0]).toMatchObject({
       type: "tool_call",
-      id: "kimi-write",
+      id: "native-write",
       toolName: "Write",
       status: "complete",
       toolInput: {
@@ -314,7 +314,7 @@ describe("preprocessMessages", () => {
     });
     expect(items[1]).toMatchObject({
       type: "tool_call",
-      id: "kimi-read",
+      id: "native-read",
       toolName: "Read",
       status: "complete",
       toolInput: {
@@ -340,138 +340,7 @@ describe("preprocessMessages", () => {
     });
   });
 
-  it("keeps Kimi ReadMediaFile arrays as bounded structured results", () => {
-    const hash = "c".repeat(64);
-    const messages: Message[] = [
-      {
-        id: "media-use",
-        role: "assistant",
-        content: [
-          {
-            type: "tool_use",
-            id: "ReadMediaFile:0",
-            name: "ReadMediaFile",
-            input: { path: "/tmp/example.png" },
-          },
-        ],
-      },
-      {
-        id: "media-result",
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            tool_use_id: "ReadMediaFile:0",
-            content: [
-              { type: "text", text: '<image path="/tmp/example.png">' },
-              {
-                type: "image_url",
-                imageUrl: { url: `blobref:image/png;${hash}` },
-              },
-              { type: "text", text: "</image>" },
-            ],
-          },
-        ],
-      },
-    ];
-
-    const items = preprocessMessages(messages);
-
-    expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({
-      type: "tool_call",
-      toolName: "ReadMediaFile",
-      status: "complete",
-      toolResult: {
-        content: "image loaded",
-        isError: false,
-        structured: {
-          type: "media",
-          kind: "image",
-          path: "/tmp/example.png",
-          mimeType: "image/png",
-        },
-      },
-    });
-    const toolItem = items[0];
-    expect(
-      JSON.stringify(
-        toolItem?.type === "tool_call" ? toolItem.toolResult : undefined,
-      ),
-    ).not.toContain("blobref:");
-  });
-
-  it("upgrades a live Kimi media result with its persisted preview", () => {
-    const messages: Message[] = [
-      {
-        id: "media-use",
-        role: "assistant",
-        content: [
-          {
-            type: "tool_use",
-            id: "ReadMediaFile:0",
-            name: "ReadMediaFile",
-            input: { path: "/tmp/example.png" },
-          },
-        ],
-      },
-      {
-        id: "media-live-result",
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            tool_use_id: "ReadMediaFile:0",
-            content: "image loaded: example.png",
-          },
-        ],
-        toolUseResult: {
-          type: "media",
-          kind: "image",
-          path: "/tmp/example.png",
-          mimeType: "image/png",
-          bytes: 4,
-        },
-      },
-      {
-        id: "media-persisted-result",
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            tool_use_id: "ReadMediaFile:0",
-            content: "image loaded: example.png",
-          },
-        ],
-        toolUseResult: {
-          type: "media",
-          kind: "image",
-          path: "/tmp/example.png",
-          mimeType: "image/png",
-          filePath: "/safe/blobs/image-hash",
-          previewUrl: "/api/local-image?path=safe",
-        },
-      },
-    ];
-
-    const items = preprocessMessages(messages);
-
-    expect(items).toHaveLength(1);
-    expect(items[0]).toMatchObject({
-      type: "tool_call",
-      status: "complete",
-      toolResult: {
-        structured: {
-          type: "media",
-          kind: "image",
-          filePath: "/safe/blobs/image-hash",
-          previewUrl: "/api/local-image?path=safe",
-        },
-      },
-    });
-  });
-
-  it("upgrades a lazy-created Kimi Write call when rawInput arrives later", () => {
+  it("upgrades a lazy-created Write call when rawInput arrives later", () => {
     const messages: Message[] = [
       {
         id: "write-lazy",
@@ -517,7 +386,7 @@ describe("preprocessMessages", () => {
     });
   });
 
-  it("normalizes Kimi JSON question answers without inventing a missing answer", () => {
+  it("normalizes JSON question answers without inventing a missing answer", () => {
     const questions = [
       {
         header: "Interaction",
@@ -538,7 +407,7 @@ describe("preprocessMessages", () => {
     ];
     const messages: Message[] = [
       {
-        id: "msg-kimi-question-use",
+        id: "msg-native-question-use",
         role: "assistant",
         content: [
           {
@@ -550,7 +419,7 @@ describe("preprocessMessages", () => {
         ],
       },
       {
-        id: "msg-kimi-question-result",
+        id: "msg-native-question-result",
         role: "user",
         content: [
           {
@@ -798,7 +667,7 @@ describe("preprocessMessages", () => {
     });
   });
 
-  it("collapses repeated Kimi TodoList writes using the latest title snapshot", () => {
+  it("collapses repeated TodoList writes using the latest title snapshot", () => {
     const messages: Message[] = [
       {
         id: "msg-user",
@@ -806,12 +675,12 @@ describe("preprocessMessages", () => {
         content: "Implement the feature",
       },
       {
-        id: "msg-kimi-todo-1",
+        id: "msg-native-todo-1",
         role: "assistant",
         content: [
           {
             type: "tool_use",
-            id: "kimi-todo-1",
+            id: "native-todo-1",
             name: "TodoList",
             input: {
               todos: [
@@ -823,12 +692,12 @@ describe("preprocessMessages", () => {
         ],
       },
       {
-        id: "msg-kimi-todo-2",
+        id: "msg-native-todo-2",
         role: "assistant",
         content: [
           {
             type: "tool_use",
-            id: "kimi-todo-2",
+            id: "native-todo-2",
             name: "TodoList",
             input: {
               todos: [
@@ -847,7 +716,7 @@ describe("preprocessMessages", () => {
 
     expect(todoItems).toHaveLength(1);
     expect(todoItems[0]).toMatchObject({
-      id: "kimi-todo-1",
+      id: "native-todo-1",
       toolInput: {
         todos: [
           { title: "Inspect code", status: "done" },
@@ -926,7 +795,7 @@ describe("preprocessMessages", () => {
     });
   });
 
-  it("structures completed Kimi AgentSwarm results for the Task renderer", () => {
+  it("structures completed AgentSwarm results for the Task renderer", () => {
     const messages: Message[] = [
       {
         id: "msg-1",

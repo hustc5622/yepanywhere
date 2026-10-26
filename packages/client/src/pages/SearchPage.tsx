@@ -421,7 +421,6 @@ const PROVIDER_COLORS: Partial<Record<ProviderName, string>> = {
   gemini: "#4285f4",
   "gemini-acp": "#4285f4",
   pi: "var(--provider-pi)",
-  kimi: "var(--provider-kimi)",
   cursor: "var(--provider-cursor)",
 };
 

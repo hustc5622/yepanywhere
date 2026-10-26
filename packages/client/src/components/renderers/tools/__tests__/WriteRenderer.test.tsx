@@ -60,7 +60,7 @@ describe("WriteRenderer", () => {
     expect(screen.getByText("Preparing write")).toBeDefined();
   });
 
-  it("accepts Kimi's path alias once the streamed input is complete", () => {
+  it("accepts the path alias once the streamed input is complete", () => {
     render(
       <div>
         {writeRenderer.renderCollapsedPreview?.(

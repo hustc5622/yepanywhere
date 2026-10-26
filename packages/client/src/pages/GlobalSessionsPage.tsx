@@ -48,7 +48,6 @@ const PROVIDER_COLORS: Record<LiveProviderName, string> = {
   gemini: "#4285f4",
   "gemini-acp": "#4285f4", // Same as gemini
   pi: "var(--provider-pi)",
-  kimi: "var(--provider-kimi)", // Kimi KMBlue
   cursor: "var(--provider-cursor)",
   mcode: "var(--provider-mcode)",
   dsh: "var(--provider-dsh)",

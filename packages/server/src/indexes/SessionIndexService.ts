@@ -20,7 +20,6 @@ import {
   DEFAULT_PROVIDER,
   type ProviderName,
   type UrlProjectId,
-  isKimiAcpCompatibilityTitle,
 } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
 import { isRetiredProviderName } from "../sdk/providers/policy.js";
@@ -119,15 +118,6 @@ function needsPiTurnStatusMigration(index: SessionIndexState): boolean {
       session.provider === "pi" &&
       session.messageCount > 0 &&
       !Object.hasOwn(session, "lastTurnStatus"),
-  );
-}
-
-function needsKimiTitleMigration(index: SessionIndexState): boolean {
-  return Object.values(index.sessions).some(
-    (session) =>
-      session.provider === "kimi" &&
-      (isKimiAcpCompatibilityTitle(session.title) ||
-        isKimiAcpCompatibilityTitle(session.fullTitle)),
   );
 }
 
@@ -402,8 +392,7 @@ export class SessionIndexService implements ISessionIndexService {
       if (
         parsed.version === CURRENT_VERSION &&
         parsed.projectId === projectId &&
-        !needsPiTurnStatusMigration(parsed) &&
-        !needsKimiTitleMigration(parsed)
+        !needsPiTurnStatusMigration(parsed)
       ) {
         this.indexCache.set(cacheKey, parsed);
         this.evictIfNeeded();
@@ -877,12 +866,6 @@ export class SessionIndexService implements ISessionIndexService {
         return;
       }
       this.markMatchingScopesDirty("pi::");
-      return;
-    }
-
-    if (event.provider === "kimi") {
-      // Kimi sessions also share one tree and are filtered by state.json cwd.
-      this.markMatchingScopesDirty("kimi::");
       return;
     }
 

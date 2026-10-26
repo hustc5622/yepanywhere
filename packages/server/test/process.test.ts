@@ -217,7 +217,7 @@ describe("Process", () => {
         markSecondTurnStarted = resolve;
       });
 
-      async function* kimiLikeIterator(): AsyncGenerator<SDKMessage> {
+      async function* residentAcpIterator(): AsyncGenerator<SDKMessage> {
         const messages = queue.generator();
         const first = await messages.next();
         if (first.done) return;
@@ -234,11 +234,11 @@ describe("Process", () => {
         yield { type: "result", session_id: "sess-1" };
       }
 
-      const process = new Process(kimiLikeIterator(), {
+      const process = new Process(residentAcpIterator(), {
         projectPath: "/test",
         projectId: "proj-1",
         sessionId: "sess-1",
-        provider: "kimi",
+        provider: "mcode",
         idleTimeoutMs: 60_000,
         queue,
       });

@@ -21,12 +21,6 @@ import type {
   GeminiAssistantMessage,
   GeminiSessionMessage,
   GeminiUserMessage,
-  KimiContentPartEvent,
-  KimiSessionContent,
-  KimiStepEndEvent,
-  KimiToolCallEvent,
-  KimiToolResultEvent,
-  KimiTurnEndedRecord,
   PiAgentMessage,
   PiAssistantMessage,
   PiSessionContent,
@@ -40,17 +34,10 @@ import type {
 } from "@yep-anywhere/shared";
 import {
   getGeminiUserMessageText,
-  getKimiGoalTimeline,
-  getKimiPromptImages,
-  getKimiPromptText,
   getMessageContent,
   getModelContextWindow,
   getPiMessageText,
   isConversationEntry,
-  isKimiLoopEventRecord,
-  isKimiTurnEndedRecord,
-  isKimiTurnPromptRecord,
-  parseKimiReadMediaOutput,
 } from "@yep-anywhere/shared";
 import {
   CodexAgentWaitTracker,
@@ -93,7 +80,6 @@ import {
   codexUserMessageIdentity,
   collectCodexResponseUserClientIds,
 } from "../codex/user-message-identity.js";
-import { normalizeKimiToolInput } from "../kimi/tool-input.js";
 import type { ThreadItem } from "../sdk/providers/codex-protocol/generated/v2/ThreadItem.js";
 import type {
   ContentBlock,
@@ -493,11 +479,6 @@ export function normalizeSession(
           : messages,
       });
     }
-    case "kimi":
-      return sanitizePublicNormalizedSession({
-        ...summary,
-        messages: convertKimiMessages(data.session),
-      });
     case "mcode":
     case "dsh": {
       const precomputed = loaded.precomputedPiMessages;
@@ -846,7 +827,7 @@ function finishPiDerivation(
           cacheReadTokens: usage.cacheRead ?? 0,
           cacheCreationTokens: usage.cacheWrite ?? 0,
           contextWindow,
-          // Round like the Codex/Kimi/Gemini readers do. Pi's raw ratio is a
+          // Round like the Codex/Gemini readers do. Pi's raw ratio is a
           // float, and the meter label rendered it verbatim ("55.3906%").
           percentage: Math.min(
             100,
@@ -3510,369 +3491,4 @@ function convertGeminiMessages(
     }
   }
   return messages;
-}
-
-/**
- * Build the normalized content for one Kimi user turn.
- *
- * Text-only turns stay a plain string (the common case, and what the client's
- * prompt parser expects). When the turn carried images, they are emitted as
- * `input_image` blocks — the same shape Codex uses, so the client renders them
- * as attachment chips with an inline preview without provider-specific code.
- *
- * `blobref:` parts are served through `/api/local-image`; the blobs directory
- * is allow-listed alongside yep's own uploads. `data:` urls are passed straight
- * through as the preview source.
- */
-function buildKimiUserContent(
-  input: readonly unknown[],
-  blobsDir: string | undefined,
-): string | ContentBlock[] {
-  const text = getKimiPromptText(input);
-  const images = getKimiPromptImages(input);
-  if (images.length === 0) return text;
-
-  const blocks: ContentBlock[] = [];
-  if (text) blocks.push({ type: "text", text } as ContentBlock);
-
-  for (const image of images) {
-    const block: Record<string, unknown> = {
-      type: "input_image",
-      mime_type: image.mimeType,
-    };
-    if (image.blobHash && blobsDir) {
-      const path = join(blobsDir, image.blobHash);
-      block.file_path = path;
-      block.image_url = `/api/local-image?path=${encodeURIComponent(path)}`;
-    } else if (!image.blobHash) {
-      block.image_url = image.url;
-    }
-    blocks.push(block as ContentBlock);
-  }
-
-  return blocks;
-}
-
-function buildKimiMediaToolResult(
-  output: unknown,
-  blobsDir: string | undefined,
-): { content: string; structured: Record<string, unknown> } | null {
-  const summary = parseKimiReadMediaOutput(output);
-  if (!summary) return null;
-
-  const filePath =
-    summary.kind === "image" && summary.blobRef && blobsDir
-      ? join(blobsDir, summary.blobRef.hash)
-      : undefined;
-  const previewUrl = filePath
-    ? `/api/local-image?path=${encodeURIComponent(filePath)}`
-    : summary.mediaUrl;
-  const label = summary.path ? basename(summary.path) : summary.kind;
-
-  return {
-    content: `${summary.kind} loaded: ${label}`,
-    structured: {
-      type: "media",
-      kind: summary.kind,
-      ...(summary.path ? { path: summary.path } : {}),
-      ...(summary.mimeType ? { mimeType: summary.mimeType } : {}),
-      ...(summary.bytes !== undefined ? { bytes: summary.bytes } : {}),
-      ...(filePath ? { filePath } : {}),
-      ...(previewUrl ? { previewUrl } : {}),
-    },
-  };
-}
-
-function getKimiToolResultText(
-  output: unknown,
-  note: string | undefined,
-): string {
-  if (typeof output === "string") return output;
-  if (Array.isArray(output)) {
-    const text = output
-      .flatMap((part) => {
-        if (
-          typeof part === "object" &&
-          part !== null &&
-          (part as { type?: unknown }).type === "text" &&
-          typeof (part as { text?: unknown }).text === "string"
-        ) {
-          return [(part as { text: string }).text];
-        }
-        return [];
-      })
-      .join("\n");
-    if (text) return text;
-  }
-  return note ?? "";
-}
-
-// --- Kimi Conversion Logic ---
-
-/**
- * Convert a parsed Kimi session (wire.jsonl records) into normalized messages.
- *
- * Reconstruction uses `turn.prompt` for user turns and `context.append_loop_event`
- * for the assistant stream (content.part think/text, tool.call, tool.result).
- * `context.append_message` records are ignored — they are the post-compaction
- * context-memory projection and would double-count tool results as user turns.
- */
-export function convertKimiMessages(session: KimiSessionContent): Message[] {
-  const messages: Message[] = [];
-  const sid = session.sessionId;
-
-  let assistantBlocks: ContentBlock[] = [];
-  let assistantTs: number | undefined;
-  let assistantSeq = 0;
-  let userSeq = 0;
-  let lastStepEnd: KimiStepEndEvent | undefined;
-
-  const appendAssistantPart = (
-    part:
-      | { type: "thinking"; thinking: string }
-      | { type: "text"; text: string },
-  ) => {
-    const previous = assistantBlocks[assistantBlocks.length - 1];
-    if (
-      part.type === "thinking" &&
-      previous?.type === "thinking" &&
-      typeof previous.thinking === "string"
-    ) {
-      previous.thinking += part.thinking;
-      return;
-    }
-    if (
-      part.type === "text" &&
-      previous?.type === "text" &&
-      typeof previous.text === "string"
-    ) {
-      previous.text += part.text;
-      return;
-    }
-    assistantBlocks.push(part);
-  };
-
-  const toIso = (ms: number | undefined): string | undefined =>
-    typeof ms === "number" ? new Date(ms).toISOString() : session.createdAt;
-
-  const flushAssistant = () => {
-    if (assistantBlocks.length === 0) return;
-    messages.push({
-      uuid: `${sid}-assistant-${assistantSeq++}`,
-      type: "assistant",
-      message: { role: "assistant", content: assistantBlocks },
-      timestamp: toIso(assistantTs),
-    });
-    assistantBlocks = [];
-    assistantTs = undefined;
-  };
-
-  const appendTurnError = (record: KimiTurnEndedRecord) => {
-    const error = record.error;
-    if (!error) return;
-    const errorText =
-      error.message?.trim() ||
-      (error.code === "provider.filtered"
-        ? "Provider safety policy blocked the response."
-        : error.name || error.code);
-    if (!errorText) return;
-
-    flushAssistant();
-    const turnKey =
-      record.turnId === undefined
-        ? `${userSeq}-${messages.length}`
-        : String(record.turnId);
-    messages.push({
-      uuid: `${sid}-turn-${turnKey}-error`,
-      type: "error",
-      error: errorText,
-      content: errorText,
-      errorCode: error.code,
-      retryable: error.retryable,
-      finishReason: lastStepEnd?.finishReason,
-      providerFinishReason: lastStepEnd?.providerFinishReason,
-      rawFinishReason: lastStepEnd?.rawFinishReason,
-      timestamp: toIso(record.time),
-    });
-  };
-
-  for (const record of session.records) {
-    if (isKimiTurnPromptRecord(record)) {
-      flushAssistant();
-      lastStepEnd = undefined;
-      messages.push({
-        uuid: `${sid}-user-${userSeq++}`,
-        type: "user",
-        message: {
-          role: "user",
-          content: buildKimiUserContent(record.input, session.blobsDir),
-        },
-        timestamp: toIso(record.time),
-      });
-      continue;
-    }
-
-    if (isKimiTurnEndedRecord(record)) {
-      appendTurnError(record);
-      continue;
-    }
-
-    if (!isKimiLoopEventRecord(record)) continue;
-
-    const event = record.event;
-    switch (event.type) {
-      case "content.part": {
-        const part = (event as KimiContentPartEvent).part;
-        if (part.type === "think") {
-          appendAssistantPart({ type: "thinking", thinking: part.think });
-        } else if (part.type === "text") {
-          appendAssistantPart({ type: "text", text: part.text });
-        }
-        assistantTs ??= record.time;
-        break;
-      }
-      case "tool.call": {
-        const toolCall = event as KimiToolCallEvent;
-        assistantBlocks.push({
-          type: "tool_use",
-          id: toolCall.toolCallId,
-          name: toolCall.name,
-          input: normalizeKimiToolInput(toolCall.name, toolCall.args),
-        });
-        assistantTs ??= record.time;
-        break;
-      }
-      case "tool.result": {
-        // Flush the assistant message (carrying the tool_use blocks) before
-        // emitting the corresponding tool results.
-        flushAssistant();
-        const toolResult = event as KimiToolResultEvent;
-        const output =
-          toolResult.result?.output ?? toolResult.result?.note ?? "";
-        const mediaResult = buildKimiMediaToolResult(output, session.blobsDir);
-        const toolUseId = toolResult.toolCallId ?? "";
-        messages.push({
-          uuid: `${sid}-result-${toolResult.toolCallId ?? `${assistantSeq}-${messages.length}`}`,
-          type: "user",
-          message: {
-            role: "user",
-            content: [
-              {
-                type: "tool_result",
-                tool_use_id: toolUseId,
-                content:
-                  mediaResult?.content ??
-                  getKimiToolResultText(output, toolResult.result?.note),
-                ...(toolResult.result?.isError === true && { is_error: true }),
-              },
-            ],
-          },
-          ...(mediaResult ? { toolUseResult: mediaResult.structured } : {}),
-          timestamp: toIso(record.time),
-        });
-        break;
-      }
-      case "step.end": {
-        lastStepEnd = event as KimiStepEndEvent;
-        break;
-      }
-      default:
-        break;
-    }
-  }
-
-  flushAssistant();
-
-  // Replay the main-agent goal lifecycle (goal.create / goal.update /
-  // goal.clear / forked) and merge the snapshots into the transcript as
-  // inline `type: "kimi_goal"` messages, placed at their record timestamps.
-  // Goals are main-agent autonomous targets with budgets; surfacing them
-  // inline lets the UI show what the agent was pursuing (and how much budget
-  // it consumed) at each point in the transcript. Child-agent wires typically
-  // have no goal.* records, so this is a no-op there.
-  return mergeKimiGoalSnapshots(
-    messages,
-    getKimiGoalTimeline(session.records),
-    sid,
-  );
-}
-
-/**
- * Merge goal snapshots into a transcript as inline `type: "kimi_goal"` messages.
- *
- * Each snapshot becomes a message whose `goal` payload (objective, status,
- * budget consumption, actor, change kind) is read by the client
- * `GoalInlineRenderer`. Snapshots are placed by their `time` field: a snapshot
- * lands after the last existing message with a timestamp ≤ the snapshot's
- * time. Snapshots without a time are appended in order. This keeps the goal
- * markers interleaved with the turns that produced them, so the UI can show
- * "goal created → assistant worked → goal blocked → …" in context.
- */
-function mergeKimiGoalSnapshots(
-  messages: Message[],
-  snapshots: readonly import("@yep-anywhere/shared").KimiGoalSnapshot[],
-  sessionId: string,
-): Message[] {
-  if (snapshots.length === 0) return messages;
-
-  const goalMessages: Message[] = snapshots.map((snapshot, index) => {
-    const message: Message = {
-      type: "kimi_goal",
-      uuid: `${sessionId}-goal-${index}`,
-      goal: snapshot,
-      ...(snapshot.time !== undefined
-        ? { timestamp: new Date(snapshot.time).toISOString() }
-        : {}),
-    };
-    return message;
-  });
-
-  // Stable merge by timestamp: existing messages keep their order, goal
-  // messages slot in by time. Messages without timestamps go to the end.
-  const result: Message[] = [];
-  let gi = 0;
-  const messageTime = (message: Message | undefined): number => {
-    if (!message?.timestamp) return Number.POSITIVE_INFINITY;
-    const parsed = Date.parse(message.timestamp);
-    return Number.isFinite(parsed) ? parsed : Number.POSITIVE_INFINITY;
-  };
-  const goalTime = (message: Message): number => {
-    const snapshot = message.goal as { time?: number };
-    return snapshot.time ?? Number.POSITIVE_INFINITY;
-  };
-
-  for (let index = 0; index < messages.length; index += 1) {
-    const msg = messages[index];
-    if (!msg) continue;
-    const msgTime = messageTime(msg);
-    while (gi < goalMessages.length) {
-      const goal = goalMessages[gi];
-      if (!goal) break;
-      if (goalTime(goal) < msgTime) {
-        result.push(goal);
-        gi += 1;
-      } else {
-        break;
-      }
-    }
-    result.push(msg);
-
-    // Equal timestamps stay stable: every existing transcript message at the
-    // timestamp is emitted before goal markers at that same timestamp.
-    if (messageTime(messages[index + 1]) !== msgTime) {
-      while (gi < goalMessages.length) {
-        const goal = goalMessages[gi];
-        if (!goal || goalTime(goal) > msgTime) break;
-        result.push(goal);
-        gi += 1;
-      }
-    }
-  }
-  // Append any remaining goal snapshots.
-  while (gi < goalMessages.length) {
-    const goal = goalMessages[gi];
-    if (goal) result.push(goal);
-    gi += 1;
-  }
-  return result;
 }

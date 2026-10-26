@@ -20,7 +20,7 @@ import {
 import { normalizeProviderGroup } from "../sessions/provider-groups.js";
 import type { Project, SessionSummary } from "../supervisor/types.js";
 
-export type ArchiveProvider = "claude" | "codex" | "pi" | "kimi" | "cursor";
+export type ArchiveProvider = "claude" | "codex" | "pi" | "cursor";
 type PersistedArchiveProvider = ArchiveProvider | RetiredProviderName;
 export type ArchiveReason = "manual" | "auto";
 

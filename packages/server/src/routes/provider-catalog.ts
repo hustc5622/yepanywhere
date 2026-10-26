@@ -3,7 +3,6 @@ import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { CursorSessionScanner } from "../projects/cursor-scanner.js";
 import type { DshSessionScanner } from "../projects/dsh-scanner.js";
 import type { GeminiSessionScanner } from "../projects/gemini-scanner.js";
-import type { KimiSessionScanner } from "../projects/kimi-scanner.js";
 import type { McodeSessionScanner } from "../projects/mcode-scanner.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
 import type { PiSessionScanner } from "../projects/pi-scanner.js";
@@ -14,7 +13,6 @@ export interface ProviderCatalogDeps {
   codexScanner?: CodexSessionScanner;
   geminiScanner?: GeminiSessionScanner;
   piScanner?: PiSessionScanner;
-  kimiScanner?: KimiSessionScanner;
   cursorScanner?: CursorSessionScanner;
   mcodeScanner?: McodeSessionScanner;
   dshScanner?: DshSessionScanner;
@@ -26,7 +24,6 @@ export interface ProviderProjectCatalog {
   codexPaths: Set<string>;
   geminiPaths: Set<string>;
   piPaths: Set<string>;
-  kimiPaths: Set<string>;
   cursorPaths: Set<string>;
   mcodePaths?: Set<string>;
   dshPaths?: Set<string>;
@@ -131,14 +128,6 @@ async function buildBaseProviderProjectCatalog(
         .map((project) => canonicalizeProjectPath(project.path))
         .filter((path) => !path.startsWith("gemini:")),
     );
-    const kimiPaths = new Set(
-      deps.projects
-        .filter(
-          (project) =>
-            project.hasKimiSessions === true || project.provider === "kimi",
-        )
-        .map((project) => canonicalizeProjectPath(project.path)),
-    );
     const piPaths = new Set(
       deps.projects
         .filter(
@@ -170,10 +159,6 @@ async function buildBaseProviderProjectCatalog(
         project.provider !== "gemini-acp" &&
         project.hasGeminiSessions === undefined,
     );
-    const needsKimiScan = deps.projects.some(
-      (project) =>
-        project.provider !== "kimi" && project.hasKimiSessions === undefined,
-    );
     const needsPiScan = deps.projects.some(
       (project) =>
         project.provider !== "pi" && project.hasPiSessions === undefined,
@@ -188,14 +173,12 @@ async function buildBaseProviderProjectCatalog(
       !needsCodexScan &&
       !needsGeminiScan &&
       !needsPiScan &&
-      !needsKimiScan &&
       !needsCursorScan
     ) {
       return {
         codexPaths,
         geminiPaths,
         piPaths,
-        kimiPaths,
         cursorPaths,
         geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
         codexSessionsByPath: codexCatalog?.byProjectPath,
@@ -203,29 +186,21 @@ async function buildBaseProviderProjectCatalog(
       };
     }
 
-    const [
-      codexProjects,
-      geminiProjects,
-      piProjects,
-      kimiProjects,
-      cursorProjects,
-    ] = await Promise.all([
-      needsCodexScan
-        ? (deps.codexScanner?.listProjects() ?? Promise.resolve([]))
-        : Promise.resolve([]),
-      needsGeminiScan
-        ? (deps.geminiScanner?.listProjects() ?? Promise.resolve([]))
-        : Promise.resolve([]),
-      needsPiScan
-        ? (deps.piScanner?.listProjects() ?? Promise.resolve([]))
-        : Promise.resolve([]),
-      needsKimiScan
-        ? (deps.kimiScanner?.listProjects() ?? Promise.resolve([]))
-        : Promise.resolve([]),
-      needsCursorScan
-        ? (deps.cursorScanner?.listProjects() ?? Promise.resolve([]))
-        : Promise.resolve([]),
-    ]);
+    const [codexProjects, geminiProjects, piProjects, cursorProjects] =
+      await Promise.all([
+        needsCodexScan
+          ? (deps.codexScanner?.listProjects() ?? Promise.resolve([]))
+          : Promise.resolve([]),
+        needsGeminiScan
+          ? (deps.geminiScanner?.listProjects() ?? Promise.resolve([]))
+          : Promise.resolve([]),
+        needsPiScan
+          ? (deps.piScanner?.listProjects() ?? Promise.resolve([]))
+          : Promise.resolve([]),
+        needsCursorScan
+          ? (deps.cursorScanner?.listProjects() ?? Promise.resolve([]))
+          : Promise.resolve([]),
+      ]);
 
     for (const project of codexProjects) {
       codexPaths.add(canonicalizeProjectPath(project.path));
@@ -239,9 +214,6 @@ async function buildBaseProviderProjectCatalog(
     for (const project of piProjects) {
       piPaths.add(canonicalizeProjectPath(project.path));
     }
-    for (const project of kimiProjects) {
-      kimiPaths.add(canonicalizeProjectPath(project.path));
-    }
     for (const project of cursorProjects) {
       cursorPaths.add(canonicalizeProjectPath(project.path));
     }
@@ -250,7 +222,6 @@ async function buildBaseProviderProjectCatalog(
       codexPaths,
       geminiPaths,
       piPaths,
-      kimiPaths,
       cursorPaths,
       geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
       codexSessionsByPath: codexCatalog?.byProjectPath,
@@ -258,21 +229,15 @@ async function buildBaseProviderProjectCatalog(
     };
   }
 
-  const [
-    codexProjects,
-    geminiProjects,
-    piProjects,
-    kimiProjects,
-    cursorProjects,
-  ] = await Promise.all([
-    codexCatalog
-      ? Promise.resolve([])
-      : (deps.codexScanner?.listProjects() ?? Promise.resolve([])),
-    deps.geminiScanner?.listProjects() ?? Promise.resolve([]),
-    deps.piScanner?.listProjects() ?? Promise.resolve([]),
-    deps.kimiScanner?.listProjects() ?? Promise.resolve([]),
-    deps.cursorScanner?.listProjects() ?? Promise.resolve([]),
-  ]);
+  const [codexProjects, geminiProjects, piProjects, cursorProjects] =
+    await Promise.all([
+      codexCatalog
+        ? Promise.resolve([])
+        : (deps.codexScanner?.listProjects() ?? Promise.resolve([])),
+      deps.geminiScanner?.listProjects() ?? Promise.resolve([]),
+      deps.piScanner?.listProjects() ?? Promise.resolve([]),
+      deps.cursorScanner?.listProjects() ?? Promise.resolve([]),
+    ]);
 
   return {
     codexPaths: new Set([
@@ -286,9 +251,6 @@ async function buildBaseProviderProjectCatalog(
     ),
     piPaths: new Set(
       piProjects.map((project) => canonicalizeProjectPath(project.path)),
-    ),
-    kimiPaths: new Set(
-      kimiProjects.map((project) => canonicalizeProjectPath(project.path)),
     ),
     cursorPaths: new Set(
       cursorProjects.map((project) => canonicalizeProjectPath(project.path)),

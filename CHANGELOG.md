@@ -15,6 +15,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - Pi 会话的时间线区分思维链与阶段性输出：工具调用之间的中间叙述按“进度”样式显示（左侧色条、浅底、标签），末尾回复保持正文样式；思维链改为空心节点加灯泡图标，展开后以虚线缩进、斜体小字呈现，不再与输出堆在一起。
 
 ### Removed
+- 移除 Kimi provider 及其全部逻辑：`kimi acp` 接入、`~/.kimi-code/sessions` 会话扫描与读取、该目录的常驻文件监听、Kimi 专属的消息快照校验与子 agent 目录重试、goal 内联卡片、`ReadMediaFile` 渲染器、计划审批「保持当前权限模式」选项、Kimi 权限模式文案，以及 `~/.kimi-code/sessions` 的本地图片白名单（`KIMI_SESSIONS_DIR`／`KIMI_CODE_HOME` 不再生效）。旧数据中的 `kimi` 会话不再出现在列表中，按已退役 provider 处理（相关接口返回 410）；Kimi 原始数据仍保留在 `~/.kimi-code`。MiniMax Code 原先与 Kimi 共用的思考等级选择器保持不变。
 - 移除 ZCode provider 及其全部逻辑：app-server 接入、`~/.zcode` SQLite 会话读取与变更监视（每 15 秒轮询）、会话归档写回、ZCode TUI hook bridge（`/api/zcode-bridge` 与「全部会话」页的审批卡片）、新建会话页的 MCP 状态面板，以及 `test:zcode-app-server-smoke` 脚本。旧数据中的 `zcode` 会话不再出现在列表中，按已退役 provider 处理（相关接口返回 410）；Yep 从未修改的 ZCode 原始数据仍保留在 `~/.zcode`。曾安装 hook 插件的用户可删除 `~/.zcode/plugins/yep-bridge` 与 `~/.zcode/yep-bridge.json`。仅被 ZCode 使用的 SQLite 查询 worker 一并删除；Pi 与 Codex 共用的编辑分支推导迁至 `sessions/copied-prefix-branch.ts`，行为不变。
 
 ### Fixed

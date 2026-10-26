@@ -320,7 +320,7 @@ export const DEFAULT_CONTEXT_WINDOW = 200_000;
 /** Default context window size for Codex cloud sessions when metadata is missing */
 export const CODEX_DEFAULT_CONTEXT_WINDOW = 258_000;
 export const CLAUDE_EXTENDED_CONTEXT_WINDOW = 1_000_000;
-/** Default context window for Kimi Code (kimi-k3 ships a 1M window). */
+/** Default context window for Kimi models (kimi-k3 ships a 1M window). */
 export const KIMI_DEFAULT_CONTEXT_WINDOW = 1_048_576;
 
 /**
@@ -604,9 +604,7 @@ export function getModelContextWindow(
   if (!model) {
     return provider === "codex"
       ? CODEX_DEFAULT_CONTEXT_WINDOW
-      : provider === "kimi"
-        ? KIMI_DEFAULT_CONTEXT_WINDOW
-        : DEFAULT_CONTEXT_WINDOW;
+      : DEFAULT_CONTEXT_WINDOW;
   }
 
   // Pi gateway models resolve their window from the live catalog first. This
@@ -665,7 +663,7 @@ export function getModelContextWindow(
   }
 
   // Kimi models (kimi-k3 and friends ship a ~1M window).
-  if (provider === "kimi" || lowerModel.includes("kimi")) {
+  if (lowerModel.includes("kimi")) {
     return KIMI_DEFAULT_CONTEXT_WINDOW;
   }
 
@@ -701,7 +699,6 @@ export function escalateContextWindow(
   if (inputTokens <= contextWindow) return contextWindow;
   if (provider === "codex" || provider === "codex-oss") return contextWindow;
   if (provider === "gemini" || provider === "gemini-acp") return contextWindow;
-  if (provider === "kimi") return contextWindow;
   if (provider === "pi") return contextWindow;
   // Default to Claude's 1M tier for Claude and unknown providers.
   return Math.max(contextWindow, CLAUDE_EXTENDED_CONTEXT_WINDOW);

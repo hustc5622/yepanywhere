@@ -355,15 +355,6 @@ export function buildSessionDisplayProjection(
       continue;
     }
 
-    if (message.type === "kimi_goal") {
-      const notice = projectKimiGoalNotice(message, messageId);
-      if (notice) {
-        flushToolGroup();
-        appendSegment(notice);
-      }
-      continue;
-    }
-
     if (isUserPromptMessage(message)) {
       const content = projectPublicUserContent(getMessageContent(message));
       const promptText = publicUserContentText(content);
@@ -1219,28 +1210,6 @@ function projectSystemNotice(
     title: boundedText(itemType, 512),
     status: lifecycle,
     ...(timestamp ? { timestamp } : {}),
-  };
-}
-
-function projectKimiGoalNotice(
-  message: Message,
-  messageId: string,
-): Extract<SessionDisplaySegment, { type: "notice" }> | null {
-  if (!isRecord(message.goal)) return null;
-  const goal = message.goal;
-  return {
-    type: "notice",
-    id: messageId,
-    kind: "goal",
-    ...(typeof goal.objective === "string"
-      ? { message: boundedText(goal.objective) }
-      : typeof goal.reason === "string"
-        ? { message: boundedText(goal.reason) }
-        : {}),
-    ...(typeof goal.status === "string"
-      ? { status: boundedText(goal.status, 64) }
-      : {}),
-    ...(message.timestamp ? { timestamp: message.timestamp } : {}),
   };
 }
 

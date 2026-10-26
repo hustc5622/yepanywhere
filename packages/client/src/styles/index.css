@@ -22,7 +22,6 @@
   --provider-codex: #10a37f;
   --provider-gemini: #4285f4;
   --provider-pi: #0891b2;
-  --provider-kimi: #1783ff;
   --provider-cursor: #7c3aed;
   --provider-mcode: #e5326b;
   --provider-dsh: #4d6bfe;
@@ -10367,10 +10366,6 @@ button.context-usage-indicator--button:focus-visible {
 
 .provider-option-dot.provider-pi {
   background: var(--provider-pi);
-}
-
-.provider-option-dot.provider-kimi {
-  background: var(--provider-kimi);
 }
 
 .provider-option-dot.provider-cursor {

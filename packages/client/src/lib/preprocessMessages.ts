@@ -1,8 +1,6 @@
 import {
   CODEX_THREAD_ITEM_TYPES,
-  type KimiGoalSnapshot,
   type MarkdownAugment,
-  parseKimiReadMediaOutput,
 } from "@yep-anywhere/shared";
 import type { ContentBlock, Message } from "../types";
 import type {
@@ -332,7 +330,7 @@ export function isPlanProgressItem(item: RenderItem): item is ToolCallItem {
 
   const normalized = item.toolName.trim().toLowerCase().replace(/[_-]/g, "");
   if (normalized === "todolist") {
-    // Kimi uses the same tool for reads and writes. Only writes replace the
+    // Some agents use the same tool for reads and writes. Only writes replace the
     // plan snapshot; a query without `todos` remains a normal tool row.
     return isRecord(item.toolInput) && Array.isArray(item.toolInput.todos);
   }
@@ -686,26 +684,6 @@ function processMessage(
     }
     // Status messages (compacting indicator) are transient - handled separately via isCompacting state
     // Skip other system entries (init, status, etc.) - they're internal
-    return;
-  }
-
-  // Kimi goal lifecycle snapshots (goal.create/update/clear replayed by the
-  // server's normalization layer). Surface as a system item with the goal
-  // snapshot payload so the GoalInlineRenderer can render the objective,
-  // status badge, and budget consumption inline in the transcript.
-  if (msg.type === "kimi_goal") {
-    const goal = (msg as { goal?: unknown }).goal;
-    if (isRecord(goal)) {
-      const systemItem: SystemItem = {
-        type: "system",
-        id: msgId || `kimi-goal-${msg.timestamp ?? Date.now()}`,
-        subtype: "kimi_goal",
-        content: "",
-        sourceMessages: [msg],
-        goalSnapshot: goal as unknown as KimiGoalSnapshot,
-      };
-      items.push(systemItem);
-    }
     return;
   }
 
@@ -1263,8 +1241,8 @@ export function parseAgentResultFromText(
 
   const displayContent = extractAgentDisplayContent(block);
 
-  // Extract agentId. Claude/SDK 0.2.76+ emit `agentId: <id>`; Kimi's Agent
-  // emits `agent_id: agent-0`, while AgentSwarm wraps each child in a
+  // Extract agentId. Claude/SDK 0.2.76+ emit `agentId: <id>`; other agents may
+  // emit `agent_id: agent-0` or wrap each child in a
   // `<subagent agent_id="agent-0" outcome="completed">` element. The current
   // renderer and server mapping are 1:1, so use the first swarm child.
   const directAgentId = fullText.match(/^agent(?:Id|_id):\s*(\S+)/m)?.[1];
@@ -1275,8 +1253,7 @@ export function parseAgentResultFromText(
   const agentId = directAgentId ?? swarmAgentId;
   if (!agentId) return undefined;
 
-  // Kimi Agent results carry `status:`, while AgentSwarm puts `outcome=` on
-  // each child. Honor terminal failures so interrupted children render as
+  // Agent results may carry `status:`, while swarm children carry `outcome=`. Honor terminal failures so interrupted children render as
   // failed; successful and legacy results default to completed.
   const explicitStatus =
     fullText.match(/^status:\s*([^\s]+)/m)?.[1] ??
@@ -1376,18 +1353,6 @@ function scoreToolResult(result: ToolResultData): number {
     // Structured payloads unlock rich renderers; weigh them heavily so a
     // JSONL-complete result beats a partial streaming snapshot.
     score += 10_000;
-
-    if (isRecord(structured) && structured.type === "media") {
-      // Live Kimi media updates intentionally omit preview bytes, while the
-      // persisted projection can add a safe blob-backed preview. Prefer that
-      // richer snapshot even when both copies have identical display text.
-      if (typeof structured.previewUrl === "string") score += 256;
-      if (typeof structured.filePath === "string") score += 128;
-      if (typeof structured.path === "string") score += 16;
-      if (typeof structured.mimeType === "string") score += 8;
-      if (typeof structured.kind === "string") score += 4;
-      if (typeof structured.bytes === "number") score += 2;
-    }
   }
   // For question results, richer answer sets should outrank partial ones. A
   // live-stream `{questions, answers:{}}` snapshot arrives
@@ -1405,24 +1370,6 @@ function scoreToolResult(result: ToolResultData): number {
     }
   }
   return score;
-}
-
-function normalizeKimiReadMediaResult(
-  toolName: string,
-  output: unknown,
-): Record<string, unknown> | undefined {
-  if (toolName.toLowerCase() !== "readmediafile") return undefined;
-  const summary = parseKimiReadMediaOutput(output);
-  if (!summary) return undefined;
-
-  return {
-    type: "media",
-    kind: summary.kind,
-    ...(summary.path ? { path: summary.path } : {}),
-    ...(summary.mimeType ? { mimeType: summary.mimeType } : {}),
-    ...(summary.bytes !== undefined ? { bytes: summary.bytes } : {}),
-    ...(summary.mediaUrl ? { previewUrl: summary.mediaUrl } : {}),
-  };
 }
 
 function getToolResultTextContent(content: unknown): string {
@@ -1475,13 +1422,7 @@ function attachToolResult(
 
   // Attach result to existing tool call
   // Handle both camelCase (toolUseResult) and snake_case (tool_use_result) from SDK
-  const mediaResult = normalizeKimiReadMediaResult(
-    item.toolName,
-    block.content,
-  );
-  const content = mediaResult
-    ? `${String(mediaResult.kind)} loaded`
-    : getToolResultTextContent(block.content);
+  const content = getToolResultTextContent(block.content);
   // Only trust the message-level structured result when it unambiguously
   // belongs to this block (single tool_result per message).
   let structured =
@@ -1490,14 +1431,12 @@ function attachToolResult(
         (resultMessage as Record<string, unknown>).tool_use_result)
       : undefined;
 
-  structured ??= mediaResult;
-
   if (!structured && item.toolName.toLowerCase() === "askuserquestion") {
     structured = normalizeAskUserQuestionResult(item.toolInput, content);
   }
 
   if (!structured) {
-    structured = normalizeKimiFileToolResult(
+    structured = normalizeStringFileToolResult(
       item.toolName,
       item.toolInput,
       content,
@@ -1546,11 +1485,10 @@ function attachToolResult(
 }
 
 /**
- * Kimi's native Read/Write tools persist string results and camel/snake-case
- * input variants. Build the shared file result shape without depending on a
- * retired provider's result normalizer.
+ * Some agents' Read/Write tools persist string results and camel/snake-case
+ * input variants. Build the shared file result shape from them.
  */
-function normalizeKimiFileToolResult(
+function normalizeStringFileToolResult(
   toolName: string,
   input: unknown,
   resultContent: string,
@@ -1606,7 +1544,7 @@ function normalizeKimiFileToolResult(
 }
 
 /**
- * Kimi persists AskUserQuestion results as JSON text instead of a structured
+ * Some agents persist AskUserQuestion results as JSON text instead of a structured
  * tool result. Pair the answer object with the original prompts so the shared
  * renderer can count and highlight only the questions actually answered.
  */

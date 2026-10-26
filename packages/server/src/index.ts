@@ -456,15 +456,7 @@ console.log(
 // Helper to create watcher if directory exists
 function createWatcherIfExists(
   watchDir: string,
-  provider:
-    | "claude"
-    | "gemini"
-    | "codex"
-    | "pi"
-    | "kimi"
-    | "cursor"
-    | "mcode"
-    | "dsh",
+  provider: "claude" | "gemini" | "codex" | "pi" | "cursor" | "mcode" | "dsh",
   ensureDirectory = false,
   persistent = false,
   periodicRescanOverrideMs?: number,
@@ -544,7 +536,6 @@ function syncClaudeSharedSessionWatchers(
 createWatcherIfExists(config.claudeSessionsDir, "claude", true, true);
 createWatcherIfExists(config.geminiSessionsDir, "gemini", false, true);
 createWatcherIfExists(config.codexSessionsDir, "codex", false, true);
-createWatcherIfExists(config.kimiSessionsDir, "kimi", false, true);
 createWatcherIfExists(PI_SESSIONS_DIR, "pi", true, true);
 createWatcherIfExists(
   CURSOR_ACP_SESSIONS_DIR,
@@ -1055,7 +1046,6 @@ async function startServer() {
     projectsDir: config.claudeProjectsDir,
     enableCodex: false,
     enableGemini: false,
-    enableKimi: false,
     enablePi: false,
     enableCursor: false,
   });

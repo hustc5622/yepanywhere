@@ -22,7 +22,6 @@ export type WatchProvider =
   | "gemini"
   | "codex"
   | "pi"
-  | "kimi"
   | "cursor"
   | "mcode"
   | "dsh";

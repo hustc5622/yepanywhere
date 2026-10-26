@@ -1,12 +1,13 @@
 import type { ProviderName } from "@yep-anywhere/shared";
 
 /** Providers removed from Yep whose names may still appear in persisted state. */
-export type RetiredProviderName = "opencode" | "zcode";
+export type RetiredProviderName = "opencode" | "zcode" | "kimi";
 
-const RETIRED_PROVIDER_NAMES = new Set<string>(["opencode", "zcode"]);
+const RETIRED_PROVIDER_NAMES = new Set<string>(["opencode", "zcode", "kimi"]);
 const RETIRED_PROVIDER_LABELS: Record<RetiredProviderName, string> = {
   opencode: "OpenCode",
   zcode: "ZCode",
+  kimi: "Kimi",
 };
 const LIVE_PROVIDER_NAMES = new Set([
   "claude",
@@ -16,7 +17,6 @@ const LIVE_PROVIDER_NAMES = new Set([
   "gemini",
   "gemini-acp",
   "pi",
-  "kimi",
   "cursor",
   "mcode",
   "dsh",

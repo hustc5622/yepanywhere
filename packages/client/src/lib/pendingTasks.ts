@@ -14,8 +14,7 @@ export interface PendingTask {
 
 /**
  * A Task/Agent tool call together with the number of persisted results seen
- * for it. Kimi mappings only become authoritative after a tool_result lands,
- * while other providers still need the pending-only view used historically.
+ * for it.
  */
 export interface AgentTask extends PendingTask {
   resultCount: number;

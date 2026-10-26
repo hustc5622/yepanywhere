@@ -159,7 +159,7 @@ export interface ISessionReader {
    * Providers without subagent transcript support should return an empty array.
    *
    * @param sessionId - Optional session scope. Providers whose subagent ids
-   *   are only unique within a session (e.g. Kimi's `agent-0`/`agent-1`) use
+   *   are only unique within a session (e.g. `agent-0`/`agent-1`) use
    *   this to scope the mappings to one session. Providers with globally
    *   unique agent ids (Claude) may ignore it.
    */

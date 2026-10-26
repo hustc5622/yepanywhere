@@ -30,15 +30,6 @@ describe("ModeSelector provider copy", () => {
       description:
         "No filesystem or network sandbox; Codex can still choose to request approval",
     },
-    {
-      provider: "kimi",
-      mode: "bypassPermissions",
-      modes: ["default", "plan", "auto", "bypassPermissions"],
-      label: "YOLO",
-      title: "Kimi Session Mode",
-      description:
-        "Auto-approve regular tools; sensitive actions, questions, and plan review still appear",
-    },
   ])(
     "shows $provider's native labels and explanations",
     ({ provider, mode, modes, label, title, description }) => {

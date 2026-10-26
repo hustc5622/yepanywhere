@@ -1,7 +1,6 @@
 import type { ClaudeSessionEntry } from "../claude-sdk-schema/types.js";
 import type { CodexSessionEntry } from "../codex-schema/index.js";
 import type { GeminiSessionFile } from "../gemini-schema/session.js";
-import type { KimiSessionContent } from "../kimi-schema/types.js";
 import type { PiSessionContent } from "../pi-schema/session.js";
 
 /**
@@ -57,7 +56,6 @@ export type UnifiedSession =
   | { provider: "codex-oss"; session: CodexSessionContent }
   | { provider: "gemini"; session: GeminiSessionFile }
   | { provider: "pi"; session: PiSessionContent }
-  | { provider: "kimi"; session: KimiSessionContent }
   | { provider: "cursor"; session: CursorSessionContent }
   /**
    * MiniMax Code persists Pi-shaped AgentMessages in

@@ -8,7 +8,6 @@ import {
   type LoadSessionMessages,
   SessionContentIndexService,
 } from "../../src/indexes/SessionContentIndexService.js";
-import { KimiSessionReader } from "../../src/sessions/kimi-reader.js";
 import { normalizeSession } from "../../src/sessions/normalization.js";
 import { SessionReader } from "../../src/sessions/reader.js";
 
@@ -138,42 +137,6 @@ describe("SessionContentIndexService", () => {
     expect(service.searchScope(index, "nonexistent", 3)).toHaveLength(0);
   });
 
-  it("rebuilds a current-version content index with a poisoned Kimi title", async () => {
-    await createSession("s1", "Recovered title", "searchable body");
-    const fileStats = await stat(join(sessionDir, "s1.jsonl"));
-    const poisonedTitle =
-      "<system-reminder> [yep-anywhere:kimi-acp-single-question] This ACP host can transport exactly one AskUserQuestion ite...";
-    const indexPath = service.getIndexPath(sessionDir, reader);
-    await writeFile(
-      indexPath,
-      JSON.stringify({
-        version: 1,
-        projectId,
-        sessions: {
-          s1: {
-            fileMtime: fileStats.mtimeMs,
-            indexedBytes: fileStats.size,
-            title: poisonedTitle,
-            updatedAt: new Date().toISOString(),
-            provider: "kimi",
-            messages: [],
-          },
-        },
-      }),
-    );
-
-    const index = await service.ensureIndexed(
-      sessionDir,
-      projectId,
-      reader,
-      loadMessages,
-    );
-
-    expect(index.sessions.s1?.title).toBe("Recovered title");
-    expect(index.sessions.s1?.provider).not.toBe("kimi");
-    expect(index.sessions.s1?.messages).not.toHaveLength(0);
-  });
-
   it("ignores persisted search entries from a retired provider", () => {
     const results = service.searchScope(
       {
@@ -244,65 +207,6 @@ describe("SessionContentIndexService", () => {
     );
     expect(service.searchScope(index, "original", 3)).toHaveLength(0);
     expect(service.searchScope(index, "updated", 3)).toHaveLength(1);
-  });
-
-  it("re-indexes Kimi title matches when only state.json changes", async () => {
-    const projectPath = "/test/kimi-project";
-    const kimiProjectId = toUrlProjectId(projectPath);
-    const kimiSessionsDir = join(testDir, "kimi-sessions");
-    const kimiSessionDir = join(kimiSessionsDir, "wd_test", "session_state");
-    const statePath = join(kimiSessionDir, "state.json");
-    const wirePath = join(kimiSessionDir, "agents", "main", "wire.jsonl");
-    const timestamp = Date.now();
-    const writeState = (title: string) =>
-      writeFile(
-        statePath,
-        JSON.stringify({
-          version: 2,
-          cwd: projectPath,
-          title,
-          createdAt: timestamp,
-          updatedAt: timestamp,
-        }),
-      );
-
-    await mkdir(join(kimiSessionDir, "agents", "main"), { recursive: true });
-    await writeState("Old title");
-    await writeFile(
-      wirePath,
-      `${JSON.stringify({
-        type: "turn.prompt",
-        input: [{ type: "text", text: "hello" }],
-        origin: { kind: "user" },
-        time: timestamp,
-      })}\n`,
-    );
-
-    const kimiReader = new KimiSessionReader({
-      sessionsDir: kimiSessionsDir,
-      projectPath,
-    });
-    let index = await service.ensureIndexed(
-      kimiSessionsDir,
-      kimiProjectId,
-      kimiReader,
-      loadMessages,
-    );
-    expect(service.searchScope(index, "old title", 3)).toHaveLength(1);
-
-    await writeState("New title");
-    const future = new Date(Date.now() + 5000);
-    await utimes(statePath, future, future);
-    kimiReader.invalidateCache();
-
-    index = await service.ensureIndexed(
-      kimiSessionsDir,
-      kimiProjectId,
-      kimiReader,
-      loadMessages,
-    );
-    expect(service.searchScope(index, "old title", 3)).toHaveLength(0);
-    expect(service.searchScope(index, "new title", 3)).toHaveLength(1);
   });
 
   it("drops sessions whose files were deleted", async () => {

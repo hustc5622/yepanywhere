@@ -2572,7 +2572,7 @@ export class Process {
       return;
     }
 
-    // Resident providers such as Kimi yield the completed turn's result before
+    // Resident ACP providers yield the completed turn's result before
     // advancing their MessageQueue generator. If another prompt arrived while
     // that turn was finishing, it is already queued here and will be consumed
     // by the very next iterator.next(). Keep the process busy across that

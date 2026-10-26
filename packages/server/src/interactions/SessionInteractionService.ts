@@ -121,22 +121,6 @@ function normalizeProcessInputResponse(
   return "deny";
 }
 
-function normalizeProviderProcessInputResponse(
-  response: string,
-  provider: string | undefined,
-  request: InputRequest,
-): ProviderApprovalDecision {
-  const normalized = normalizeProcessInputResponse(response);
-  if (
-    provider === "kimi" &&
-    request.toolName === "ExitPlanMode" &&
-    normalized === "approve_accept_edits"
-  ) {
-    return "approve";
-  }
-  return normalized;
-}
-
 function normalizeBridgeInputResponse(response: string): BridgeInputResponse {
   return response === "approve" ||
     response === "approve_accept_edits" ||
@@ -368,11 +352,7 @@ export class SessionInteractionService {
       });
     }
 
-    const processResponse = normalizeProviderProcessInputResponse(
-      body.response,
-      target.provider,
-      registeredRequest,
-    );
+    const processResponse = normalizeProcessInputResponse(body.response);
     const bridgeResponse = normalizeBridgeInputResponse(body.response);
     const approving =
       target.owner === "process"

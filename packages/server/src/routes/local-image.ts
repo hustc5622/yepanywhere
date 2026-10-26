@@ -70,8 +70,8 @@ export function createLocalImageRoutes(deps: LocalImageDeps) {
       return c.json({ error: "Path must be absolute" }, 400);
     }
 
-    // Check file extension. Extensionless files (Kimi stores prompt images
-    // content-addressed as `blobs/<sha256>`) are sniffed below instead.
+    // Check file extension. Extensionless files (e.g. content-addressed
+    // blobs) are sniffed below instead.
     const name = filePath.split("/").pop() ?? "";
     const ext = name.includes(".")
       ? (name.split(".").pop()?.toLowerCase() ?? "")

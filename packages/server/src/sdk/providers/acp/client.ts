@@ -98,8 +98,8 @@ export class ACPClient {
    * Mirrors the liveness signal used by long-lived providers
    * (the Node ChildProcess exit state). The supervisor's stale-process
    * watchdog uses this to distinguish "process died silently" from "process
-   * is busy with a long-running turn" — e.g. Kimi orchestrating AgentSwarm /
-   * explore subagents keeps the parent ACP prompt silent for minutes while
+   * is busy with a long-running turn" — e.g. an agent orchestrating
+   * subagents keeps the parent ACP prompt silent for minutes while
    * the child process is very much alive. Without this, the watchdog falls
    * back to a time-based heuristic and kills the healthy process.
    */
@@ -258,9 +258,9 @@ export class ACPClient {
    *
    * The returned `agentCapabilities` describes what the agent's ACP layer can
    * ingest (e.g. `promptCapabilities.image`). Note that it reflects the
-   * adapter, not the currently selected model — Kimi advertises
-   * `image: true` unconditionally and drops images later if the resolved model
-   * lacks the `image_in` capability.
+   * adapter, not the currently selected model — an adapter may advertise
+   * `image: true` unconditionally and drop images later if the resolved model
+   * lacks image input.
    */
   async initialize(
     capabilities: ClientCapabilities = {},
@@ -401,8 +401,8 @@ export class ACPClient {
   /**
    * Change the agent-native mode for an active ACP session.
    *
-   * Kimi advertises `default`, `plan`, `auto`, and `yolo` while retaining the
-   * standard `session/set_mode` endpoint for ACP clients.
+   * Agents advertise their own mode ids through the standard
+   * `session/set_mode` endpoint.
    */
   async setSessionMode(sessionId: string, modeId: string): Promise<void> {
     if (!this.connection) {
@@ -416,8 +416,8 @@ export class ACPClient {
   /**
    * Set a select-valued configuration option for an active ACP session.
    *
-   * Kimi exposes its model-specific thinking effort through the standard
-   * `thinking` config option (`category: "thought_level"`). The full response
+   * Agents may expose model-specific thinking effort through a standard
+   * config option (`category: "thought_level"`). The full response
    * is returned so callers can verify that the agent accepted, rather than
    * silently clamped, the requested value.
    */

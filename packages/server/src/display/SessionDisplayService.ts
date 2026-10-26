@@ -1339,11 +1339,7 @@ export class SessionDisplayService {
           });
         }
       }
-      if (
-        entry.provider === "pi" ||
-        entry.provider === "kimi" ||
-        entry.provider === "mcode"
-      ) {
+      if (entry.provider === "pi" || entry.provider === "mcode") {
         // Prose ids differ between live and persisted entries for these
         // providers; stable tool ids stream while source reads reconcile prose.
         const content = messageContent(compact);
@@ -1599,11 +1595,7 @@ export class SessionDisplayService {
     model.setRuntime(page.activity);
     for (const message of entry.overlay.values()) {
       if (message.subtype === "turn_complete") continue;
-      if (
-        page.provider === "pi" ||
-        page.provider === "kimi" ||
-        page.provider === "mcode"
-      ) {
+      if (page.provider === "pi" || page.provider === "mcode") {
         if (message.type !== "system" && message.type !== "result") {
           const content = messageContent(message);
           const tools = Array.isArray(content)

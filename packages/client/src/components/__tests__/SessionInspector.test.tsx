@@ -498,22 +498,22 @@ describe("SessionInspector", () => {
     expect(screen.getByText("Time: 1m 30s")).not.toBeNull();
   });
 
-  it("uses a persisted Kimi TodoList write in the inspector", () => {
-    renderInspector("kimi", [
+  it("uses a persisted TodoList write in the inspector", () => {
+    renderInspector("mcode", [
       {
-        id: "kimi-todo-message",
+        id: "native-todo-message",
         type: "assistant",
         message: {
           role: "assistant",
           content: [
             {
               type: "tool_use",
-              id: "kimi-todo-1",
+              id: "native-todo-1",
               name: "TodoList",
               input: {
                 todos: [
                   { title: "Inspect duplicate rows", status: "done" },
-                  { title: "Fix Kimi plan rendering", status: "in_progress" },
+                  { title: "Fix plan rendering", status: "in_progress" },
                 ],
               },
             },
@@ -525,7 +525,7 @@ describe("SessionInspector", () => {
     expect(screen.getByText("Plan")).not.toBeNull();
     expect(screen.getByText("1/2 complete")).not.toBeNull();
     expect(screen.getByText("Inspect duplicate rows")).not.toBeNull();
-    expect(screen.getByText("Fix Kimi plan rendering")).not.toBeNull();
+    expect(screen.getByText("Fix plan rendering")).not.toBeNull();
   });
 
   it("uses lowercase Codex activity kinds and the latest subagent state", () => {

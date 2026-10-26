@@ -11,7 +11,6 @@ import type { DshSessionReader } from "./dsh-reader.js";
 import { DSH_SESSIONS_DIR } from "./dsh-store.js";
 import { collapseEditForkFamilies } from "./edit-fork-families.js";
 import { GeminiSessionReader } from "./gemini-reader.js";
-import { KimiSessionReader } from "./kimi-reader.js";
 import { McodeSessionReader } from "./mcode-reader.js";
 import { MCODE_SESSIONS_DIR } from "./mcode-store.js";
 import { PI_SESSIONS_DIR } from "./pi-files.js";
@@ -27,7 +26,6 @@ export interface ProviderProjectCatalog {
   codexPaths: Set<string>;
   geminiPaths: Set<string>;
   piPaths: Set<string>;
-  kimiPaths: Set<string>;
   cursorPaths: Set<string>;
   /** Optional so older catalog builders/tests remain valid. */
   mcodePaths?: Set<string>;
@@ -47,8 +45,6 @@ export interface ProviderResolutionDeps {
   geminiHashToCwd?: Promise<Map<string, string>>;
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
-  kimiSessionsDir?: string;
-  kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
   cursorSessionsDir?: string;
   cursorReaderFactory?: (projectPath: string) => CursorSessionReader;
   mcodeSessionsDir?: string;
@@ -72,15 +68,7 @@ export interface SessionSource {
   provider: ProviderName;
   reader: ISessionReader;
   sessionDir: string;
-  kind:
-    | "primary"
-    | "codex"
-    | "gemini"
-    | "pi"
-    | "kimi"
-    | "cursor"
-    | "mcode"
-    | "dsh";
+  kind: "primary" | "codex" | "gemini" | "pi" | "cursor" | "mcode" | "dsh";
 }
 
 export interface ResolvedSessionSummary {
@@ -109,22 +97,6 @@ function mayHaveGeminiSessions(
   return provider === "claude" || provider === "codex";
 }
 
-function mayHaveKimiSessions(
-  project: Project,
-  catalog?: ProviderProjectCatalog,
-): boolean {
-  if (catalog) {
-    return catalog.kimiPaths.has(canonicalizeProjectPath(project.path));
-  }
-  const provider = normalizeProviderGroup(project.provider);
-  return (
-    provider === "claude" ||
-    provider === "codex" ||
-    provider === "gemini" ||
-    provider === "pi"
-  );
-}
-
 function mayHavePiSessions(
   project: Project,
   catalog?: ProviderProjectCatalog,
@@ -148,8 +120,7 @@ function mayHaveCursorSessions(
     provider === "claude" ||
     provider === "codex" ||
     provider === "gemini" ||
-    provider === "pi" ||
-    provider === "kimi"
+    provider === "pi"
   );
 }
 
@@ -234,27 +205,6 @@ function createGeminiSource(
   };
 }
 
-function createKimiSource(
-  project: Project,
-  deps: ProviderResolutionDeps,
-): SessionSource | null {
-  const reader =
-    deps.kimiReaderFactory?.(project.path) ??
-    (deps.kimiSessionsDir
-      ? new KimiSessionReader({
-          sessionsDir: deps.kimiSessionsDir,
-          projectPath: project.path,
-        })
-      : null);
-  if (!reader) return null;
-  return {
-    provider: "kimi",
-    reader,
-    sessionDir: deps.kimiSessionsDir ?? project.sessionDir,
-    kind: "kimi",
-  };
-}
-
 function createPiSource(
   project: Project,
   deps: ProviderResolutionDeps,
@@ -297,9 +247,6 @@ function buildCandidateGroups(
   if (mayHavePiSessions(project, catalog)) {
     pushGroup("pi");
   }
-  if (mayHaveKimiSessions(project, catalog)) {
-    pushGroup("kimi");
-  }
   if (mayHaveCursorSessions(project, catalog)) {
     pushGroup("cursor");
   }
@@ -328,8 +275,6 @@ function getSourceForGroup(
       return createCodexSource(project, deps);
     case "gemini":
       return createGeminiSource(project, deps, catalog);
-    case "kimi":
-      return createKimiSource(project, deps);
     case "cursor":
       return createCursorSource(project, deps);
     case "mcode":

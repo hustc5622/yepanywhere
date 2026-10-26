@@ -64,20 +64,16 @@ export interface AgentMappingLoadPlan {
 /**
  * Select the tool calls whose agent mappings can be restored from disk.
  *
- * Most providers expose mappings while a Task is still pending, so completed
- * calls drop out and pending calls drive the key. Kimi's authoritative child
- * ids live in tool.result (completed calls must stay eligible and the key
- * must advance when another result lands), but the reader also assigns
- * provisional ids from on-disk agent directories, so pending Kimi calls are
- * eligible too.
+ * Providers expose mappings while a Task is still pending, so completed
+ * calls drop out and pending calls drive the key.
  */
 export function buildAgentMappingLoadPlan(
   messages: Message[],
   provider: Session["provider"] | undefined,
   sessionId: string,
 ): AgentMappingLoadPlan | null {
-  const tasks = findAgentTasks(messages).filter((task) =>
-    provider === "kimi" ? true : task.resultCount === 0,
+  const tasks = findAgentTasks(messages).filter(
+    (task) => task.resultCount === 0,
   );
   if (tasks.length === 0) return null;
 
@@ -92,31 +88,6 @@ export function buildAgentMappingLoadPlan(
     ].join("\u0000"),
     tasks,
   };
-}
-
-/** Whether a pending Kimi spawn still has child directories left to discover. */
-export function hasUnresolvedKimiAgentMappings(
-  tasks: AgentTask[],
-  idsByToolUse: ReadonlyMap<string, readonly string[]>,
-): boolean {
-  return tasks.some((task) => {
-    if (task.resultCount > 0) return false;
-    const mappedCount = idsByToolUse.get(task.toolUseId)?.length ?? 0;
-    return task.expectedAgentCount === undefined
-      ? mappedCount === 0
-      : mappedCount < task.expectedAgentCount;
-  });
-}
-
-/** Extract a Kimi child id from an agents/<id>/wire.jsonl activity event. */
-export function extractKimiAgentIdFromFileEvent(
-  event: Pick<FileChangeEvent, "provider" | "relativePath">,
-): string | null {
-  if (event.provider !== "kimi") return null;
-  const parts = event.relativePath.split(/[\\/]/);
-  const agentsIndex = parts.lastIndexOf("agents");
-  const agentId = agentsIndex >= 0 ? parts[agentsIndex + 1] : undefined;
-  return agentId && /^agent-\d+$/.test(agentId) ? agentId : null;
 }
 
 /** Initial stream updates need a REST fallback until the session GET lands. */
@@ -204,11 +175,13 @@ const THROTTLE_MS = 500;
 const HISTORY_REWRITE_RETRY_DELAYS_MS = [
   120, 300, 600, 1_000, 1_500, 2_500, 4_000,
 ] as const;
-const KIMI_SNAPSHOT_RETRY_DELAYS_MS = [120, 300, 600, 1_200, 2_500] as const;
 // Cap the conditional backoff so a dropped rollback/turn event can't leave the
 // edit spinner spinning indefinitely. Once elapsed crosses this budget we do a
 // single unconditional refresh and clear the pending state.
 const HISTORY_REWRITE_MAX_WAIT_MS = 12_000;
+const AUTHORITATIVE_SNAPSHOT_RETRY_DELAYS_MS = [
+  120, 300, 600, 1_200, 2_500,
+] as const;
 
 export interface HistoryRewriteSyncTarget {
   expectedPrompt: string;
@@ -296,7 +269,7 @@ export function shouldRefreshSettledAuthoritativeSnapshot(
   expectedSessionId: string,
 ): boolean {
   return (
-    (provider === "pi" || provider === "kimi" || provider === "mcode") &&
+    (provider === "pi" || provider === "mcode") &&
     owner === "self" &&
     processState === "idle" &&
     eventSessionId === expectedSessionId
@@ -310,7 +283,7 @@ export function shouldRefreshSettledAuthoritativeSnapshot(
 function hasUncorrelatedPersistedIds(
   provider: Session["provider"] | undefined,
 ): boolean {
-  return provider === "pi" || provider === "kimi" || provider === "mcode";
+  return provider === "pi" || provider === "mcode";
 }
 
 /**
@@ -318,7 +291,7 @@ function hasUncorrelatedPersistedIds(
  * "owned sessions stay on their stream" guard.
  *
  * `refreshLightweightDisplay` drops any refresh for an owned session unless it
- * is forced. For Pi/Kimi that guard is fatal: their live stream replay only
+ * is forced. For Pi/MiniMax Code that guard is fatal: their live stream replay only
  * covers the last ~30s of process history, so anything written to JSONL while
  * the client was disconnected (mobile shell suspends its subscriptions while
  * hidden) can never reach the transcript, and the session appears frozen until
@@ -338,7 +311,7 @@ export function shouldForceOwnedPersistedDisplayRefresh(
 /**
  * Whether an owned session still needs the focused file watch.
  *
- * Owned sessions normally rely on their live stream, but Pi/Kimi cannot replay
+ * Owned sessions normally rely on their live stream, but Pi/MiniMax Code cannot replay
  * a missed tail, so the targeted watch is their only durable convergence
  * signal when activity-bus events are lost (e.g. a suspended mobile shell).
  */
@@ -349,7 +322,7 @@ export function shouldWatchOwnedSessionFile(
 }
 
 /**
- * Pi and Kimi persist different message ids from the UUIDs used by their live
+ * Pi and MiniMax Code persist different message ids from the UUIDs used by their live
  * streams. Do not merge or replace an owned live tail with a potentially
  * lagging full snapshot until the turn has settled.
  */
@@ -359,122 +332,10 @@ export function shouldDeferUncorrelatedPersistedSync(
   processState: ProcessState | undefined,
 ): boolean {
   return (
-    (provider === "pi" || provider === "kimi" || provider === "mcode") &&
+    (provider === "pi" || provider === "mcode") &&
     owner === "self" &&
     processState !== "idle"
   );
-}
-
-function normalizeKimiSnapshotText(text: string): string {
-  return text.replace(/\s+/g, " ").trim();
-}
-
-function kimiMessageText(
-  message: Message,
-  includeToolResults: boolean,
-): string {
-  const content = message.message?.content ?? message.content;
-  if (typeof content === "string") {
-    return normalizeKimiSnapshotText(content);
-  }
-  if (!Array.isArray(content)) return "";
-
-  const parts: string[] = [];
-  for (const block of content) {
-    if (block.type === "text" && typeof block.text === "string") {
-      parts.push(block.text);
-      continue;
-    }
-    if (block.type === "thinking" && typeof block.thinking === "string") {
-      parts.push(block.thinking);
-      continue;
-    }
-    if (
-      includeToolResults &&
-      block.type === "tool_result" &&
-      typeof block.content === "string"
-    ) {
-      parts.push(block.content);
-    }
-  }
-  return normalizeKimiSnapshotText(parts.join("\n"));
-}
-
-function kimiHumanPromptText(message: Message): string | null {
-  const role = message.type ?? message.role ?? message.message?.role;
-  if (role !== "user") return null;
-
-  const content = message.message?.content ?? message.content;
-  if (
-    Array.isArray(content) &&
-    content.length > 0 &&
-    content.every((block) => block.type === "tool_result")
-  ) {
-    return null;
-  }
-
-  const text = kimiMessageText(message, false);
-  return text || null;
-}
-
-/**
- * Kimi emits ACP chunks without stable message ids, while its persisted reader
- * synthesizes ids from the full wire log. A turn-ended event does not await the
- * wire persistence queue, so only replace live messages after the disk snapshot
- * contains both the latest prompt and the latest textual output from that turn.
- */
-export function isKimiAuthoritativeSnapshotReady(
-  currentMessages: Message[],
-  persistedMessages: Message[],
-): boolean {
-  let currentPromptIndex = -1;
-  let currentPrompt = "";
-  for (let index = currentMessages.length - 1; index >= 0; index -= 1) {
-    const message = currentMessages[index];
-    if (!message) continue;
-    const prompt = kimiHumanPromptText(message);
-    if (prompt !== null) {
-      currentPromptIndex = index;
-      currentPrompt = prompt;
-      break;
-    }
-  }
-  if (currentPromptIndex < 0) return true;
-
-  let persistedPromptIndex = -1;
-  for (let index = persistedMessages.length - 1; index >= 0; index -= 1) {
-    const message = persistedMessages[index];
-    if (message && kimiHumanPromptText(message) === currentPrompt) {
-      persistedPromptIndex = index;
-      break;
-    }
-  }
-  if (persistedPromptIndex < 0) return false;
-
-  let currentTailAnchor = "";
-  for (
-    let index = currentMessages.length - 1;
-    index > currentPromptIndex;
-    index -= 1
-  ) {
-    const message = currentMessages[index];
-    if (!message) continue;
-    const text = kimiMessageText(message, true);
-    if (text) {
-      currentTailAnchor = text;
-      break;
-    }
-  }
-  if (!currentTailAnchor) return true;
-
-  const persistedTail = normalizeKimiSnapshotText(
-    persistedMessages
-      .slice(persistedPromptIndex + 1)
-      .map((message) => kimiMessageText(message, true))
-      .filter(Boolean)
-      .join("\n"),
-  );
-  return persistedTail.includes(currentTailAnchor);
 }
 
 export function shouldRefreshFullPersistedSession(
@@ -484,7 +345,6 @@ export function shouldRefreshFullPersistedSession(
     provider === "codex" ||
     provider === "codex-oss" ||
     provider === "pi" ||
-    provider === "kimi" ||
     provider === "mcode" ||
     provider === "dsh"
   );
@@ -917,17 +777,12 @@ export function useSession(
     updatePendingMessage,
   } = usePendingMessages(acceptedPrompts, deferredMessages);
 
-  const messagesRef = useRef(messages);
-  useEffect(() => {
-    messagesRef.current = messages;
-  }, [messages]);
-
   const processStateRef = useRef(processState);
   useEffect(() => {
     processStateRef.current = processState;
   }, [processState]);
 
-  // Pi and Kimi use different identities for live and persisted
+  // Pi and MiniMax Code use different identities for live and persisted
   // messages. Once a turn settles, replace the whole visible snapshot so a
   // full persisted response cannot be appended as duplicate historical turns.
   const authoritativeSnapshotRefreshTimerRef = useRef<ReturnType<
@@ -937,7 +792,7 @@ export function useSession(
   const scheduleAuthoritativeSnapshotRefresh = useCallback(() => {
     if (preferDisplayHistory) return;
     const provider = session?.provider;
-    if (provider !== "pi" && provider !== "kimi" && provider !== "mcode") {
+    if (provider !== "pi" && provider !== "mcode") {
       return;
     }
 
@@ -958,26 +813,13 @@ export function useSession(
       }
       // Display mode keeps its own snapshot and refuses unforced refreshes for
       // owned sessions. Every caller of this scheduler fires only once the turn
-      // has settled, so forcing here is what lets a Pi/Kimi transcript converge
-      // without reopening the session. The `acceptSnapshot` gate is dropped in
-      // display mode because the lightweight path reports no messages, which
-      // would make the Kimi readiness check reject every refresh.
+      // has settled, so forcing here is what lets a Pi transcript converge
+      // without reopening the session.
       const refreshed = await refreshSessionMessages(
-        displayPage
-          ? { replaceMessages: true }
-          : provider === "kimi"
-            ? {
-                replaceMessages: true,
-                acceptSnapshot: ({ messages: persistedMessages }) =>
-                  isKimiAuthoritativeSnapshotReady(
-                    messagesRef.current,
-                    persistedMessages,
-                  ),
-              }
-            : undefined,
+        displayPage ? { replaceMessages: true } : undefined,
       );
       if (
-        (!displayPage && provider !== "kimi") ||
+        !displayPage ||
         refreshed ||
         generation !== authoritativeSnapshotRefreshGenerationRef.current
       ) {
@@ -987,18 +829,16 @@ export function useSession(
       // A forced display refresh can lose the race with persistence (metadata
       // or the display projection may not have caught up yet). Retry within a
       // bounded window instead of leaving the transcript short a turn.
-      const nextDelay = KIMI_SNAPSHOT_RETRY_DELAYS_MS[attempt + 1];
+      const nextDelay = AUTHORITATIVE_SNAPSHOT_RETRY_DELAYS_MS[attempt + 1];
       if (nextDelay === undefined) return;
       authoritativeSnapshotRefreshTimerRef.current = setTimeout(() => {
         void refresh(attempt + 1);
       }, nextDelay);
     };
 
-    const initialDelay =
-      provider === "kimi" ? KIMI_SNAPSHOT_RETRY_DELAYS_MS[0] : 120;
     authoritativeSnapshotRefreshTimerRef.current = setTimeout(() => {
       void refresh(0);
-    }, initialDelay);
+    }, AUTHORITATIVE_SNAPSHOT_RETRY_DELAYS_MS[0]);
   }, [
     displayPage,
     refreshSessionMessages,
@@ -1057,23 +897,10 @@ export function useSession(
     pending: boolean;
   }>({ timer: null, pending: false });
 
-  // Track the exact set of Task results used for the most recent mapping load.
-  // Kimi's key advances when a new call appears, when a result lands, and
-  // again if another result for the same tool call lands.
+  // Track the exact set of pending Tasks used for the most recent mapping load.
   const agentMappingsLoadKeyRef = useRef<string | null>(null);
-  const knownKimiAgentIdsRef = useRef<Set<string>>(new Set());
-  const [agentMappingsRevision, setAgentMappingsRevision] = useState(0);
-
-  useEffect(() => {
-    knownKimiAgentIdsRef.current = new Set(
-      Array.from(toolUseToAgentIds.values()).flat(),
-    );
-  }, [toolUseToAgentIds]);
 
   // Restore agent mappings and content from persisted provider transcripts.
-  // Other providers load pending Tasks from their streaming transcripts; Kimi's
-  // ids come from the disk reader (authoritative tool.result ids, plus
-  // provisional ids for still-running children from the agents/ directory).
   useEffect(() => {
     if (loading || messages.length === 0) return;
 
@@ -1082,9 +909,7 @@ export function useSession(
       session?.provider,
       sessionId,
     );
-    const loadKey = loadPlan
-      ? `${loadPlan.loadKey}\u0000${agentMappingsRevision}`
-      : null;
+    const loadKey = loadPlan?.loadKey ?? null;
     if (!loadPlan || agentMappingsLoadKeyRef.current === loadKey) {
       return;
     }
@@ -1094,9 +919,8 @@ export function useSession(
     agentMappingsLoadKeyRef.current = loadKey;
 
     let cancelled = false;
-    let retryTimer: ReturnType<typeof setTimeout> | null = null;
 
-    const loadMappedAgents = async (attempt: number): Promise<void> => {
+    const loadMappedAgents = async (): Promise<void> => {
       try {
         // Get agent mappings (toolUseId → agentId). An AgentSwarm call fans
         // out to N children sharing one toolUseId, so group them.
@@ -1115,25 +939,13 @@ export function useSession(
             idsByToolUse.set(m.toolUseId, [m.agentId]);
           }
         }
-        if (session?.provider === "kimi") {
-          for (const ids of idsByToolUse.values()) {
-            for (const agentId of ids) {
-              knownKimiAgentIdsRef.current.add(agentId);
-            }
-          }
-        }
 
         // Update the toolUseToAgent state with loaded mappings
         // This allows TaskRenderer to access agentContent even after page reload
         setToolUseToAgent((prev) => {
           const next = new Map(prev);
           for (const [toolUseId, agentId] of firstAgentByToolUse) {
-            // Kimi mappings are authoritative: let a later result-backed id
-            // replace an earlier provisional (directory-scan) one.
-            if (
-              !next.has(toolUseId) ||
-              (session?.provider === "kimi" && next.get(toolUseId) !== agentId)
-            ) {
+            if (!next.has(toolUseId)) {
               next.set(toolUseId, agentId);
             }
           }
@@ -1142,30 +954,17 @@ export function useSession(
         setToolUseToAgentIds((prev) => {
           const next = new Map(prev);
           for (const [toolUseId, ids] of idsByToolUse) {
-            if (session?.provider === "kimi") {
-              // The reader returns the session's full mapping set, so a fresh
-              // response replaces (rather than merges with) stale provisional
-              // fan-outs.
-              const existing = next.get(toolUseId) ?? [];
-              const unchanged =
-                existing.length === ids.length &&
-                existing.every((id) => ids.includes(id));
-              if (!unchanged) next.set(toolUseId, [...ids]);
-            } else {
-              const existing = next.get(toolUseId) ?? [];
-              const merged = [...existing];
-              for (const id of ids) {
-                if (!merged.includes(id)) merged.push(id);
-              }
-              next.set(toolUseId, merged);
+            const existing = next.get(toolUseId) ?? [];
+            const merged = [...existing];
+            for (const id of ids) {
+              if (!merged.includes(id)) merged.push(id);
             }
+            next.set(toolUseId, merged);
           }
           return next;
         });
 
-        // Load every mapped child selected by the plan. For a completed Kimi
-        // AgentSwarm this supplies all member statuses and aggregate metrics,
-        // rather than leaving the renderer with result.agentId's first child.
+        // Load every mapped child selected by the plan.
         const mappedAgentIds = new Set<string>();
         for (const task of loadPlan.tasks) {
           for (const id of idsByToolUse.get(task.toolUseId) ?? []) {
@@ -1209,34 +1008,16 @@ export function useSession(
             // Skip agents that can't be loaded
           }
         }
-
-        // A pending Kimi call resolves only after the reader spots its
-        // agents/<id> directory, which can appear a moment after the tool
-        // call surfaces. Retry a few times so late directory creation is
-        // picked up without waiting for the tool result.
-        if (cancelled || session?.provider !== "kimi") return;
-        const hasUnresolvedPending = hasUnresolvedKimiAgentMappings(
-          loadPlan.tasks,
-          idsByToolUse,
-        );
-        if (hasUnresolvedPending && attempt < 5) {
-          retryTimer = setTimeout(
-            () => void loadMappedAgents(attempt + 1),
-            3000,
-          );
-        }
       } catch {
         // Silent fail for agent mappings - not critical
       }
     };
 
-    void loadMappedAgents(0);
+    void loadMappedAgents();
     return () => {
       cancelled = true;
-      if (retryTimer) clearTimeout(retryTimer);
     };
   }, [
-    agentMappingsRevision,
     loading,
     messages,
     projectId,
@@ -1249,7 +1030,7 @@ export function useSession(
 
   const fetchPersistedSessionChanges = useCallback(() => {
     const provider = session?.provider;
-    // Owned Pi/Kimi turns are already supplied by the live stream. Their
+    // Owned Pi/MiniMax Code turns are already supplied by the live stream. Their
     // persisted ids cannot be correlated with live UUIDs, so wait until idle
     // rather than replacing an in-flight tail with a lagging full snapshot.
     if (
@@ -1258,7 +1039,7 @@ export function useSession(
       return;
     }
 
-    // The defer guard above means an owned Pi/Kimi session has settled by now.
+    // The defer guard above means an owned Pi/MiniMax Code session has settled.
     // Display mode still drops unforced refreshes for owned sessions, so force
     // it; otherwise a tail written while this client was disconnected would
     // stay invisible until the session is reopened.
@@ -1267,24 +1048,6 @@ export function useSession(
       status.owner,
       Boolean(displayPage),
     );
-
-    // Kimi cannot incrementally slice its synthesized ids. Even while idle,
-    // reject a disk snapshot that has not caught up with the current live tail.
-    if (provider === "kimi") {
-      void refreshSessionMessages(
-        forceOwnedDisplayRefresh
-          ? { replaceMessages: true }
-          : {
-              replaceMessages: true,
-              acceptSnapshot: ({ messages: persistedMessages }) =>
-                isKimiAuthoritativeSnapshotReady(
-                  messagesRef.current,
-                  persistedMessages,
-                ),
-            },
-      );
-      return;
-    }
 
     // Providers can rewrite recent transcript entries and tool parts in place.
     if (shouldRefreshFullPersistedSession(provider)) {
@@ -1343,17 +1106,7 @@ export function useSession(
         return;
       }
 
-      // Kimi swarm members can create their directories seconds apart. A new
-      // child file is a durable signal to re-read the mapping even after the
-      // bounded timer retries have ended.
-      const kimiAgentId = extractKimiAgentIdFromFileEvent(event);
-      if (kimiAgentId && !knownKimiAgentIdsRef.current.has(kimiAgentId)) {
-        knownKimiAgentIdsRef.current.add(kimiAgentId);
-        agentMappingsLoadKeyRef.current = null;
-        setAgentMappingsRevision((revision) => revision + 1);
-      }
-
-      // Owned sessions normally stay on their stream. Pi/Kimi need one
+      // Owned sessions normally stay on their stream. Pi/MiniMax Code need one
       // authoritative replacement after idle because live and persisted ids do
       // not correlate; a later file event is an additional convergence signal.
       if (status.owner === "self") {
@@ -1361,9 +1114,7 @@ export function useSession(
           signalHistoryRewriteSync();
         }
         if (
-          (session?.provider === "pi" ||
-            session?.provider === "kimi" ||
-            session?.provider === "mcode") &&
+          (session?.provider === "pi" || session?.provider === "mcode") &&
           processState === "idle"
         ) {
           scheduleAuthoritativeSnapshotRefresh();
@@ -1627,7 +1378,7 @@ export function useSession(
   const handleSessionWatchChange = useCallback(() => {
     if (status.owner === "self") {
       if (historyRewriteRequest) signalHistoryRewriteSync();
-      // Owned Pi/Kimi sessions cannot replay a missed tail, so treat a settled
+      // Owned Pi/MiniMax Code sessions cannot replay a missed tail, so treat a settled
       // file write as the signal to pull the authoritative snapshot.
       if (
         shouldWatchOwnedSessionFile(session?.provider) &&
@@ -2132,7 +1883,7 @@ export function useSession(
         // Sync deferred messages from connected event
         setDeferredMessages(connectedData.deferredMessages ?? []);
 
-        // Fetch messages from JSONL since the last known message. Pi/Kimi
+        // Fetch messages from JSONL since the last known message. Pi/MiniMax
         // cannot provide a correlated incremental slice, so an active turn
         // stays on the stream and replaces itself only after idle.
         // Codex keeps its existing first-connect guard for early normalization.
@@ -2159,10 +1910,9 @@ export function useSession(
           )
         ) {
           // The stream will carry the active turn; idle/complete schedules the
-          // authoritative replacement and retries until wire.jsonl catches up.
+          // authoritative replacement.
         } else if (
           connectedProvider === "pi" ||
-          connectedProvider === "kimi" ||
           connectedProvider === "mcode"
         ) {
           scheduleAuthoritativeSnapshotRefresh();

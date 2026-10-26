@@ -139,7 +139,7 @@ describe("parseAgentResultFromText", () => {
     expect(result?.agentId).toBe("img123");
   });
 
-  it("parses a completed kimi Agent result", () => {
+  it("parses a completed agent_id Agent result", () => {
     const result = parseAgentResultFromText(
       block(
         "agent_id: agent-1\nactual_subagent_type: explore\nstatus: completed\n\n[summary]\nbackend findings",
@@ -149,7 +149,7 @@ describe("parseAgentResultFromText", () => {
     expect(result?.status).toBe("completed");
   });
 
-  it("marks an interrupted kimi Agent result as failed", () => {
+  it("marks an interrupted agent_id Agent result as failed", () => {
     const result = parseAgentResultFromText(
       block(
         "agent_id: agent-0\nactual_subagent_type: explore\nstatus: failed\n\nsubagent error: interrupted",

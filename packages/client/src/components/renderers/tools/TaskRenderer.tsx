@@ -388,9 +388,8 @@ function SubagentCard({
     void loadContent(false);
   }, [isExpanded, agentId, context, loadContent]);
 
-  // While expanded and running, poll the child wire so live metrics/transcript
-  // converge (Kimi does not stream child events over ACP; the wire.jsonl on
-  // disk is the reliable live source).
+  // While expanded and running, poll the child transcript so live metrics
+  // converge for providers that do not stream child events.
   useEffect(() => {
     if (!isExpanded || !running || !agentId) return;
     const timer = setInterval(() => void loadContent(true), 3000);

@@ -1,8 +1,5 @@
 import type { CodexAsyncMessage } from "@yep-anywhere/shared";
-import type {
-  KimiGoalSnapshot,
-  SessionDisplaySegment,
-} from "@yep-anywhere/shared";
+import type { SessionDisplaySegment } from "@yep-anywhere/shared";
 import type { ContentBlock, Message } from "../types";
 
 /**
@@ -106,8 +103,6 @@ export interface SystemItem extends RenderItemBase {
   content: string;
   /** For status subtype: the current status (e.g., "compacting") */
   status?: "compacting" | null;
-  /** Structured Kimi goal lifecycle state for the inline goal renderer. */
-  goalSnapshot?: KimiGoalSnapshot;
 }
 
 export type DisplayToolGroupSegment = Extract<

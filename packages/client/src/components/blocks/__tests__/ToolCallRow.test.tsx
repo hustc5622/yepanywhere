@@ -79,14 +79,14 @@ describe("ToolCallRow", () => {
     expect(container.querySelector(".tool-use-expanded")).toBeNull();
   });
 
-  it("keeps a lazy-created Kimi Write row stable until input arrives", () => {
+  it("keeps a lazy-created Write row stable until input arrives", () => {
     const { container } = renderWithToolProviders(
       <ToolCallRow
         id="Write:10"
         toolName="Write"
         toolInput={{}}
         status="pending"
-        sessionProvider="kimi"
+        sessionProvider="mcode"
       />,
     );
 
@@ -96,14 +96,14 @@ describe("ToolCallRow", () => {
     expect(container.querySelector(".tool-spinner")).not.toBeNull();
   });
 
-  it("keeps a lazy-created Kimi Read row stable until input arrives", () => {
+  it("keeps a lazy-created Read row stable until input arrives", () => {
     const { container } = renderWithToolProviders(
       <ToolCallRow
         id="Read:11"
         toolName="Read"
         toolInput={{}}
         status="pending"
-        sessionProvider="kimi"
+        sessionProvider="mcode"
       />,
     );
 
@@ -314,7 +314,7 @@ describe("ToolCallRow", () => {
         toolName="exec"
         toolInput={{ script: "provider-specific input" }}
         status="pending"
-        sessionProvider="kimi"
+        sessionProvider="mcode"
       />,
     );
 

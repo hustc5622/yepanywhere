@@ -30,12 +30,11 @@ const TOOL_NAME_ALIASES: Record<string, string> = {
   web__run: "WebSearch", // codex code-mode nested web.run
   webfetch: "WebFetch",
   Agent: "Task", // SDK 0.2.76+ renamed Task → Agent
-  AgentSwarm: "Task", // Kimi parallel subagent dispatch
+  AgentSwarm: "Task", // parallel subagent dispatch
   view_image: "ViewImage",
   imageView: "ViewImage",
   image_generation: "ViewImage",
   imageGeneration: "ViewImage",
-  readmediafile: "ReadMediaFile",
   skill: "Skill",
 };
 

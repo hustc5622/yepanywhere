@@ -214,7 +214,7 @@ describe("findPendingTasks", () => {
     expect(pending).toHaveLength(0);
   });
 
-  it("detects pending kimi Agent and AgentSwarm tool calls", () => {
+  it("detects pending Agent and AgentSwarm tool calls", () => {
     const messages: Message[] = [
       {
         id: "msg-1",

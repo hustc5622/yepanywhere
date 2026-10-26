@@ -43,7 +43,7 @@ describe("Codex model reasoning efforts", () => {
     expect(resolveModelReasoningEffort(luna, "xhigh")).toBe("xhigh");
   });
 
-  it("resolves Kimi's exact model-specific thinking levels", () => {
+  it("resolves exact model-specific thinking levels (kimi-k3 model)", () => {
     const kimiK3: ModelInfo = {
       id: "custom-kimi/kimi-k3",
       name: "Kimi K3",

@@ -25,7 +25,6 @@ import { CODEX_SESSIONS_DIR, CodexSessionScanner } from "./codex-scanner.js";
 import { CursorSessionScanner } from "./cursor-scanner.js";
 import { DshSessionScanner } from "./dsh-scanner.js";
 import { GEMINI_TMP_DIR, GeminiSessionScanner } from "./gemini-scanner.js";
-import { KIMI_SESSIONS_DIR, KimiSessionScanner } from "./kimi-scanner.js";
 import { McodeSessionScanner } from "./mcode-scanner.js";
 import {
   CLAUDE_PROJECTS_DIR,
@@ -42,18 +41,15 @@ export interface ScannerOptions {
   projectsDir?: string; // override for testing
   codexSessionsDir?: string; // override for testing
   geminiSessionsDir?: string; // override for testing
-  kimiSessionsDir?: string; // override for testing
   piSessionsDir?: string; // override for testing
   codexScanner?: CodexSessionScanner | null; // shared provider scanner
   geminiScanner?: GeminiSessionScanner | null; // shared provider scanner
-  kimiScanner?: KimiSessionScanner | null; // shared provider scanner
   piScanner?: PiSessionScanner | null; // shared provider scanner
   cursorScanner?: CursorSessionScanner | null; // shared provider scanner
   mcodeScanner?: McodeSessionScanner | null; // shared provider scanner
   dshScanner?: DshSessionScanner | null; // shared provider scanner
   enableCodex?: boolean; // whether to include Codex projects (default: true)
   enableGemini?: boolean; // whether to include Gemini projects (default: true)
-  enableKimi?: boolean; // whether to include Kimi projects (default: true)
   enablePi?: boolean; // whether to include Pi projects (default: true)
   enableCursor?: boolean; // whether to include Cursor ACP projects (default: true)
   /**
@@ -109,14 +105,12 @@ export class ProjectScanner {
   private remoteExecutors: RemoteExecutorConfig[];
   private codexScanner: CodexSessionScanner | null;
   private geminiScanner: GeminiSessionScanner | null;
-  private kimiScanner: KimiSessionScanner | null;
   private piScanner: PiSessionScanner | null;
   private cursorScanner: CursorSessionScanner | null;
   private mcodeScanner: McodeSessionScanner | null;
   private dshScanner: DshSessionScanner | null;
   private enableCodex: boolean;
   private enableGemini: boolean;
-  private enableKimi: boolean;
   private enablePi: boolean;
   private enableCursor: boolean;
   private projectMetadataService: ProjectMetadataService | null;
@@ -142,7 +136,6 @@ export class ProjectScanner {
     this.remoteExecutors = [...(options.remoteExecutors ?? [])];
     this.enableCodex = options.enableCodex ?? true;
     this.enableGemini = options.enableGemini ?? true;
-    this.enableKimi = options.enableKimi ?? true;
     this.enablePi = options.enablePi ?? true;
     this.enableCursor = options.enableCursor ?? true;
     this.codexScanner = this.enableCodex
@@ -155,12 +148,6 @@ export class ProjectScanner {
       ? (options.geminiScanner ??
         new GeminiSessionScanner({
           sessionsDir: options.geminiSessionsDir ?? GEMINI_TMP_DIR,
-        }))
-      : null;
-    this.kimiScanner = this.enableKimi
-      ? (options.kimiScanner ??
-        new KimiSessionScanner({
-          sessionsDir: options.kimiSessionsDir ?? KIMI_SESSIONS_DIR,
         }))
       : null;
     this.piScanner = this.enablePi
@@ -420,8 +407,6 @@ export class ProjectScanner {
       this.codexScanner?.invalidateCache();
     } else if (event.provider === "gemini") {
       this.geminiScanner?.invalidateCache();
-    } else if (event.provider === "kimi") {
-      this.kimiScanner?.invalidateCache();
     } else if (event.provider === "pi") {
       this.piScanner?.invalidateCache();
     } else if (event.provider === "cursor") {
@@ -667,40 +652,6 @@ export class ProjectScanner {
       }
     }
 
-    // Merge Kimi projects if enabled
-    if (this.kimiScanner) {
-      const kimiProjects = await this.kimiScanner.listProjects();
-      for (const kimiProject of kimiProjects) {
-        const projectPath = canonicalizeProjectPath(kimiProject.path);
-        const existing = projects.find(
-          (project) => canonicalizeProjectPath(project.path) === projectPath,
-        );
-        if (existing) {
-          existing.hasKimiSessions = true;
-          existing.sessionCount += kimiProject.sessionCount;
-          if (
-            kimiProject.lastActivity &&
-            (!existing.lastActivity ||
-              kimiProject.lastActivity > existing.lastActivity)
-          ) {
-            existing.lastActivity = kimiProject.lastActivity;
-          }
-          continue;
-        }
-        seenPaths.add(projectPath);
-        projects.push({
-          ...kimiProject,
-          id: encodeProjectId(projectPath),
-          path: projectPath,
-          name: basename(projectPath),
-          hasCodexSessions: false,
-          hasGeminiSessions: false,
-          hasPiSessions: false,
-          hasKimiSessions: true,
-        });
-      }
-    }
-
     if (this.cursorScanner) {
       const cursorProjects = await this.cursorScanner.listProjects();
       for (const cursorProject of cursorProjects) {
@@ -729,7 +680,6 @@ export class ProjectScanner {
           hasCodexSessions: false,
           hasGeminiSessions: false,
           hasPiSessions: false,
-          hasKimiSessions: false,
           hasCursorSessions: true,
         });
       }
@@ -763,7 +713,6 @@ export class ProjectScanner {
           hasCodexSessions: false,
           hasGeminiSessions: false,
           hasPiSessions: false,
-          hasKimiSessions: false,
           hasCursorSessions: false,
           hasMcodeSessions: true,
         });
@@ -798,7 +747,6 @@ export class ProjectScanner {
           hasCodexSessions: false,
           hasGeminiSessions: false,
           hasPiSessions: false,
-          hasKimiSessions: false,
           hasCursorSessions: false,
           hasMcodeSessions: false,
           hasDshSessions: true,
@@ -1034,15 +982,6 @@ export class ProjectScanner {
         }
       }
 
-      // Check if Kimi sessions exist (only if no earlier provider sessions)
-      if (provider === "claude" && this.kimiScanner) {
-        const kimiSessions =
-          await this.kimiScanner.getSessionsForProject(projectPath);
-        if (kimiSessions.length > 0) {
-          provider = "kimi";
-        }
-      }
-
       if (provider === "claude" && this.cursorScanner) {
         const cursorSessions =
           await this.cursorScanner.getSessionsForProject(projectPath);
@@ -1078,8 +1017,6 @@ export class ProjectScanner {
       sessionDir = GEMINI_TMP_DIR;
     } else if (provider === "pi") {
       sessionDir = PI_SESSIONS_DIR;
-    } else if (provider === "kimi") {
-      sessionDir = KIMI_SESSIONS_DIR;
     } else if (provider === "cursor") {
       sessionDir = CURSOR_ACP_SESSIONS_DIR;
     } else if (provider === "mcode") {
@@ -1099,7 +1036,6 @@ export class ProjectScanner {
       hasCodexSessions: provider === "codex",
       hasGeminiSessions: provider === "gemini",
       hasPiSessions: provider === "pi",
-      hasKimiSessions: provider === "kimi",
       hasCursorSessions: provider === "cursor",
       hasMcodeSessions: provider === "mcode",
       hasDshSessions: provider === "dsh",

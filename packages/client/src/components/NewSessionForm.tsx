@@ -102,7 +102,6 @@ const NEW_SESSION_PROVIDER_ACCENTS = {
   gemini: "var(--provider-gemini)",
   "gemini-acp": "var(--provider-gemini)",
   pi: "var(--provider-pi)",
-  kimi: "var(--provider-kimi)",
   cursor: "var(--provider-cursor)",
   mcode: "var(--provider-mcode)",
   dsh: "var(--provider-dsh)",
@@ -331,9 +330,9 @@ export function NewSessionForm({
   const [codexReasoningEffort, setCodexReasoningEffort] = useState<
     string | null
   >(null);
-  const [kimiReasoningEffort, setKimiReasoningEffort] = useState<string | null>(
-    null,
-  );
+  const [namedReasoningEffort, setNamedReasoningEffort] = useState<
+    string | null
+  >(null);
   const [selectedGatewayProtocol, setSelectedGatewayProtocol] =
     useState<LlmGatewayRequestProtocol>("openai-compatible");
   const [selectedCodexMcpMode, setSelectedCodexMcpMode] =
@@ -478,14 +477,15 @@ export function NewSessionForm({
         : [],
     [selectedModelInfo, selectedProvider],
   );
-  // MiniMax Code folds its plain/thinking model variants into the same
-  // off + named-effort picker Kimi uses (see server mcode-models.ts).
-  const usesKimiStyleReasoning =
-    selectedProvider === "kimi" || selectedProvider === "mcode";
-  const kimiReasoningEfforts = useMemo(
+  // MiniMax Code folds its plain/thinking model variants into an
+  // off + named-effort picker (see server mcode-models.ts).
+  const usesNamedEffortReasoning = selectedProvider === "mcode";
+  const namedReasoningEfforts = useMemo(
     () =>
-      usesKimiStyleReasoning ? getModelReasoningEfforts(selectedModelInfo) : [],
-    [selectedModelInfo, usesKimiStyleReasoning],
+      usesNamedEffortReasoning
+        ? getModelReasoningEfforts(selectedModelInfo)
+        : [],
+    [selectedModelInfo, usesNamedEffortReasoning],
   );
   const piReasoningEfforts = useMemo(
     () =>
@@ -502,9 +502,9 @@ export function NewSessionForm({
             (codexReasoningEfforts.length === 0 ? thinkingLevel : undefined),
         )
       : undefined;
-  const effectiveKimiReasoningEffort =
-    usesKimiStyleReasoning && kimiReasoningEfforts.length > 0
-      ? resolveModelReasoningEffort(selectedModelInfo, kimiReasoningEffort)
+  const effectiveNamedReasoningEffort =
+    usesNamedEffortReasoning && namedReasoningEfforts.length > 0
+      ? resolveModelReasoningEffort(selectedModelInfo, namedReasoningEffort)
       : undefined;
   const resolvedPiThinkingEffort =
     selectedProvider === "pi"
@@ -516,8 +516,8 @@ export function NewSessionForm({
   const selectedReasoningEffort =
     selectedProvider === "codex" && thinkingMode === "on"
       ? effectiveCodexReasoningEffort
-      : usesKimiStyleReasoning
-        ? effectiveKimiReasoningEffort
+      : usesNamedEffortReasoning
+        ? effectiveNamedReasoningEffort
         : selectedProvider === "pi" && thinkingMode !== "off"
           ? resolvedPiThinkingEffort
           : undefined;
@@ -624,8 +624,8 @@ export function NewSessionForm({
     },
     [applyThinkingPreset],
   );
-  const kimiReasoningOptions = useMemo((): FilterOption<string>[] => {
-    return kimiReasoningEfforts.map((option) => {
+  const namedReasoningOptions = useMemo((): FilterOption<string>[] => {
+    return namedReasoningEfforts.map((option) => {
       const effort = option.reasoningEffort;
       const label =
         effort === "off"
@@ -642,12 +642,12 @@ export function NewSessionForm({
         description: option.description,
       };
     });
-  }, [getEffortLabel, kimiReasoningEfforts, t]);
-  const handleKimiReasoningSelect = useCallback((selected: string[]) => {
-    setKimiReasoningEffort(selected[0] ?? null);
+  }, [getEffortLabel, namedReasoningEfforts, t]);
+  const handleNamedReasoningSelect = useCallback((selected: string[]) => {
+    setNamedReasoningEffort(selected[0] ?? null);
   }, []);
-  const showKimiReasoningSelector =
-    usesKimiStyleReasoning && kimiReasoningOptions.length > 0;
+  const showNamedReasoningSelector =
+    usesNamedEffortReasoning && namedReasoningOptions.length > 0;
 
   // Default to true for backwards compatibility with providers that don't set these flags
   const permissionModes = getProviderPermissionModes(
@@ -746,8 +746,8 @@ export function NewSessionForm({
       setSelectedLlmGatewayKeyId(
         providerName === "pi" ? (savedDefaults?.llmGatewayKeyId ?? null) : null,
       );
-      setKimiReasoningEffort(
-        providerName === "kimi" || providerName === "mcode"
+      setNamedReasoningEffort(
+        providerName === "mcode"
           ? (savedDefaults?.reasoningEffort ?? null)
           : null,
       );
@@ -1720,7 +1720,6 @@ export function NewSessionForm({
   const reasoningEffortDefaultsMatch =
     selectedProvider === "codex" ||
     selectedProvider === "pi" ||
-    selectedProvider === "kimi" ||
     selectedProvider === "mcode"
       ? (savedProviderDefaults?.reasoningEffort ?? undefined) ===
         selectedReasoningEffort
@@ -1989,20 +1988,20 @@ export function NewSessionForm({
           </div>
         </div>
       )}
-      {showKimiReasoningSelector && compact && (
+      {showNamedReasoningSelector && compact && (
         <div className="new-session-effort-control">
           <span className="new-session-effort-label">
             {t("newSessionThinkingControlTitle")}
           </span>
           <div className="new-session-effort-options">
-            {kimiReasoningOptions.map((option) => {
-              const selected = effectiveKimiReasoningEffort === option.value;
+            {namedReasoningOptions.map((option) => {
+              const selected = effectiveNamedReasoningEffort === option.value;
               return (
                 <button
                   key={option.value}
                   type="button"
                   className={`new-session-effort-option ${selected ? "selected" : ""}`}
-                  onClick={() => setKimiReasoningEffort(option.value)}
+                  onClick={() => setNamedReasoningEffort(option.value)}
                   disabled={isStarting}
                   aria-pressed={selected}
                   aria-label={`${t("newSessionThinkingControlTitle")}: ${option.label}`}
@@ -2175,7 +2174,7 @@ export function NewSessionForm({
         selectedProvider !== "cursor" &&
         (modelOptions.length > 0 ||
           supportsThinkingToggle ||
-          showKimiReasoningSelector) && (
+          showNamedReasoningSelector) && (
           <div className="new-session-model-section">
             <div className="new-session-model-controls">
               {modelOptions.length > 0 && (
@@ -2261,18 +2260,18 @@ export function NewSessionForm({
                   </div>
                 </div>
               )}
-              {showKimiReasoningSelector && (
+              {showNamedReasoningSelector && (
                 <div className="new-session-config-field">
                   <h3>{t("newSessionThinkingControlTitle")}</h3>
                   <FilterDropdown
                     label={t("newSessionThinkingControlTitle")}
-                    options={kimiReasoningOptions}
+                    options={namedReasoningOptions}
                     selected={
-                      effectiveKimiReasoningEffort
-                        ? [effectiveKimiReasoningEffort]
+                      effectiveNamedReasoningEffort
+                        ? [effectiveNamedReasoningEffort]
                         : []
                     }
-                    onChange={handleKimiReasoningSelect}
+                    onChange={handleNamedReasoningSelect}
                     accentColor={selectedProviderAccent}
                     multiSelect={false}
                     placeholder={t("newSessionThinkingControlTitle")}

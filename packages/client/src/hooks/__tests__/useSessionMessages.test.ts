@@ -113,8 +113,8 @@ function sessionResponse(
   };
 }
 
-function kimiSessionResponse(updatedAt: string, messages: Message[]) {
-  return sessionResponse(updatedAt, messages, { provider: "kimi" });
+function piSessionResponse(updatedAt: string, messages: Message[]) {
+  return sessionResponse(updatedAt, messages, { provider: "pi" });
 }
 
 function codexBranchState(
@@ -842,7 +842,7 @@ describe("useSessionMessages Codex snapshot refresh", () => {
   });
 });
 
-describe("useSessionMessages Kimi authoritative snapshot sync", () => {
+describe("useSessionMessages authoritative snapshot sync", () => {
   beforeEach(() => {
     mockGetSession.mockReset();
   });
@@ -881,7 +881,7 @@ describe("useSessionMessages Kimi authoritative snapshot sync", () => {
     });
 
     mockGetSession.mockResolvedValueOnce(
-      kimiSessionResponse("2026-08-04T07:27:51.439Z", [
+      piSessionResponse("2026-08-04T07:27:51.439Z", [
         firstUser,
         firstAssistant,
       ]),
@@ -931,7 +931,7 @@ describe("useSessionMessages Kimi authoritative snapshot sync", () => {
     ]);
 
     mockGetSession.mockResolvedValueOnce(
-      kimiSessionResponse("2026-08-04T07:55:48.416Z", [
+      piSessionResponse("2026-08-04T07:55:48.416Z", [
         firstUser,
         firstAssistant,
         persistedSecondUser,

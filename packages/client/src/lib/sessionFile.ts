@@ -12,17 +12,6 @@ export function extractSessionIdFromFileEvent(
   const filename = pathParts.at(-1);
   if (!filename) return null;
 
-  // Kimi stores one wire log per agent at
-  // <workspace>/<sessionId>/agents/<agentId>/wire.jsonl. The basename is
-  // therefore always "wire", so recover the session id from the directory
-  // immediately above "agents" instead.
-  if (event.provider === "kimi") {
-    const agentsIndex = pathParts.lastIndexOf("agents");
-    if (agentsIndex > 0) {
-      return pathParts[agentsIndex - 1] ?? null;
-    }
-  }
-
   // MiniMax Code: <YYYY>/<MM>/<DD>/<time>-session_<base64url(id)>/messages.jsonl
   if (event.provider === "mcode") {
     const dir = pathParts.at(-2) ?? "";

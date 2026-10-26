@@ -13,7 +13,6 @@ type WatchProvider =
   | "codex"
   | "gemini"
   | "pi"
-  | "kimi"
   | "cursor"
   | "mcode"
   | "dsh";

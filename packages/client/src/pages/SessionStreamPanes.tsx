@@ -389,7 +389,6 @@ export const SessionComposer = memo(function SessionComposer({
               onApproveStrictAutoReview={onApproveStrictAutoReview}
               onApproveAlways={onApproveAlways}
               onDenyWithFeedback={onDenyWithFeedback}
-              preserveModeOnPlanApproval={provider === "kimi"}
               collapsed={approvalCollapsed}
               onCollapsedChange={setApprovalCollapsed}
             />

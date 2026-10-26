@@ -6,7 +6,6 @@ import { canEditPersistedUserPrompt } from "../lib/sessionBranching";
 import type { EditUserPromptRequest } from "../lib/userPromptContent";
 import type { RenderItem } from "../types/renderItems";
 import { DisplayToolGroupRow } from "./blocks/DisplayToolGroupRow";
-import { GoalInlineBlock } from "./blocks/GoalInlineRenderer";
 import { SessionSetupBlock } from "./blocks/SessionSetupBlock";
 import { TextBlock } from "./blocks/TextBlock";
 import { ThinkingBlock } from "./blocks/ThinkingBlock";
@@ -246,13 +245,6 @@ export const RenderItemComponent = memo(function RenderItemComponent({
         return <SessionSetupBlock title={item.title} prompts={item.prompts} />;
 
       case "system": {
-        // Kimi goal lifecycle snapshots — render the inline goal card.
-        if (item.subtype === "kimi_goal") {
-          if (item.goalSnapshot) {
-            return <GoalInlineBlock snapshot={item.goalSnapshot} />;
-          }
-          return null;
-        }
         // Different styling for compacting vs completed compaction
         const isCompacting =
           item.subtype === "status" && item.status === "compacting";

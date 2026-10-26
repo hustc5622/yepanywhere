@@ -30,7 +30,6 @@ import type { Project } from "../supervisor/types.js";
 import type { CodexSessionReader } from "./codex-reader.js";
 import { getCodexSessionManifest } from "./codex-session-manifest.js";
 import type { GeminiSessionReader } from "./gemini-reader.js";
-import type { KimiSessionReader } from "./kimi-reader.js";
 import type { PiSessionReader } from "./pi-reader.js";
 import { findSessionSummaryAcrossProviders } from "./provider-resolution.js";
 import type { ISessionReader } from "./types.js";
@@ -51,8 +50,6 @@ export interface SessionLocatorDeps {
   geminiReaderFactory?: (projectPath: string) => GeminiSessionReader;
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
-  kimiSessionsDir?: string;
-  kimiReaderFactory?: (projectPath: string) => KimiSessionReader;
   codexBridgeService?: BridgeController;
 }
 
@@ -234,7 +231,7 @@ async function locateViaMetadata(
 
 /**
  * Last resort: ask every provider reader about every project. This is what
- * covers Gemini and Kimi, whose on-disk layouts have no id-keyed index.
+ * covers Gemini, whose on-disk layout has no id-keyed index.
  */
 async function locateViaProviderScan(
   deps: SessionLocatorDeps,
@@ -253,8 +250,6 @@ async function locateViaProviderScan(
     geminiHashToCwd: deps.geminiScanner?.getHashToCwd(),
     piSessionsDir: deps.piSessionsDir,
     piReaderFactory: deps.piReaderFactory,
-    kimiSessionsDir: deps.kimiSessionsDir,
-    kimiReaderFactory: deps.kimiReaderFactory,
   };
 
   for (const project of projects) {

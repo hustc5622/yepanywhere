@@ -311,32 +311,4 @@ describe("RenderItemComponent provider-native items", () => {
       expect(screen.queryByRole("link")).toBeNull();
     },
   );
-
-  it("localizes Kimi goal copy and keeps zero budgets finite", async () => {
-    window.localStorage.setItem("yep-anywhere-locale", "zh-CN");
-    const { container } = renderItem({
-      type: "system",
-      id: "goal-1",
-      subtype: "kimi_goal",
-      content: "",
-      goalSnapshot: {
-        goalId: "goal-1",
-        objective: "完成审查",
-        status: "cleared",
-        turnsUsed: 0,
-        budgetLimits: { turnBudget: 0 },
-        change: "cleared",
-      },
-      sourceMessages: [],
-    });
-
-    expect(
-      await screen.findByText("目标已清除", { exact: false }),
-    ).not.toBeNull();
-    expect(
-      container
-        .querySelector(".kimi-goal-progress-fill")
-        ?.getAttribute("style"),
-    ).not.toContain("NaN");
-  });
 });

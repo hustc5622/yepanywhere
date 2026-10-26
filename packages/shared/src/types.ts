@@ -5,7 +5,6 @@
  * - "codex-oss": Codex via CLI with --oss (local models via Ollama)
  * - "gemini": Google Gemini via CLI
  * - "pi": Pi coding agent via its JSONL RPC mode
- * - "kimi": Kimi Code CLI via Agent Client Protocol (`kimi acp`)
  * - "cursor": Cursor CLI via Agent Client Protocol (`agent acp`)
  * - "mcode": MiniMax Code CLI via Agent Client Protocol (`mcode acp`)
  * - "dsh": DeepSeek Harness. Read-only: Yep lists and displays sessions from
@@ -19,7 +18,6 @@ export type ProviderName =
   | "gemini"
   | "gemini-acp"
   | "pi"
-  | "kimi"
   | "cursor"
   | "mcode"
   | "dsh";
@@ -28,7 +26,11 @@ export type ProviderName =
 export type LiveProviderName = ProviderName;
 
 /** Provider identifiers accepted only while reading legacy persisted state. */
-export type PersistedProviderName = ProviderName | "opencode" | "zcode";
+export type PersistedProviderName =
+  | ProviderName
+  | "opencode"
+  | "zcode"
+  | "kimi";
 
 /**
  * All provider names in display order.
@@ -43,7 +45,6 @@ export const ALL_PROVIDERS: readonly LiveProviderName[] = [
   "gemini",
   "gemini-acp",
   "pi",
-  "kimi",
   "cursor",
   "mcode",
   "dsh",
