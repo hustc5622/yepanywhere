@@ -1,4 +1,4 @@
-import { readFile, realpath } from "node:fs/promises";
+import { readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 
@@ -28,6 +28,39 @@ async function loadInstalledSdk() {
   }
   throw new Error(
     "Installed Pi SDK could not be loaded for side conversations.",
+  );
+}
+
+const MAX_SIDE_IMAGES = 8;
+const MAX_SIDE_IMAGE_BYTES = 20 * 1024 * 1024;
+
+/**
+ * Pi `ImageContent` for side question images. Yep validated the paths as its
+ * own uploads; re-check the shape and size here before reading.
+ */
+export async function readSideImages(images) {
+  if (images === undefined) return [];
+  if (!Array.isArray(images) || images.length > MAX_SIDE_IMAGES)
+    throw new Error("Invalid side question images.");
+  return Promise.all(
+    images.map(async (image) => {
+      if (
+        !image ||
+        typeof image.path !== "string" ||
+        !image.path.startsWith("/") ||
+        typeof image.mimeType !== "string" ||
+        !image.mimeType.startsWith("image/")
+      )
+        throw new Error("Invalid side question image.");
+      const info = await stat(image.path);
+      if (!info.isFile() || info.size > MAX_SIDE_IMAGE_BYTES)
+        throw new Error("Side question image is unavailable or too large.");
+      return {
+        type: "image",
+        data: (await readFile(image.path)).toString("base64"),
+        mimeType: image.mimeType,
+      };
+    }),
   );
 }
 
@@ -290,6 +323,7 @@ export function installPiSideConversations(pi, loadSdk = loadInstalledSdk) {
               command.text.length > 32_000
             )
               throw new Error("Invalid side question.");
+            const images = await readSideImages(command.images);
             current.busy = true;
             reply({});
             // The command returns before the model runs; no parent agent_settled is expected.
@@ -297,6 +331,7 @@ export function installPiSideConversations(pi, loadSdk = loadInstalledSdk) {
               .prompt(command.text, {
                 expandPromptTemplates: false,
                 source: "extension",
+                ...(images.length > 0 ? { images } : {}),
               })
               .then(() => {
                 if (child !== current) return;

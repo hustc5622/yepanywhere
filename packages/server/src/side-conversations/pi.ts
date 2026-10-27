@@ -131,8 +131,18 @@ export class PiSideChannel {
           typeof info.reasoningEffort === "string"
             ? info.reasoningEffort
             : undefined,
-        send: async (text) => {
-          await this.command(id, "send", { text });
+        send: async (text, _requestId, images = []) => {
+          await this.command(id, "send", {
+            text,
+            ...(images.length > 0
+              ? {
+                  images: images.map(({ path, mimeType }) => ({
+                    path,
+                    mimeType,
+                  })),
+                }
+              : {}),
+          });
         },
         interrupt: async () => {
           await this.command(id, "interrupt");

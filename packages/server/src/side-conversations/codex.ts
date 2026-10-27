@@ -1,3 +1,4 @@
+import { readFile } from "node:fs/promises";
 import { resolveCodexMcpThreadProfile } from "../codex/mcp-profile.js";
 import {
   SIDE_BOUNDARY,
@@ -217,7 +218,7 @@ export async function createCodexSideConversation(options: {
   return {
     model: result.model,
     reasoningEffort: result.reasoningEffort,
-    async send(text, requestId) {
+    async send(text, requestId, images = []) {
       if (disposed) throw new Error("Side thread closed");
       starting = (async () => {
         const response = await client.requestIsolated<{
@@ -225,7 +226,16 @@ export async function createCodexSideConversation(options: {
         }>("turn/start", {
           threadId: id,
           clientUserMessageId: requestId,
-          input: [{ type: "text", text, text_elements: [] }],
+          input: [
+            { type: "text", text, text_elements: [] },
+            // Inline bytes: a bridge app-server may not share this disk.
+            ...(await Promise.all(
+              images.map(async (image) => ({
+                type: "image",
+                url: `data:${image.mimeType};base64,${(await readFile(image.path)).toString("base64")}`,
+              })),
+            )),
+          ],
         });
         if (
           !completed.has(response.turn.id) &&

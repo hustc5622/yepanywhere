@@ -1079,6 +1079,7 @@ export class PiProvider implements AgentProvider {
     const sideConversations = new SideConversationSession({
       ready: () => Boolean(runtime.sessionId && runtime.client?.isAlive()),
       parentId: () => runtime.sessionId ?? "",
+      supportsImages: true,
       create: (context, emit) => sideChannel.create(context, emit),
     });
     const routeModel = async (
