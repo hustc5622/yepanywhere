@@ -58,6 +58,7 @@ import {
   resolveModelReasoningEffort,
 } from "../lib/codexReasoning";
 import { getPreferredCursorModelId } from "../lib/cursorModels";
+import { draftFileStore } from "../lib/draftFileStore";
 import {
   clearLegacySessionPrefill,
   getLegacySessionPrefill,
@@ -72,6 +73,7 @@ import {
   requireStartedHistoricalEdit,
   shouldRestoreHistoricalEditAfterFailure,
 } from "../lib/sessionBranching";
+import { getCurrentInstallId } from "../lib/storageKeys";
 import type { PermissionMode, SessionNavigationState } from "../types";
 import { CodexAccountSelect } from "./CodexAccountSelect";
 import { CodexUsageCard } from "./CodexUsageCard";
@@ -1094,6 +1096,59 @@ export function NewSessionForm({
     [selectedGatewayProtocols],
   );
 
+  // Local files survive refreshes and navigation in IndexedDB, keyed like the
+  // text draft. Until the restore finishes, starting is blocked so a draft
+  // cannot be sent with `@[name]` tokens whose files are still loading.
+  const draftFilesKey = `${getCurrentInstallId() ?? location.host}:new-session:${projectId}`;
+  const [restoringFiles, setRestoringFiles] = useState(
+    draftFileStore.available,
+  );
+  const reportedUnsavedRef = useRef(new Set<string>());
+  useEffect(() => {
+    if (!draftFileStore.available) return;
+    let cancelled = false;
+    void draftFileStore.load(draftFilesKey).then((stored) => {
+      if (cancelled) return;
+      if (stored.length > 0 && pendingFilesRef.current.length === 0) {
+        const restored = stored.map(({ id, file }) => ({
+          id,
+          file,
+          previewUrl: file.type.startsWith("image/")
+            ? URL.createObjectURL(file)
+            : undefined,
+        }));
+        pendingFileOrderRef.current = restored.map((file) => file.id);
+        setPendingFiles(restored);
+      }
+      setRestoringFiles(false);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [draftFilesKey]);
+  useEffect(() => {
+    if (!draftFileStore.available || restoringFiles || isStarting) return;
+    const timer = setTimeout(() => {
+      void draftFileStore
+        .save(
+          draftFilesKey,
+          pendingFiles.map(({ id, file }) => ({ id, file })),
+        )
+        .then(({ skippedNames }) => {
+          const fresh = skippedNames.filter(
+            (name) => !reportedUnsavedRef.current.has(name),
+          );
+          for (const name of fresh) reportedUnsavedRef.current.add(name);
+          if (fresh.length > 0)
+            showToast(
+              t("newSessionFilesNotSaved", { names: fresh.join(", ") }),
+              "info",
+            );
+        });
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [draftFilesKey, isStarting, pendingFiles, restoringFiles, showToast, t]);
+
   const addPendingFiles = (files: File[], beforeAttachmentId?: string) => {
     const newPendingFiles: PendingFile[] = files.map((file) => ({
       id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -1422,6 +1477,7 @@ export function NewSessionForm({
       !projectId ||
       !hasContent ||
       isStarting ||
+      restoringFiles ||
       startRetryBlockedMessage ||
       selectedProviderInfo?.unavailableReason ||
       hasGatewayConfigError
@@ -1556,6 +1612,7 @@ export function NewSessionForm({
       }
 
       draftControls.clearDraft();
+      void draftFileStore.remove(draftFilesKey);
       // Pass initial status so SessionPage can connect SSE immediately
       // without waiting for getSession to complete
       // Also pass initial message as optimistic title (session name = first message)
@@ -1790,6 +1847,7 @@ export function NewSessionForm({
             onClick={handleStartSession}
             disabled={
               isStarting ||
+              restoringFiles ||
               Boolean(startRetryBlockedMessage) ||
               Boolean(selectedProviderInfo?.unavailableReason) ||
               !hasContent ||
