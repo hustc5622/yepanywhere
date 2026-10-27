@@ -225,6 +225,20 @@ describe("PiProvider compaction and / commands", () => {
     }
   });
 
+  it("answers supportedCommands from the cache while Pi is starting", async () => {
+    const { session, iterator, cwd } = await startSession();
+    try {
+      // The iterator has not started, so the RPC client does not exist yet.
+      await expect(session.supportedCommands?.()).resolves.toEqual(
+        (await readPiCommandCache(cwd)) ?? [],
+      );
+      await iterator.next();
+      await expect(session.supportedCommands?.()).resolves.toHaveLength(3);
+    } finally {
+      session.abort();
+    }
+  });
+
   it("runs a manual compaction between turns with custom instructions", async () => {
     const { session, iterator, commands } = await startSession();
     try {

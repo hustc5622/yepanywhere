@@ -56,7 +56,11 @@ import type {
   UserMessage,
 } from "../types.js";
 import { filterEnvForChildProcess } from "./env-filter.js";
-import { piCommandCachePath, writePiCommandCache } from "./pi-command-cache.js";
+import {
+  piCommandCachePath,
+  readPiCommandCache,
+  writePiCommandCache,
+} from "./pi-command-cache.js";
 import {
   type PiAnthropicModelTraits,
   type PiThinkingLevelMap,
@@ -1145,8 +1149,19 @@ export class PiProvider implements AgentProvider {
       },
       supportedModels: async () => this.getAvailableModels(),
       supportedCommands: async (): Promise<SlashCommand[]> => {
+        // Callers (session load, composer listings) may ask while Pi is
+        // still starting. Answer with the last list Pi reported for this
+        // directory instead of throwing; init announces the live one.
+        const client = runtime.client;
+        if (!client?.isAlive()) {
+          return (
+            (await readPiCommandCache(options.cwd, this.commandCachePath).catch(
+              () => null,
+            )) ?? []
+          );
+        }
         const commands = piSlashCommands(
-          await requireClient().send({ type: "get_commands" }),
+          await client.send({ type: "get_commands" }),
         );
         void writePiCommandCache(options.cwd, commands, this.commandCachePath);
         return commands;

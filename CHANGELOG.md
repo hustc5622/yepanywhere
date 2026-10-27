@@ -28,6 +28,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - 移除 ZCode provider 及其全部逻辑：app-server 接入、`~/.zcode` SQLite 会话读取与变更监视（每 15 秒轮询）、会话归档写回、ZCode TUI hook bridge（`/api/zcode-bridge` 与「全部会话」页的审批卡片）、新建会话页的 MCP 状态面板，以及 `test:zcode-app-server-smoke` 脚本。旧数据中的 `zcode` 会话不再出现在列表中，按已退役 provider 处理（相关接口返回 410）；Yep 从未修改的 ZCode 原始数据仍保留在 `~/.zcode`。曾安装 hook 插件的用户可删除 `~/.zcode/plugins/yep-bridge` 与 `~/.zcode/yep-bridge.json`。仅被 ZCode 使用的 SQLite 查询 worker 一并删除；Pi 与 Codex 共用的编辑分支推导迁至 `sessions/copied-prefix-branch.ts`，行为不变。
 
 ### Fixed
+- Pi 进程启动尚未就绪时查询命令列表（会话加载、输入框命令菜单）不再抛错并在 runtime 日志里打印完整堆栈，改为返回该目录最近一次记录的命令列表；进程就绪后照常返回实时列表。
 - 修复 Codex 会话切换到轻量目录后，侧栏及项目会话列表不再显示累计 token 用量的问题。只为实际返回的会话补齐用量，复用按文件变化校验的摘要缓存，并保留压缩、回退后的统计口径。
 - 修复外置 agent runtime（`YEP_RUNTIME_EXTERNAL=true`）下会话中途切换思考等级与上下文压缩请求返回 404：runtime 控制端口补上 `/processes/:id/reasoning-effort` 与 `/processes/:id/compact`。
 - 修复 Pi 等 provider 读取图片后侧边预览只显示 `Read image file [image/png]`／`[Image]` 两行文本：这类图片字节在转录中被压成占位文本的 Read 结果，现在按文件路径打开图片——项目内文件走项目文件预览，其他路径（如 `/tmp`）走本地图片接口，摘要显示为“(image)”而不是“2 lines”。
