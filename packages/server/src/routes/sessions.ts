@@ -18,6 +18,8 @@ import {
   isUrlProjectId,
 } from "@yep-anywhere/shared";
 import { Hono } from "hono";
+import { readAgentCommandCache } from "../agent-commands/command-cache.js";
+import { AgentCommandService } from "../agent-commands/service.js";
 import {
   ArchiveError,
   type ArchivedSessionRecord,
@@ -167,6 +169,8 @@ const CODEX_CANONICAL_MAX_ROLLOUT_BYTES = (() => {
 
 export interface SessionsDeps {
   sessionDisplayService?: SessionDisplayService;
+  /** Composer command/skill lists (live process, cache, or skill scan). */
+  agentCommandService?: AgentCommandService;
   runtimeController?: RuntimeController;
   /** Shared pending-input authority used by HTTP and channel adapters. */
   sessionInteractionService?: SessionInteractionService;
@@ -856,9 +860,16 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         .catch(() => null);
       if (live) return live;
     }
-    if (provider !== "pi") return null;
-    return readPiCommandCache(projectPath).catch(() => null);
+    if (provider === "pi") {
+      return readPiCommandCache(projectPath).catch(() => null);
+    }
+    if (provider === "mcode" || provider === "cursor") {
+      return readAgentCommandCache(provider, projectPath).catch(() => null);
+    }
+    return null;
   };
+  const agentCommandService =
+    deps.agentCommandService ?? new AgentCommandService();
   const sessionInteractionService =
     deps.sessionInteractionService ??
     new SessionInteractionService({
@@ -1064,6 +1075,52 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         requestedSessionId,
       },
     });
+  });
+
+  // GET /api/projects/:projectId/agent-commands?provider=&sessionId= -
+  // Commands and skills for the composer. Works without a session (new
+  // session form) and for idle sessions; a running process answers live.
+  routes.get("/projects/:projectId/agent-commands", async (c) => {
+    const projectId = c.req.param("projectId");
+    if (!isUrlProjectId(projectId)) {
+      return c.json({ error: "Invalid project ID format" }, 400);
+    }
+    const provider = c.req.query("provider")?.trim();
+    if (!provider) {
+      return c.json({ error: "provider is required" }, 400);
+    }
+    const project = await deps.scanner.getOrCreateProject(projectId);
+    if (!project) {
+      return c.json({ error: "Project not found" }, 404);
+    }
+    const sessionId = c.req.query("sessionId")?.trim() || undefined;
+    const process = sessionId
+      ? await runtimeController
+          .getProcessSnapshotForSession(sessionId)
+          .catch(() => null)
+      : null;
+    const liveProcess = process?.provider === provider ? process : null;
+    const listing = await agentCommandService.list(provider, project.path, {
+      ...(liveProcess?.supportsDynamicCommands
+        ? {
+            liveCommands: () =>
+              runtimeController.getSupportedCommands(liveProcess.id),
+          }
+        : {}),
+      ...(liveProcess && provider === "codex" && sessionId
+        ? {
+            liveCodexSkills: async () => {
+              const result = await runtimeController.executeCodexControl({
+                sessionId,
+                request: { control: "skills/list" },
+              });
+              if (!result.ok) throw new Error(result.error.message);
+              return result.data;
+            },
+          }
+        : {}),
+    });
+    return c.json(listing);
   });
 
   // GET /api/projects/:projectId/sessions/:sessionId/agents - Get agent mappings

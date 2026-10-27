@@ -257,6 +257,29 @@ export interface SlashCommand {
 
 export type SlashCommandSource = "extension" | "prompt" | "skill";
 
+/** A skill as the provider resolves it (Codex `$name` mentions need `path`). */
+export interface AgentSkill {
+  name: string;
+  description: string;
+  /** Absolute `SKILL.md` path. */
+  path?: string;
+}
+
+/**
+ * Commands and skills the composer can offer for one provider and project.
+ * `live` comes from a running provider process, `cache` from the last list a
+ * process reported for the directory, `scan` from reading the provider's
+ * skill directories when neither exists yet.
+ */
+export interface AgentCommandListing {
+  provider: string;
+  origin: "live" | "cache" | "scan" | "none";
+  /** `/` commands, including skills for providers that invoke them with `/`. */
+  commands: SlashCommand[];
+  /** Codex `$` skills; empty for providers that list skills as commands. */
+  skills: AgentSkill[];
+}
+
 /**
  * A selectable Codex model source (Codex `model_provider`) surfaced to the UI.
  *

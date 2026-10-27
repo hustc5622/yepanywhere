@@ -21,6 +21,8 @@ import {
   type PermissionMode,
   withCanonicalFilePath,
 } from "@yep-anywhere/shared";
+import { AcpCommandTracker } from "../../agent-commands/acp-commands.js";
+import { readAgentCommandCache } from "../../agent-commands/command-cache.js";
 import { getLogger } from "../../logging/logger.js";
 import { CURSOR_ACP_SESSIONS_DIR } from "../../sessions/cursor-reader.js";
 import { readCursorSessionDir } from "../../sessions/cursor-store.js";
@@ -170,7 +172,8 @@ export class CursorProvider implements AgentProvider {
   readonly usesReasoningLaunchSettings = false;
   // runSession reads the next prompt only after streamPrompt finishes.
   readonly defersInputDuringTurn = true;
-  readonly supportsSlashCommands = false;
+  // `/` commands and skills come from ACP `available_commands_update`.
+  readonly supportsSlashCommands = true;
 
   async isInstalled(): Promise<boolean> {
     return (await findCursorAgentPath()) !== null;
@@ -247,6 +250,7 @@ export class CursorProvider implements AgentProvider {
     });
     const client = claimed?.client ?? new ACPClient();
     let sessionId: string | null = claimed?.sessionId ?? null;
+    const commands = new AcpCommandTracker("cursor", options.cwd);
     const iterator = this.runSession(
       client,
       sessionOptions,
@@ -256,6 +260,7 @@ export class CursorProvider implements AgentProvider {
         sessionId = id;
       },
       claimed,
+      commands,
     );
     return {
       iterator,
@@ -285,6 +290,12 @@ export class CursorProvider implements AgentProvider {
         await client.setSessionMode(sessionId, toCursorMode(mode));
         sessionOptions.permissionMode = mode;
       },
+      // A prepared (pre-warmed) client may have sent its list before this
+      // session attached, so fall back to the per-directory cache.
+      supportedCommands: async () =>
+        (await commands.current()) ??
+        (await readAgentCommandCache("cursor", options.cwd)) ??
+        [],
     };
   }
 
@@ -295,6 +306,7 @@ export class CursorProvider implements AgentProvider {
     signal: AbortSignal,
     onSessionId: (sessionId: string) => void,
     handoff?: { sessionId?: string } | null,
+    commands?: AcpCommandTracker,
   ): AsyncIterableIterator<SDKMessage> {
     const agentPath = await findCursorAgentPath();
     if (!agentPath) {
@@ -311,6 +323,8 @@ export class CursorProvider implements AgentProvider {
     const toolNames = new Map<string, string>();
     let activeSessionId = handoff?.sessionId ?? "";
     client.setSessionUpdateCallback((update) => {
+      // Cursor announces its commands and skills as session metadata.
+      if (commands?.accept(update)) return;
       updateQueue.push(update);
     });
     client.setPermissionRequestCallback((request) =>

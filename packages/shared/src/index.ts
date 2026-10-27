@@ -163,6 +163,8 @@ export type {
   LlmGatewaySessionConfig,
   SlashCommand,
   SlashCommandSource,
+  AgentSkill,
+  AgentCommandListing,
   PermissionMode,
   CodexMcpMode,
   CodexServiceTier,

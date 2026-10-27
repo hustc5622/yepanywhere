@@ -37,6 +37,8 @@ import type {
   SessionUpdate,
 } from "@agentclientprotocol/sdk";
 import type { ModelInfo } from "@yep-anywhere/shared";
+import { AcpCommandTracker } from "../../agent-commands/acp-commands.js";
+import { readAgentCommandCache } from "../../agent-commands/command-cache.js";
 import { getLogger } from "../../logging/logger.js";
 import {
   MCODE_DATA_DIR,
@@ -340,7 +342,8 @@ export class McodeProvider implements AgentProvider {
   ] as const;
   // Thinking depth is exposed per model through supportedReasoningEfforts.
   readonly supportsThinkingToggle = false;
-  readonly supportsSlashCommands = false;
+  // `/` built-ins and skills come from ACP `available_commands_update`.
+  readonly supportsSlashCommands = true;
 
   private readonly mcodePath?: string;
 
@@ -456,12 +459,14 @@ export class McodeProvider implements AgentProvider {
     if (options.initialMessage) queue.push(options.initialMessage);
 
     const client = new ACPClient();
+    const commands = new AcpCommandTracker("mcode", options.cwd);
     const iterator = this.runSession(
       client,
       options,
       queue,
       state,
       abortController.signal,
+      commands,
     );
 
     const requireSession = (): string => {
@@ -532,6 +537,10 @@ export class McodeProvider implements AgentProvider {
         state.reasoningEffort = effort;
       },
       supportedModels: () => this.getAvailableModels(),
+      supportedCommands: async () =>
+        (await commands.current()) ??
+        (await readAgentCommandCache("mcode", options.cwd)) ??
+        [],
     };
   }
 
@@ -541,6 +550,7 @@ export class McodeProvider implements AgentProvider {
     queue: MessageQueue,
     state: McodeSessionState,
     signal: AbortSignal,
+    commands?: AcpCommandTracker,
   ): AsyncIterableIterator<SDKMessage> {
     const mcodePath = await this.findMcodePath();
     if (!mcodePath) {
@@ -555,6 +565,9 @@ export class McodeProvider implements AgentProvider {
     const updateQueue: SessionNotification[] = [];
     const toolNames = new Map<string, string>();
     client.setSessionUpdateCallback((update) => {
+      // The `/` list (built-ins plus skills) arrives right after
+      // session/new or resume; it is metadata, not a transcript row.
+      if (commands?.accept(update)) return;
       updateQueue.push(update);
     });
     client.setPermissionRequestCallback((request) =>
