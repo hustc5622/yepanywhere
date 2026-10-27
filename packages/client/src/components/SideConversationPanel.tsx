@@ -1,13 +1,24 @@
-import { useEffect, useRef, useState } from "react";
+import { SIDE_CONVERSATION_MAX_PROMPT } from "@yep-anywhere/shared";
+import { useCallback, useEffect, useRef, useState } from "react";
+import { useOptionalToastContext } from "../contexts/ToastContext";
+import { useComposer } from "../hooks/useComposer";
+import { useComposerUploads } from "../hooks/useComposerUploads";
+import { useConnection } from "../hooks/useConnection";
 import { useDraftPersistence } from "../hooks/useDraftPersistence";
 import type { useSideConversation } from "../hooks/useSideConversation";
 import { useI18n } from "../i18n";
 import { getCurrentInstallId } from "../lib/storageKeys";
+import { ComposerEditor } from "./ComposerEditor";
+import { ComposerToolbar } from "./ComposerToolbar";
 import { TextBlock } from "./blocks/TextBlock";
 import "../styles/side-conversation.css";
 
+/** Side questions have no `/` commands: Yep owns the side control plane. */
+const NO_COMMANDS: never[] = [];
+
 export function SideConversationPanel({
   side,
+  projectId,
   sessionId,
   parentStatus,
   visible,
@@ -16,6 +27,8 @@ export function SideConversationPanel({
   onBringBack,
 }: {
   side: ReturnType<typeof useSideConversation>;
+  /** Project of the parent session; side images upload into its session. */
+  projectId?: string;
   sessionId: string;
   parentStatus: string;
   visible: boolean;
@@ -29,13 +42,68 @@ export function SideConversationPanel({
   const draftKey = `side-draft-${getCurrentInstallId() ?? location.host}-${sessionId}-${conversation?.id ?? "new"}`;
   const [draft, setDraft, controls] = useDraftPersistence(draftKey);
   const panelRef = useRef<HTMLElement>(null);
-  const inputRef = useRef<HTMLTextAreaElement>(null);
   const logRef = useRef<HTMLDivElement>(null);
   const follow = useRef(true);
   const running =
     conversation?.status === "running" || conversation?.status === "stopping";
   const ended = conversation?.status === "closed";
   const canSend = side.supported && side.availability === "ready";
+  const toast = useOptionalToastContext();
+  const connection = useConnection();
+  const canAttachImages =
+    side.capabilities.images && !!projectId && !!sessionId && !ended;
+  const uploads = useComposerUploads({
+    projectId,
+    sessionId,
+    onError: useCallback(
+      (file: File, uploadError: unknown) =>
+        toast?.showToast(
+          t("sideChatUploadFailed", {
+            file: file.name,
+            message:
+              uploadError instanceof Error
+                ? uploadError.message
+                : String(uploadError),
+          }),
+          "error",
+        ),
+      [toast, t],
+    ),
+  });
+  const submitRef = useRef<() => void>(() => {});
+  const composer = useComposer({
+    text: draft,
+    setText: setDraft,
+    attachments: uploads.composerAttachments,
+    describeAttachment: (attachment) => attachment,
+    getClipboardSource: (attachment) => {
+      const apiPath = attachment.apiPath;
+      if (!apiPath) return null;
+      return {
+        name: attachment.name,
+        mimeType: attachment.mimeType,
+        read: () => connection.fetchBlob(apiPath.slice("/api".length)),
+        reference: apiPath,
+      };
+    },
+    canAttach: canAttachImages,
+    // Side providers read images only; other files stay out of the draft.
+    acceptFile: (file) => file.type.startsWith("image/"),
+    onRejectFiles: (files) =>
+      toast?.showToast(
+        t("sideChatImagesOnly", {
+          names: files.map((file) => file.name).join(", "),
+        }),
+        "error",
+      ),
+    disabled: ended,
+    onAttach: uploads.attach,
+    onRemove: uploads.remove,
+    onRestore: uploads.restore,
+    commandConfigs: NO_COMMANDS,
+    onSubmit: () => submitRef.current(),
+  });
+  const tooLong = draft.length > SIDE_CONVERSATION_MAX_PROMPT;
   const availabilityLabel =
     side.availability === "checking"
       ? "sideChatChecking"
@@ -44,10 +112,11 @@ export function SideConversationPanel({
         : side.availability === "connection_error"
           ? "sideChatConnectionError"
           : "sideChatNotReady";
+  // biome-ignore lint/correctness/useExhaustiveDependencies: focus only when the panel opens.
   useEffect(() => {
     if (!visible) return;
     const previous = document.activeElement;
-    inputRef.current?.focus();
+    composer.editorRef.current?.focus();
     return () => {
       if (previous instanceof HTMLElement && previous.isConnected)
         previous.focus();
@@ -59,11 +128,22 @@ export function SideConversationPanel({
       logRef.current.scrollTop = logRef.current.scrollHeight;
   }, [visible, conversation?.version]);
   const submit = async () => {
-    const text = draft.trim();
-    if (!text || busy || running || ended || !canSend) return;
+    if (busy || running || ended || !canSend || tooLong) return;
+    if (uploads.hasPendingUploads) {
+      toast?.showToast(t("sideChatUploading"), "info");
+      return;
+    }
+    const text = composer.takeText().trim();
+    if (!text) return;
+    const images = uploads.attachments.map((file) => ({
+      path: file.path,
+      name: file.originalName,
+      mimeType: file.mimeType,
+    }));
     // Flush/record the submitted draft before creation changes the side ID.
     controls.clearInput();
-    if (await side.send(text, context)) {
+    if (await side.send(text, context, images)) {
+      uploads.clear();
       try {
         localStorage.removeItem(draftKey);
       } catch {
@@ -71,6 +151,9 @@ export function SideConversationPanel({
       }
       if (!controls.getText?.()) controls.clearDraft();
     } else if (!controls.getText?.()) controls.setText(text);
+  };
+  submitRef.current = () => {
+    void submit();
   };
   return (
     <aside
@@ -156,6 +239,13 @@ export function SideConversationPanel({
               {t(message.role === "user" ? "sideChatYou" : "sideChatAssistant")}
             </span>
             <TextBlock text={message.text} augmentHtml={message.html} />
+            {message.attachments && message.attachments.length > 0 && (
+              <ul className="side-conversation-attachments">
+                {message.attachments.map((attachment, index) => (
+                  <li key={`${attachment.name}-${index}`}>{attachment.name}</li>
+                ))}
+              </ul>
+            )}
             {message.role === "assistant" && message.text && !running && (
               <button
                 className="side-conversation-handoff"
@@ -207,29 +297,18 @@ export function SideConversationPanel({
             </select>
           </label>
         )}
-        <textarea
-          ref={inputRef}
-          aria-label={t("sideChatInput")}
+        <ComposerEditor
+          composer={composer}
+          containerClassName="side-conversation-editor"
           placeholder={t("sideChatInput")}
-          value={draft}
-          maxLength={32000}
-          rows={3}
           disabled={ended}
-          aria-describedby={
-            !canSend ? "side-conversation-availability" : undefined
-          }
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (
-              event.key === "Enter" &&
-              !event.shiftKey &&
-              !event.nativeEvent.isComposing
-            ) {
-              event.preventDefault();
-              void submit();
-            }
-          }}
+          rows={3}
         />
+        {tooLong && (
+          <p className="side-conversation-availability" role="alert">
+            {t("sideChatTooLong", { max: SIDE_CONVERSATION_MAX_PROMPT })}
+          </p>
+        )}
         {!canSend && (
           <p
             id="side-conversation-availability"
@@ -239,38 +318,69 @@ export function SideConversationPanel({
             {t(availabilityLabel)}
           </p>
         )}
-        <div className="side-conversation-actions">
-          {conversation && (
-            <button
-              type="button"
-              disabled={busy || running}
-              onClick={() => {
-                if (ended) void side.startNew(context);
-                else void side.close();
-              }}
-            >
-              {t(ended ? "sideChatNew" : "sideChatEnd")}
-            </button>
-          )}
-          {running ? (
-            <button
-              type="button"
-              disabled={busy || conversation.status === "stopping"}
-              onClick={() => {
-                void side.interrupt();
-              }}
-            >
-              {t("sideChatStop")}
-            </button>
-          ) : (
-            <button
-              type="submit"
-              disabled={busy || !canSend || ended || !draft.trim()}
-            >
-              {t(busy ? "sideChatStarting" : "sideChatSend")}
-            </button>
-          )}
-        </div>
+        <ComposerToolbar
+          variant="session"
+          className="side-conversation-toolbar"
+          attach={
+            side.capabilities.images
+              ? {
+                  onClick: composer.openFilePicker,
+                  disabled: !canAttachImages,
+                  title: canAttachImages
+                    ? t("sideChatAttachImages")
+                    : t("sideChatAttachUnsupported"),
+                  count: uploads.attachments.length,
+                }
+              : null
+          }
+          copy={{
+            onCopy: composer.document.copyAll,
+            disabled: !draft.trim() && uploads.composerAttachments.length === 0,
+          }}
+          voice={{ ...composer.voice, disabled: ended }}
+          actionsClassName="side-conversation-actions"
+          actions={
+            <>
+              {conversation && (
+                <button
+                  type="button"
+                  disabled={busy || running}
+                  onClick={() => {
+                    if (ended) void side.startNew(context);
+                    else void side.close();
+                  }}
+                >
+                  {t(ended ? "sideChatNew" : "sideChatEnd")}
+                </button>
+              )}
+              {running ? (
+                <button
+                  type="button"
+                  disabled={busy || conversation.status === "stopping"}
+                  onClick={() => {
+                    void side.interrupt();
+                  }}
+                >
+                  {t("sideChatStop")}
+                </button>
+              ) : (
+                <button
+                  type="submit"
+                  disabled={
+                    busy ||
+                    !canSend ||
+                    ended ||
+                    tooLong ||
+                    uploads.hasPendingUploads ||
+                    !draft.trim()
+                  }
+                >
+                  {t(busy ? "sideChatStarting" : "sideChatSend")}
+                </button>
+              )}
+            </>
+          }
+        />
       </form>
     </aside>
   );

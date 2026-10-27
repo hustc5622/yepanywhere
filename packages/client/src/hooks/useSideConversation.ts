@@ -1,4 +1,6 @@
 import type {
+  SideConversationAttachment,
+  SideConversationCapabilities,
   SideConversationRequest,
   SideConversationResponse,
   SideConversationSnapshot,
@@ -21,6 +23,8 @@ export function useSideConversation(
 ) {
   const [conversation, setConversation] = useState<SideConversationSnapshot>();
   const [supported, setSupported] = useState(false);
+  const [capabilities, setCapabilities] =
+    useState<SideConversationCapabilities>({ images: false });
   const [availability, setAvailability] =
     useState<SideConversationAvailability>("checking");
   const [error, setError] = useState<string>();
@@ -31,7 +35,13 @@ export function useSideConversation(
   const mutating = useRef(false);
   const createId = useRef(generateUUID());
   const pendingSend = useRef<
-    { id: string; text: string; requestId: string } | undefined
+    | {
+        id: string;
+        text: string;
+        requestId: string;
+        attachments?: SideConversationAttachment[];
+      }
+    | undefined
   >(undefined);
   useEffect(() => {
     mounted.current = true;
@@ -44,6 +54,7 @@ export function useSideConversation(
   const accept = useCallback((response: SideConversationResponse) => {
     if (!mounted.current) return;
     setSupported(response.supported);
+    if (response.capabilities) setCapabilities(response.capabilities);
     setAvailability(
       response.supported ? "ready" : (response.reason ?? "unsupported"),
     );
@@ -128,7 +139,11 @@ export function useSideConversation(
   );
 
   const send = useCallback(
-    async (text: string, context: "snapshot" | "empty" = "snapshot") => {
+    async (
+      text: string,
+      context: "snapshot" | "empty" = "snapshot",
+      attachments: SideConversationAttachment[] = [],
+    ) => {
       if (mutating.current || !supported || availability !== "ready")
         return false;
       let current = state.current;
@@ -141,15 +156,20 @@ export function useSideConversation(
         current = result?.conversation;
         if (!current || current.status !== "idle") return false;
       }
+      const attachmentKey = attachments.map((a) => a.path).join("\u0000");
       if (
         !pendingSend.current ||
         pendingSend.current.id !== current.id ||
-        pendingSend.current.text !== text
+        pendingSend.current.text !== text ||
+        (pendingSend.current.attachments ?? [])
+          .map((a) => a.path)
+          .join("\u0000") !== attachmentKey
       )
         pendingSend.current = {
           id: current.id,
           text,
           requestId: generateUUID(),
+          ...(attachments.length > 0 ? { attachments } : {}),
         };
       const result = await request({ action: "send", ...pendingSend.current });
       const accepted =
@@ -185,6 +205,7 @@ export function useSideConversation(
   return {
     conversation,
     supported,
+    capabilities,
     availability,
     error,
     busy,

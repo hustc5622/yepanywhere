@@ -2698,6 +2698,7 @@ function SessionPageContent({
       </div>
       <SideConversationPanel
         side={side}
+        projectId={projectId}
         sessionId={actualSessionId}
         visible={sideVisible}
         mobile={!isWideScreen}

@@ -48,7 +48,9 @@
   font-size: var(--font-size-lg);
   margin: 0;
 }
-.side-conversation button,
+/* Panel controls only: attachment cards keep their own compact buttons. */
+.side-conversation
+  button:not(.attachment-composer button):not(.attachment-list button),
 .side-conversation select {
   color: var(--text-primary);
   background: var(--bg-secondary);
@@ -59,7 +61,10 @@
   cursor: pointer;
   min-height: 40px;
 }
-.side-conversation button:hover:not(:disabled) {
+.side-conversation
+  button:not(.attachment-composer button):not(
+    .attachment-list button
+  ):hover:not(:disabled) {
   background: var(--bg-hover);
 }
 .side-conversation button:disabled {
@@ -150,6 +155,39 @@
 .side-conversation-composer textarea::placeholder {
   color: var(--text-secondary);
 }
+.side-conversation-editor {
+  position: relative;
+  margin: var(--space-2) 0;
+}
+.side-conversation-editor > .attachment-composer {
+  box-sizing: border-box;
+  width: 100%;
+  max-height: 28dvh;
+  padding: var(--space-3);
+  color: var(--text-primary);
+  background: var(--bg-primary);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+.side-conversation-toolbar {
+  flex-wrap: wrap;
+}
+.side-conversation-toolbar .side-conversation-actions {
+  flex: 1;
+}
+.side-conversation-attachments {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1);
+  margin: var(--space-1) 0 0;
+  padding: 0;
+  list-style: none;
+  font-size: var(--font-size-sm);
+  color: var(--text-secondary);
+}
+.side-conversation-attachments li::before {
+  content: "🖼 ";
+}
 .side-conversation-setting {
   display: flex;
   align-items: center;
@@ -174,7 +212,8 @@
 }
 
 @media (max-width: 600px) {
-  .side-conversation-composer textarea {
+  .side-conversation-composer textarea,
+  .side-conversation-editor > .attachment-composer {
     font-size: var(--font-size-input);
   }
 }
