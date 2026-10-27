@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { useElapsedLabel } from "../hooks/useElapsedLabel";
 import { useI18n } from "../i18n";
 import {
-  type ClipboardImageSource,
+  type ClipboardAttachmentSource,
   getSelectionAwareCopyText,
   writeClipboardText,
   writeClipboardUserInput,
@@ -32,8 +32,8 @@ interface MessageActionsProps {
   contextBefore?: ContextUsage;
   /** Plain-text payload to copy. When omitted, the copy button is hidden. */
   copyText?: string;
-  /** Images belonging to the same user input. */
-  copyImages?: ClipboardImageSource[];
+  /** Attachments (images and files) belonging to the same user input. */
+  copyAttachments?: ClipboardAttachmentSource[];
   /** Place a copy-only action inside a message bubble and keep it visible. */
   placement?: "row" | "bubble";
   /**
@@ -44,7 +44,7 @@ interface MessageActionsProps {
 }
 
 type CopyFeedback = {
-  status: "copied" | "copied-images" | "partial" | "failed";
+  status: "copied" | "copied-attachments" | "partial" | "failed";
 } | null;
 
 /**
@@ -65,7 +65,7 @@ export function MessageActions({
   runningPhase,
   contextBefore,
   copyText,
-  copyImages = [],
+  copyAttachments = [],
   placement = "row",
   onEdit,
 }: MessageActionsProps) {
@@ -88,15 +88,19 @@ export function MessageActions({
       actionsRef.current?.closest(".assistant-turn, .user-prompt-container") ??
       actionsRef.current;
     const textToCopy = getSelectionAwareCopyText(copyText, selectionRoot);
-    const shouldCopyImages = copyImages.length > 0 && textToCopy === copyText;
+    const shouldCopyAttachments =
+      copyAttachments.length > 0 && textToCopy === copyText;
 
     try {
-      if (shouldCopyImages) {
-        const result = await writeClipboardUserInput(textToCopy, copyImages);
+      if (shouldCopyAttachments) {
+        const result = await writeClipboardUserInput(
+          textToCopy,
+          copyAttachments,
+        );
         setCopyFeedback({
           status:
-            result.copiedImageCount === result.requestedImageCount
-              ? "copied-images"
+            result.copiedAttachmentCount === result.requestedAttachmentCount
+              ? "copied-attachments"
               : "partial",
         });
       } else {
@@ -107,20 +111,20 @@ export function MessageActions({
       console.error("Failed to copy message:", error);
       setCopyFeedback({ status: "failed" });
     }
-  }, [copyImages, copyText]);
+  }, [copyAttachments, copyText]);
 
   const copyStatus = copyFeedback?.status;
   const copyLabel =
-    copyStatus === "copied-images"
-      ? t("messageActionCopiedWithImages")
+    copyStatus === "copied-attachments"
+      ? t("messageActionCopiedWithAttachments")
       : copyStatus === "copied"
         ? t("messageActionCopied")
         : copyStatus === "partial"
-          ? t("messageActionCopiedWithoutAllImages")
+          ? t("messageActionCopiedWithoutAllAttachments")
           : copyStatus === "failed"
             ? t("messageActionCopyFailed")
-            : copyImages.length > 0
-              ? t("messageActionCopyWithImages")
+            : copyAttachments.length > 0
+              ? t("messageActionCopyWithAttachments")
               : t("messageActionCopy");
 
   const contextTokenLabel =
@@ -142,7 +146,8 @@ export function MessageActions({
       : null;
 
   const hasCopyPayload =
-    copyText !== undefined && (copyText.length > 0 || copyImages.length > 0);
+    copyText !== undefined &&
+    (copyText.length > 0 || copyAttachments.length > 0);
 
   if (
     !timestamp &&
@@ -222,7 +227,7 @@ export function MessageActions({
         <button
           type="button"
           className={`message-actions-copy${
-            copyStatus === "copied" || copyStatus === "copied-images"
+            copyStatus === "copied" || copyStatus === "copied-attachments"
               ? " is-copied"
               : copyStatus === "partial"
                 ? " is-partial"
@@ -235,7 +240,7 @@ export function MessageActions({
           aria-live="polite"
           title={copyLabel}
         >
-          {copyStatus === "copied" || copyStatus === "copied-images" ? (
+          {copyStatus === "copied" || copyStatus === "copied-attachments" ? (
             <CopiedIcon />
           ) : copyStatus === "partial" ? (
             <CopyPartialIcon />

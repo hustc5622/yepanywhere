@@ -1,24 +1,55 @@
+import { isManagedUploadDownloadUrl } from "@yep-anywhere/shared";
+
 const RECENT_SELECTION_TTL_MS = 2000;
 
 const USER_INPUT_CLIPBOARD_ATTRIBUTE = "data-yep-anywhere-user-input";
-const USER_INPUT_CLIPBOARD_VERSION = "1";
-const USER_INPUT_IMAGE_NAME_ATTRIBUTE = "data-yep-anywhere-attachment-name";
+/** v1 carried images only; v2 carries every attachment, in order. */
+const USER_INPUT_CLIPBOARD_VERSION = "2";
+const USER_INPUT_READABLE_VERSIONS = ["1", "2"];
+const ATTACHMENT_NAME_ATTRIBUTE = "data-yep-anywhere-attachment-name";
+const ATTACHMENT_TYPE_ATTRIBUTE = "data-yep-anywhere-attachment-type";
+const ATTACHMENT_DATA_ATTRIBUTE = "data-yep-anywhere-attachment-data";
+const ATTACHMENT_REF_ATTRIBUTE = "data-yep-anywhere-attachment-ref";
+const ATTACHMENT_MISSING_ATTRIBUTE = "data-yep-anywhere-attachment-missing";
 
-export interface ClipboardImageSource {
+/** Larger files travel as a same-server reference instead of inline bytes. */
+export const CLIPBOARD_INLINE_FILE_LIMIT = 5 * 1024 * 1024;
+export const CLIPBOARD_INLINE_TOTAL_LIMIT = 20 * 1024 * 1024;
+
+export interface ClipboardAttachmentSource {
   name: string;
   mimeType?: string;
-  /** Browser-readable URL. Missing URLs are reported as a partial copy. */
+  /** Reads the bytes to inline (uploads via the active connection, local Files). */
+  read?: () => Promise<Blob>;
+  /** Browser-readable URL, used when `read` is absent. */
   sourceUrl?: string;
+  /**
+   * Managed upload path (`/api/projects/.../upload/...`) another Yep composer
+   * can fetch again when the file is too large to inline.
+   */
+  reference?: string;
 }
 
+/** @deprecated Images are ordinary attachment sources now. */
+export type ClipboardImageSource = ClipboardAttachmentSource;
+
 export interface ClipboardUserInputCopyResult {
-  requestedImageCount: number;
-  copiedImageCount: number;
+  requestedAttachmentCount: number;
+  copiedAttachmentCount: number;
+  /** Names that could not be read or referenced. */
+  failedNames: string[];
 }
+
+export type ClipboardAttachmentEntry =
+  | { kind: "file"; file: File }
+  | { kind: "reference"; name: string; mimeType: string; path: string };
 
 export interface ClipboardUserInput {
   text: string;
-  images: File[];
+  /** Every restorable attachment, in the copied order. */
+  attachments: ClipboardAttachmentEntry[];
+  /** Attachments the copying side could not include. */
+  missingNames: string[];
 }
 
 type RecentTextSelection = {
@@ -331,11 +362,6 @@ export async function writeClipboardText(text: string): Promise<void> {
   writeClipboardTextWithExecCommand(text);
 }
 
-interface LoadedClipboardImage {
-  dataUrl: string;
-  name: string;
-}
-
 function getClipboardItemWriter():
   | ((items: ClipboardItem[]) => Promise<void>)
   | null {
@@ -371,21 +397,35 @@ function renderClipboardTextHtml(text: string): string {
   return escapeHtml(text).replaceAll("\n", "<br>");
 }
 
+type PreparedAttachment =
+  | { kind: "inline"; name: string; mimeType: string; dataUrl: string }
+  | { kind: "reference"; name: string; mimeType: string; path: string }
+  | { kind: "missing"; name: string };
+
 function buildUserInputClipboardHtml(
   text: string,
-  images: LoadedClipboardImage[],
+  attachments: PreparedAttachment[],
 ): string {
-  const renderedImages = images
-    .map(
-      (image) =>
-        `<img src="${escapeHtml(image.dataUrl)}" alt="${escapeHtml(image.name)}" ${USER_INPUT_IMAGE_NAME_ATTRIBUTE}="${escapeHtml(image.name)}">`,
-    )
-    .join("");
+  const parts = attachments.map((attachment) => {
+    const name = escapeHtml(attachment.name);
+    if (attachment.kind === "missing") {
+      return `<span ${ATTACHMENT_NAME_ATTRIBUTE}="${name}" ${ATTACHMENT_MISSING_ATTRIBUTE}=""></span>`;
+    }
+    const type = escapeHtml(attachment.mimeType);
+    if (attachment.kind === "reference") {
+      return `<span ${ATTACHMENT_NAME_ATTRIBUTE}="${name}" ${ATTACHMENT_TYPE_ATTRIBUTE}="${type}" ${ATTACHMENT_REF_ATTRIBUTE}="${escapeHtml(attachment.path)}">${name}</span>`;
+    }
+    // Images stay visible when pasted into other rich editors; other files
+    // keep their bytes in an attribute only Yep reads.
+    return attachment.mimeType.startsWith("image/")
+      ? `<img src="${escapeHtml(attachment.dataUrl)}" alt="${name}" ${ATTACHMENT_NAME_ATTRIBUTE}="${name}" ${ATTACHMENT_TYPE_ATTRIBUTE}="${type}">`
+      : `<span ${ATTACHMENT_NAME_ATTRIBUTE}="${name}" ${ATTACHMENT_TYPE_ATTRIBUTE}="${type}" ${ATTACHMENT_DATA_ATTRIBUTE}="${escapeHtml(attachment.dataUrl)}">${name}</span>`;
+  });
 
   return [
     `<div ${USER_INPUT_CLIPBOARD_ATTRIBUTE}="${USER_INPUT_CLIPBOARD_VERSION}">`,
     `<div style="white-space: pre-wrap">${renderClipboardTextHtml(text)}</div>`,
-    renderedImages,
+    ...parts,
     "</div>",
   ].join("");
 }
@@ -427,61 +467,134 @@ function normalizedMimeType(value: string | undefined): string {
   return value?.split(";", 1)[0]?.trim().toLowerCase() ?? "";
 }
 
-async function loadClipboardImage(
-  image: ClipboardImageSource,
-): Promise<LoadedClipboardImage> {
-  const sourceUrl = image.sourceUrl?.trim();
+async function readAttachmentBlob(
+  attachment: ClipboardAttachmentSource,
+): Promise<Blob> {
+  if (attachment.read) return attachment.read();
+  const sourceUrl = attachment.sourceUrl?.trim();
   if (!sourceUrl) {
-    throw new Error(`No browser-readable URL for ${image.name}`);
+    throw new Error(`No readable source for ${attachment.name}`);
   }
-
-  const inlineMatch = /^data:(image\/[^;,]+)(?:;base64)?,/i.exec(sourceUrl);
-  if (inlineMatch) {
-    return { dataUrl: sourceUrl, name: image.name };
+  if (/^data:/i.test(sourceUrl)) {
+    const inline = dataUrlToFile(
+      sourceUrl,
+      attachment.name,
+      1,
+      attachment.mimeType,
+    );
+    if (!inline) throw new Error(`Invalid inline data for ${attachment.name}`);
+    return inline;
   }
-
   const response = await fetch(sourceUrl, { credentials: "include" });
   if (!response.ok) {
     throw new Error(
-      `Unable to load ${image.name}: HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`,
+      `Unable to load ${attachment.name}: HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`,
     );
   }
+  return response.blob();
+}
 
-  const responseBlob = await response.blob();
-  const responseMimeType = normalizedMimeType(responseBlob.type);
-  const declaredMimeType = normalizedMimeType(image.mimeType);
-  const mimeType = responseMimeType.startsWith("image/")
-    ? responseMimeType
-    : declaredMimeType;
-  if (!mimeType.startsWith("image/")) {
-    throw new Error(`Clipboard attachment is not an image: ${image.name}`);
+/** Prefer a specific declared type over generic download types. */
+function resolveMimeType(blob: Blob, declared: string | undefined): string {
+  const fromBlob = normalizedMimeType(blob.type);
+  const fromDeclared = normalizedMimeType(declared);
+  if (fromBlob && fromBlob !== "application/octet-stream") return fromBlob;
+  return fromDeclared || fromBlob || "application/octet-stream";
+}
+
+async function prepareAttachments(
+  attachments: ClipboardAttachmentSource[],
+): Promise<PreparedAttachment[]> {
+  let inlineBytes = 0;
+  const prepared: PreparedAttachment[] = [];
+  // Sequential: keeps the inline budget deterministic and memory bounded.
+  for (const attachment of attachments) {
+    const reference =
+      attachment.reference && isManagedUploadDownloadUrl(attachment.reference)
+        ? attachment.reference
+        : undefined;
+    const referenceEntry = (mimeType: string): PreparedAttachment | null =>
+      reference
+        ? {
+            kind: "reference",
+            name: attachment.name,
+            mimeType,
+            path: reference,
+          }
+        : null;
+    try {
+      const blob = await readAttachmentBlob(attachment);
+      const mimeType = resolveMimeType(blob, attachment.mimeType);
+      if (
+        blob.size <= CLIPBOARD_INLINE_FILE_LIMIT &&
+        inlineBytes + blob.size <= CLIPBOARD_INLINE_TOTAL_LIMIT
+      ) {
+        inlineBytes += blob.size;
+        const typed =
+          normalizedMimeType(blob.type) === mimeType
+            ? blob
+            : new Blob([blob], { type: mimeType });
+        prepared.push({
+          kind: "inline",
+          name: attachment.name,
+          mimeType,
+          dataUrl: await blobToDataUrl(typed, mimeType),
+        });
+        continue;
+      }
+      prepared.push(
+        referenceEntry(mimeType) ?? { kind: "missing", name: attachment.name },
+      );
+    } catch {
+      prepared.push(
+        referenceEntry(
+          normalizedMimeType(attachment.mimeType) || "application/octet-stream",
+        ) ?? { kind: "missing", name: attachment.name },
+      );
+    }
   }
+  return prepared;
+}
 
-  const blob =
-    responseMimeType === mimeType
-      ? responseBlob
-      : new Blob([responseBlob], { type: mimeType });
+function copyResult(
+  requested: number,
+  prepared: PreparedAttachment[],
+): ClipboardUserInputCopyResult {
+  const failedNames = prepared.flatMap((attachment) =>
+    attachment.kind === "missing" ? [attachment.name] : [],
+  );
   return {
-    dataUrl: await blobToDataUrl(blob, mimeType),
-    name: image.name,
+    requestedAttachmentCount: requested,
+    copiedAttachmentCount: requested - failedNames.length,
+    failedNames,
   };
 }
 
 /**
- * Copy a complete user input as plain text plus rich HTML containing every
- * readable image. The HTML carries a small Yep marker so another Yep input can
- * restore all images as file attachments, even on platforms whose native
- * clipboard supports only one item.
+ * Copy a complete user input as plain text plus rich HTML that carries every
+ * attachment in order. Another Yep composer restores them all as attachments
+ * (small files inline, larger ones by managed upload reference); other apps
+ * receive the text and the images.
  */
 export async function writeClipboardUserInput(
   text: string,
-  images: ClipboardImageSource[],
+  attachments: ClipboardAttachmentSource[],
 ): Promise<ClipboardUserInputCopyResult> {
-  const requestedImageCount = images.length;
-  if (requestedImageCount === 0) {
+  const requested = attachments.length;
+  if (requested === 0) {
     await writeClipboardText(text);
-    return { requestedImageCount, copiedImageCount: 0 };
+    return {
+      requestedAttachmentCount: 0,
+      copiedAttachmentCount: 0,
+      failedNames: [],
+    };
   }
+
+  const allFailed = (): ClipboardUserInputCopyResult => ({
+    requestedAttachmentCount: requested,
+    copiedAttachmentCount: 0,
+    failedNames: attachments.map((attachment) => attachment.name),
+  });
 
   const clipboardItemWriter = getClipboardItemWriter();
   if (
@@ -489,28 +602,22 @@ export async function writeClipboardUserInput(
     (typeof window !== "undefined" && window.isSecureContext === false)
   ) {
     if (!hasUsableText(text)) {
-      throw new Error("Rich clipboard support is required to copy images");
+      throw new Error("Rich clipboard support is required to copy attachments");
     }
     await writeClipboardText(text);
-    return { requestedImageCount, copiedImageCount: 0 };
+    return allFailed();
   }
 
-  const loadedImagesPromise = Promise.allSettled(
-    images.map((image) => loadClipboardImage(image)),
-  ).then((results) =>
-    results.flatMap((result) =>
-      result.status === "fulfilled" ? [result.value] : [],
-    ),
-  );
-  const htmlBlobPromise = loadedImagesPromise.then(
-    (loadedImages) =>
-      new Blob([buildUserInputClipboardHtml(text, loadedImages)], {
+  const preparedPromise = prepareAttachments(attachments);
+  const htmlBlobPromise = preparedPromise.then(
+    (prepared) =>
+      new Blob([buildUserInputClipboardHtml(text, prepared)], {
         type: "text/html",
       }),
   );
 
   try {
-    // Start the write before awaiting image requests. This preserves the user
+    // Start the write before awaiting reads. This preserves the user
     // activation required by Safari/WebView while ClipboardItem resolves the
     // representation promises asynchronously.
     const item = new ClipboardItem(
@@ -521,50 +628,56 @@ export async function writeClipboardUserInput(
       { presentationStyle: "inline" },
     );
     await clipboardItemWriter([item]);
-    const loadedImages = await loadedImagesPromise;
-    if (loadedImages.length === 0 && !hasUsableText(text)) {
-      throw new Error("No clipboard images could be loaded");
+    const result = copyResult(requested, await preparedPromise);
+    if (result.copiedAttachmentCount === 0 && !hasUsableText(text)) {
+      throw new Error("No clipboard attachments could be loaded");
     }
-    return {
-      requestedImageCount,
-      copiedImageCount: loadedImages.length,
-    };
+    return result;
   } catch (richClipboardError) {
     if (!hasUsableText(text)) throw richClipboardError;
     try {
       await writeClipboardText(text);
-      return { requestedImageCount, copiedImageCount: 0 };
+      return allFailed();
     } catch (textClipboardError) {
       throw createClipboardError([richClipboardError, textClipboardError]);
     }
   }
 }
 
-function clipboardImageExtension(mimeType: string): string {
+function clipboardFileExtension(mimeType: string): string {
   if (mimeType === "image/jpeg") return "jpg";
   if (mimeType === "image/svg+xml") return "svg";
-  return mimeType.slice("image/".length).replace(/[^a-z0-9]/gi, "") || "png";
+  if (mimeType.startsWith("image/")) {
+    return mimeType.slice("image/".length).replace(/[^a-z0-9]/gi, "") || "png";
+  }
+  return "bin";
 }
 
 function leafClipboardFileName(value: string, fallback: string): string {
   return value.replaceAll("\\", "/").split("/").pop()?.trim() || fallback;
 }
 
-function dataUrlToImageFile(
+function dataUrlToFile(
   dataUrl: string,
   requestedName: string,
   index: number,
+  declaredType?: string,
 ): File | null {
   if (typeof File === "undefined") return null;
 
-  const match = /^data:(image\/[^;,]+)(;base64)?,([\s\S]*)$/i.exec(dataUrl);
+  const match = /^data:([^;,]*)((?:;[^;,]*)*?)(;base64)?,([\s\S]*)$/i.exec(
+    dataUrl,
+  );
   if (!match) return null;
 
-  const mimeType = normalizedMimeType(match[1]);
-  const payload = match[3] ?? "";
+  const mimeType =
+    normalizedMimeType(match[1]) ||
+    normalizedMimeType(declaredType) ||
+    "application/octet-stream";
+  const payload = match[4] ?? "";
   let bytes: Uint8Array;
   try {
-    if (match[2]) {
+    if (match[3]) {
       const binary = atob(payload.replace(/\s+/g, ""));
       bytes = Uint8Array.from(binary, (character) => character.charCodeAt(0));
     } else {
@@ -574,14 +687,14 @@ function dataUrlToImageFile(
     return null;
   }
 
-  const fallbackName = `pasted-image-${index}.${clipboardImageExtension(mimeType)}`;
+  const fallbackName = `pasted-${mimeType.startsWith("image/") ? "image" : "file"}-${index}.${clipboardFileExtension(mimeType)}`;
   const name = leafClipboardFileName(requestedName, fallbackName);
   const ownedBytes = new Uint8Array(bytes.length);
   ownedBytes.set(bytes);
   return new File([ownedBytes.buffer], name, { type: mimeType });
 }
 
-/** Read a rich user-input copy produced by `writeClipboardUserInput`. */
+/** Read a rich user-input copy produced by `writeClipboardUserInput` (v1 or v2). */
 export function readClipboardUserInput(
   clipboardData: Pick<DataTransfer, "getData"> | null | undefined,
 ): ClipboardUserInput | null {
@@ -596,27 +709,55 @@ export function readClipboardUserInput(
   if (!html) return null;
 
   const document = new DOMParser().parseFromString(html, "text/html");
-  const root = document.querySelector(
-    `[${USER_INPUT_CLIPBOARD_ATTRIBUTE}="${USER_INPUT_CLIPBOARD_VERSION}"]`,
-  );
+  const root = USER_INPUT_READABLE_VERSIONS.map((version) =>
+    document.querySelector(`[${USER_INPUT_CLIPBOARD_ATTRIBUTE}="${version}"]`),
+  ).find(Boolean);
   if (!root) return null;
 
-  const images = Array.from(
-    root.querySelectorAll(`img[${USER_INPUT_IMAGE_NAME_ATTRIBUTE}]`),
-  ).flatMap((element, index) => {
-    const dataUrl = element.getAttribute("src") ?? "";
-    const requestedName =
-      element.getAttribute(USER_INPUT_IMAGE_NAME_ATTRIBUTE) ?? "";
-    const file = dataUrlToImageFile(dataUrl, requestedName, index + 1);
-    return file ? [file] : [];
+  const attachments: ClipboardAttachmentEntry[] = [];
+  const missingNames: string[] = [];
+  const elements = Array.from(
+    root.querySelectorAll(`[${ATTACHMENT_NAME_ATTRIBUTE}]`),
+  );
+  elements.forEach((element, index) => {
+    const requestedName = element.getAttribute(ATTACHMENT_NAME_ATTRIBUTE) ?? "";
+    const declaredType = element.getAttribute(ATTACHMENT_TYPE_ATTRIBUTE) ?? "";
+    if (element.hasAttribute(ATTACHMENT_MISSING_ATTRIBUTE)) {
+      if (requestedName) missingNames.push(requestedName);
+      return;
+    }
+    const reference = element.getAttribute(ATTACHMENT_REF_ATTRIBUTE);
+    if (reference !== null) {
+      // Only managed upload routes: pasted HTML is not authority to fetch
+      // arbitrary API paths.
+      if (isManagedUploadDownloadUrl(reference) && requestedName) {
+        attachments.push({
+          kind: "reference",
+          name: leafClipboardFileName(requestedName, "attachment"),
+          mimeType:
+            normalizedMimeType(declaredType) || "application/octet-stream",
+          path: reference,
+        });
+      } else if (requestedName) {
+        missingNames.push(requestedName);
+      }
+      return;
+    }
+    const dataUrl =
+      element.tagName === "IMG"
+        ? (element.getAttribute("src") ?? "")
+        : (element.getAttribute(ATTACHMENT_DATA_ATTRIBUTE) ?? "");
+    const file = dataUrlToFile(dataUrl, requestedName, index + 1, declaredType);
+    if (file) attachments.push({ kind: "file", file });
+    else if (requestedName) missingNames.push(requestedName);
   });
 
   let text = "";
   try {
     text = clipboardData.getData("text/plain");
   } catch {
-    // The images can still be restored if a host dropped text/plain.
+    // The attachments can still be restored if a host dropped text/plain.
   }
 
-  return { text, images };
+  return { text, attachments, missingNames };
 }

@@ -40,7 +40,12 @@ function logicalApiPath(path: string): string {
     : path;
 }
 
-async function readAttachment(
+/**
+ * Bytes of a historical prompt attachment through the active connection
+ * (managed uploads, allowed image routes, inline data). Shared by editing and
+ * copying a sent message.
+ */
+export async function readPromptAttachment(
   attachment: UploadedFileInfo,
   connection: Pick<Connection, "fetchBlob">,
 ): Promise<Blob> {
@@ -99,7 +104,7 @@ export async function restorePromptAttachments(
   // restoration, rather than let a seemingly valid text-only edit be sent.
   const files = await Promise.all(
     prompt.attachments.map(async (attachment) => {
-      const blob = await readAttachment(attachment, connection);
+      const blob = await readPromptAttachment(attachment, connection);
       if (
         blob.size === 0 &&
         (blob.type.startsWith("image/") ||

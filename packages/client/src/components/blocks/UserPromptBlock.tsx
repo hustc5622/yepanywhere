@@ -1,4 +1,5 @@
 import { type ReactNode, memo, useState } from "react";
+import { useConnection } from "../../hooks/useConnection";
 import { useFetchedImage } from "../../hooks/useRemoteImage";
 import { useOptionalI18n } from "../../i18n";
 import { apiPath as resolveApiPath } from "../../lib/apiPath";
@@ -12,13 +13,15 @@ import {
   createLinkPattern,
   splitTrailingUrlPunctuation,
 } from "../../lib/autolink";
-import type { ClipboardImageSource } from "../../lib/clipboard";
+import type { ClipboardAttachmentSource } from "../../lib/clipboard";
+import type { Connection } from "../../lib/connection/types";
 import {
   type FeishuPromptInfo,
   type SkillInfo,
   type UploadedFileInfo,
   getFilename,
 } from "../../lib/parseUserPrompt";
+import { readPromptAttachment } from "../../lib/restorePromptAttachments";
 import {
   type EditableUserPrompt,
   getUploadUrl,
@@ -275,43 +278,21 @@ function FeishuPromptSource({ info }: { info?: FeishuPromptInfo }) {
   );
 }
 
-function getClipboardImageSourceUrl(
-  file: UploadedFileInfo,
-): string | undefined {
-  const previewUrl = file.previewUrl?.trim();
-  if (previewUrl) {
-    return previewUrl.startsWith("/api")
-      ? managedUploadHref(previewUrl)
-      : previewUrl;
-  }
-
-  const path = file.path.trim();
-  if (/^(?:https?:|data:|blob:)/i.test(path)) return path;
-  if (path.startsWith("/api")) return managedUploadHref(path);
-
-  const uploadUrl = getUploadUrl(path);
-  if (uploadUrl) return managedUploadHref(uploadUrl);
-
-  // Provider-native image blocks can retain an allowed absolute path instead
-  // of a managed upload URL. The local-image endpoint applies the server's
-  // configured allowlist before returning any bytes.
-  if (path.startsWith("/")) {
-    return resolveApiPath(`/local-image?path=${encodeURIComponent(path)}`);
-  }
-
-  return undefined;
-}
-
-function getClipboardImageSources(
+/**
+ * Every attachment of a sent prompt, read through the active connection (same
+ * path as editing the prompt). Managed uploads also carry their path so a
+ * large file can be pasted into another Yep composer by reference.
+ */
+function getClipboardAttachmentSources(
   files: UploadedFileInfo[],
-): ClipboardImageSource[] {
-  return files
-    .filter((file) => isImageMimeType(file.mimeType))
-    .map((file) => ({
-      name: file.originalName,
-      mimeType: file.mimeType,
-      sourceUrl: getClipboardImageSourceUrl(file),
-    }));
+  connection: Pick<Connection, "fetchBlob">,
+): ClipboardAttachmentSource[] {
+  return files.map((file) => ({
+    name: file.originalName,
+    mimeType: file.mimeType,
+    read: () => readPromptAttachment(file, connection),
+    reference: getUploadUrl(file.path) ?? undefined,
+  }));
 }
 
 function UploadedImageError({ message }: { message: string }) {
@@ -701,11 +682,15 @@ export const UserPromptBlock = memo(function UserPromptBlock({
     !isPending && onEdit && (text || allUploadedFiles.length > 0)
       ? () => onEdit({ text, attachments: allUploadedFiles })
       : undefined;
-  const copyImages = getClipboardImageSources(allUploadedFiles);
+  const connection = useConnection();
+  const copyAttachments = getClipboardAttachmentSources(
+    allUploadedFiles,
+    connection,
+  );
 
   if (!text && skills.length === 0) {
     const hasMetadata = openedFiles.length > 0 || allUploadedFiles.length > 0;
-    if (copyImages.length > 0) {
+    if (copyAttachments.length > 0) {
       return (
         <UserPromptContainer isPending={isPending}>
           <MessageActions
@@ -716,7 +701,7 @@ export const UserPromptBlock = memo(function UserPromptBlock({
           <div className="message message-user-prompt message-user-prompt-copyable">
             <MessageActions
               copyText=""
-              copyImages={copyImages}
+              copyAttachments={copyAttachments}
               placement="bubble"
             />
             <div className="message-content">
@@ -778,7 +763,7 @@ export const UserPromptBlock = memo(function UserPromptBlock({
       <div className="message message-user-prompt message-user-prompt-copyable">
         <MessageActions
           copyText={copyText}
-          copyImages={copyImages}
+          copyAttachments={copyAttachments}
           placement="bubble"
         />
         <div className="message-content">

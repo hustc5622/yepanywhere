@@ -122,7 +122,7 @@ describe("UserPromptBlock", () => {
     expect(screen.getByText(/pasted-image-1\.png/)).toBeDefined();
     expect(screen.queryByText(/data:image\/png;base64/i)).toBeNull();
     expect(
-      screen.getByRole("button", { name: "Copy message and images" }),
+      screen.getByRole("button", { name: "Copy message and attachments" }),
     ).toBeDefined();
   });
 
@@ -142,7 +142,7 @@ describe("UserPromptBlock", () => {
     );
 
     const copyButton = screen.getByRole("button", {
-      name: "Copy message and images",
+      name: "Copy message and attachments",
     });
     expect(copyButton.closest(".message-user-prompt")).not.toBeNull();
     expect(screen.getByText(/pasted-image-1\.png/)).toBeDefined();
@@ -416,7 +416,7 @@ User uploaded files:
     expect(chip.querySelector(".attachment-thumbnail")).not.toBeNull();
     expect(chip.textContent).toBe("pasted-image-1.png");
     expect(
-      screen.getByRole("button", { name: "Copy message and images" }),
+      screen.getByRole("button", { name: "Copy message and attachments" }),
     ).toBeDefined();
 
     fireEvent.click(screen.getByRole("button", { name: "Edit message" }));

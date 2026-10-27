@@ -9,14 +9,24 @@ import type {
   AttachmentComposerHandle,
   ComposerAttachment,
 } from "../components/AttachmentComposer";
+import { useOptionalToastContext } from "../contexts/ToastContext";
+import { useI18n } from "../i18n";
 import {
   countAttachmentTokens,
+  dropAttachmentTokens,
   findAttachmentAfterPosition,
   insertAttachmentToken,
   removeAttachmentTokenOccurrence,
   sanitizeAttachmentTokenName,
 } from "../lib/attachmentTokens";
-import { readClipboardUserInput } from "../lib/clipboard";
+import {
+  type ClipboardAttachmentSource,
+  type ClipboardUserInput,
+  type ClipboardUserInputCopyResult,
+  readClipboardUserInput,
+  writeClipboardUserInput,
+} from "../lib/clipboard";
+import { useConnection } from "./useConnection";
 
 interface Options<T> {
   value: string;
@@ -29,6 +39,13 @@ interface Options<T> {
   onRestore?: (ids: string[]) => void;
   disabled?: boolean;
   canAttach?: boolean;
+  /** How an attachment is copied; null/absent sources are reported as missing. */
+  getClipboardSource?: (attachment: T) => ClipboardAttachmentSource | null;
+  /** Reads a managed upload referenced by a pasted Yep copy (`/api/...`). */
+  fetchClipboardReference?: (apiPath: string) => Promise<Blob>;
+  /** Files this composer can take; others are dropped before any token is inserted. */
+  acceptFile?: (file: File) => boolean;
+  onRejectFiles?: (files: File[]) => void;
 }
 
 /**
@@ -47,7 +64,14 @@ export function useComposerDocument<T>({
   onRestore,
   disabled = false,
   canAttach = !!onAttach,
+  getClipboardSource,
+  fetchClipboardReference,
+  acceptFile,
+  onRejectFiles,
 }: Options<T>) {
+  const { t } = useI18n();
+  const toast = useOptionalToastContext();
+  const connection = useConnection();
   const composerAttachments = attachments.map(describeAttachment);
   const occurrences = new Map<string, number>();
   const detachedAttachments = attachments.filter((_, index) => {
@@ -85,8 +109,19 @@ export function useComposerDocument<T>({
     onTextChange(event.target.value, event.target.selectionStart);
   };
 
-  const attachFiles = (files: File[], copiedText = "") => {
-    if (disabled || !canAttach || !onAttach || files.length === 0) return;
+  const attachFiles = (incoming: File[], pastedText = "") => {
+    if (disabled || !canAttach || !onAttach) return;
+    const files = acceptFile ? incoming.filter(acceptFile) : incoming;
+    const rejected = incoming.filter((file) => !files.includes(file));
+    let copiedText = pastedText;
+    if (rejected.length > 0) {
+      onRejectFiles?.(rejected);
+      // Pasted Yep text may carry tokens for the files left out.
+      for (const file of rejected) {
+        copiedText = dropAttachmentTokens(copiedText, file.name, 1);
+      }
+    }
+    if (files.length === 0 && !copiedText) return;
     const editor = editorRef.current;
     const currentValue = editor?.value ?? value;
     const start = editor?.selectionStart ?? currentValue.length;
@@ -101,8 +136,10 @@ export function useComposerDocument<T>({
     const beforeId =
       anchor && !selectedIds.includes(anchor.id) ? anchor.id : undefined;
     if (selectedIds.length) onRemove?.(selectedIds);
-    if (beforeId) onAttach(files, beforeId);
-    else onAttach(files);
+    if (files.length > 0) {
+      if (beforeId) onAttach(files, beforeId);
+      else onAttach(files);
+    }
 
     let nextText = `${currentValue.slice(0, start)}${copiedText}${currentValue.slice(end)}`;
     let cursor = start + copiedText.length;
@@ -127,12 +164,65 @@ export function useComposerDocument<T>({
     event.target.value = "";
   };
 
+  const reportMissing = (names: string[], key: "paste" | "copy") => {
+    if (names.length === 0) return;
+    toast?.showToast(
+      t(key === "paste" ? "composerPasteMissing" : "composerCopyMissing", {
+        names: Array.from(new Set(names)).join(", "),
+      }),
+      "error",
+    );
+  };
+
+  /** Restore a Yep rich copy: every attachment, then text without orphans. */
+  const restoreCopiedInput = async (copied: ClipboardUserInput) => {
+    const files: File[] = [];
+    const failed = [...copied.missingNames];
+    const fetchReference =
+      fetchClipboardReference ??
+      ((path: string) => connection.fetchBlob(path.slice("/api".length)));
+    for (const entry of copied.attachments) {
+      if (entry.kind === "file") {
+        files.push(entry.file);
+        continue;
+      }
+      try {
+        const blob = await fetchReference(entry.path);
+        files.push(
+          new File([blob], entry.name, { type: blob.type || entry.mimeType }),
+        );
+      } catch {
+        failed.push(entry.name);
+      }
+    }
+    let text = copied.text;
+    const failedCounts = new Map<string, number>();
+    for (const name of failed) {
+      const key = sanitizeAttachmentTokenName(name);
+      failedCounts.set(key, (failedCounts.get(key) ?? 0) + 1);
+    }
+    for (const [name, count] of failedCounts) {
+      const restored = files.filter(
+        (file) => sanitizeAttachmentTokenName(file.name) === name,
+      ).length;
+      const excess = countAttachmentTokens(text, name) - restored;
+      if (excess > 0)
+        text = dropAttachmentTokens(text, name, Math.min(excess, count));
+    }
+    attachFiles(files, text);
+    reportMissing(failed, "paste");
+  };
+
   const handlePaste = (event: ClipboardEvent<HTMLElement>) => {
     if (disabled || !canAttach || !onAttach) return;
     const copiedInput = readClipboardUserInput(event.clipboardData);
-    if (copiedInput?.images.length) {
+    if (
+      copiedInput &&
+      (copiedInput.attachments.length > 0 ||
+        copiedInput.missingNames.length > 0)
+    ) {
       event.preventDefault();
-      attachFiles(copiedInput.images, copiedInput.text);
+      void restoreCopiedInput(copiedInput);
       return;
     }
     const files = Array.from(event.clipboardData.items ?? []).flatMap(
@@ -145,6 +235,42 @@ export function useComposerDocument<T>({
       event.preventDefault();
       attachFiles(files);
     }
+  };
+
+  /** Files dropped onto the editor (caret already at the drop point). */
+  const handleDropFiles = (files: File[]) => attachFiles(files);
+
+  const copyInput = async (
+    text: string,
+    selected: T[],
+  ): Promise<ClipboardUserInputCopyResult> => {
+    const sources = selected.map((attachment) => {
+      const described = describeAttachment(attachment);
+      return (
+        getClipboardSource?.(attachment) ?? {
+          name: described.name,
+          mimeType: described.mimeType,
+        }
+      );
+    });
+    const result = await writeClipboardUserInput(text, sources);
+    reportMissing(result.failedNames, "copy");
+    return result;
+  };
+
+  /** Copy the whole draft: text plus every attachment, in order. */
+  const copyAll = () =>
+    copyInput(editorRef.current?.value ?? value, attachments);
+
+  /** Native copy/cut of a selection that includes attachment cards. */
+  const handleCopyAttachments = (text: string, ids: string[]) => {
+    const selected = attachments.filter((attachment) =>
+      ids.includes(describeAttachment(attachment).id),
+    );
+    if (selected.length === 0) return;
+    void copyInput(text, selected).catch(() => {
+      toast?.showToast(t("composerCopyFailed"), "error");
+    });
   };
 
   const removeAttachment = (id: string) => {
@@ -174,6 +300,9 @@ export function useComposerDocument<T>({
     handleChange,
     handleFileSelect,
     handlePaste,
+    handleCopyAttachments,
+    handleDropFiles,
+    copyAll,
     removeAttachment,
     setCaretSoon,
   };

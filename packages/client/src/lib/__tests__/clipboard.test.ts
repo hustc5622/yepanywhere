@@ -90,13 +90,17 @@ describe("user input clipboard payload", () => {
       },
     ]);
 
-    expect(result).toEqual({ requestedImageCount: 2, copiedImageCount: 2 });
+    expect(result).toEqual({
+      requestedAttachmentCount: 2,
+      copiedAttachmentCount: 2,
+      failedNames: [],
+    });
     expect(writtenItems).toHaveLength(1);
 
     const htmlBlob = await writtenItems[0]?.representations["text/html"];
     expect(htmlBlob).toBeInstanceOf(Blob);
     const html = await readBlob(htmlBlob as Blob);
-    expect(html).toContain('data-yep-anywhere-user-input="1"');
+    expect(html).toContain('data-yep-anywhere-user-input="2"');
     expect(html).toContain('data-yep-anywhere-attachment-name="first.png"');
     expect(html).toContain('data-yep-anywhere-attachment-name="second.png"');
     expect(html).toContain("review both");
@@ -125,13 +129,17 @@ describe("user input clipboard payload", () => {
       },
     ]);
 
-    expect(result).toEqual({ requestedImageCount: 1, copiedImageCount: 1 });
+    expect(result).toEqual({
+      requestedAttachmentCount: 1,
+      copiedAttachmentCount: 1,
+      failedNames: [],
+    });
     const htmlBlob = await writtenItems[0]?.representations["text/html"];
     const html = await readBlob(htmlBlob as Blob);
     expect(html).toContain("data:image/png;base64,AQID");
   });
 
-  it("restores copied text and all embedded images as named files", () => {
+  it("restores a v1 copy's text and images as named files", () => {
     const payload = readClipboardUserInput({
       getData: (type) => {
         if (type === "text/plain") return "review both";
@@ -146,15 +154,12 @@ describe("user input clipboard payload", () => {
     });
 
     expect(payload?.text).toBe("review both");
-    expect(payload?.images.map((file) => file.name)).toEqual([
-      "first.png",
-      "second.jpg",
-    ]);
-    expect(payload?.images.map((file) => file.type)).toEqual([
-      "image/png",
-      "image/jpeg",
-    ]);
-    expect(payload?.images.map((file) => file.size)).toEqual([5, 6]);
+    const files = (payload?.attachments ?? []).flatMap((entry) =>
+      entry.kind === "file" ? [entry.file] : [],
+    );
+    expect(files.map((file) => file.name)).toEqual(["first.png", "second.jpg"]);
+    expect(files.map((file) => file.type)).toEqual(["image/png", "image/jpeg"]);
+    expect(files.map((file) => file.size)).toEqual([5, 6]);
   });
 
   it("ignores ordinary rich clipboard HTML without the Yep marker", () => {
@@ -166,5 +171,83 @@ describe("user input clipboard payload", () => {
             : "hello",
       }),
     ).toBeNull();
+  });
+
+  it("round-trips images, files, references and misses in order", async () => {
+    const writtenItems = installRichClipboardMock();
+    const big = new Blob([new Uint8Array(6 * 1024 * 1024)], {
+      type: "application/zip",
+    });
+    const reference =
+      "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_big.zip";
+    const result = await writeClipboardUserInput(
+      "see @[a.png] and @[notes.pdf] @[big.zip] @[gone.txt]",
+      [
+        {
+          name: "a.png",
+          mimeType: "image/png",
+          read: async () => new Blob(["png"], { type: "image/png" }),
+        },
+        {
+          name: "notes.pdf",
+          mimeType: "application/pdf",
+          read: async () => new Blob(["%PDF"], { type: "" }),
+        },
+        {
+          name: "big.zip",
+          mimeType: "application/zip",
+          read: async () => big,
+          reference,
+        },
+        { name: "gone.txt", mimeType: "text/plain" },
+      ],
+    );
+    expect(result).toEqual({
+      requestedAttachmentCount: 4,
+      copiedAttachmentCount: 3,
+      failedNames: ["gone.txt"],
+    });
+
+    const html = await readBlob(
+      (await writtenItems[0]?.representations["text/html"]) as Blob,
+    );
+    expect(html).not.toContain("AAAAAAAA".repeat(1000));
+    const payload = readClipboardUserInput({
+      getData: (type) =>
+        type === "text/html"
+          ? html
+          : "see @[a.png] and @[notes.pdf] @[big.zip] @[gone.txt]",
+    });
+    expect(payload?.missingNames).toEqual(["gone.txt"]);
+    const entries = payload?.attachments ?? [];
+    expect(entries.map((entry) => entry.kind)).toEqual([
+      "file",
+      "file",
+      "reference",
+    ]);
+    const [image, pdf, ref] = entries;
+    expect(image?.kind === "file" && image.file.name).toBe("a.png");
+    expect(pdf?.kind === "file" && [pdf.file.name, pdf.file.type]).toEqual([
+      "notes.pdf",
+      "application/pdf",
+    ]);
+    expect(pdf?.kind === "file" && (await readBlob(pdf.file))).toBe("%PDF");
+    expect(ref).toEqual({
+      kind: "reference",
+      name: "big.zip",
+      mimeType: "application/zip",
+      path: reference,
+    });
+  });
+
+  it("ignores references that are not managed upload routes", () => {
+    const payload = readClipboardUserInput({
+      getData: (type) =>
+        type === "text/html"
+          ? `<div data-yep-anywhere-user-input="2"><span data-yep-anywhere-attachment-name="x" data-yep-anywhere-attachment-ref="/api/settings"></span></div>`
+          : "@[x]",
+    });
+    expect(payload?.attachments).toEqual([]);
+    expect(payload?.missingNames).toEqual(["x"]);
   });
 });

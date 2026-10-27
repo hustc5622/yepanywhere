@@ -57,6 +57,11 @@ export function ToastProvider({ children }: ToastProviderProps) {
  * Hook to access toast functionality from any component.
  * Must be used within a ToastProvider.
  */
+/** Toasts when a provider is mounted; null in isolated component trees. */
+export function useOptionalToastContext() {
+  return useContext(ToastContext);
+}
+
 export function useToastContext() {
   const context = useContext(ToastContext);
   if (!context) {

@@ -180,11 +180,11 @@ describe("MessageActions", () => {
     expect(execCommand).toHaveBeenCalledWith("copy");
   });
 
-  it("reports a text-only fallback when rich image copying is unavailable", async () => {
+  it("reports a text-only fallback when rich attachment copying is unavailable", async () => {
     renderWithI18n(
       <MessageActions
         copyText="prompt with image"
-        copyImages={[
+        copyAttachments={[
           {
             name: "screenshot.png",
             mimeType: "image/png",
@@ -194,12 +194,12 @@ describe("MessageActions", () => {
       />,
     );
     fireEvent.click(
-      screen.getByRole("button", { name: "Copy message and images" }),
+      screen.getByRole("button", { name: "Copy message and attachments" }),
     );
 
     expect(
       await screen.findByRole("button", {
-        name: "Copied, but some images could not be included",
+        name: "Copied, but some attachments could not be included",
       }),
     ).toBeTruthy();
     expect(writeText).toHaveBeenCalledWith("prompt with image");

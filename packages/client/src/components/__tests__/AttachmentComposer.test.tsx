@@ -42,6 +42,7 @@ function setup(value = "before @[shot.png] between @[shot.png] after") {
   const onRemove = vi.fn();
   const onChange = vi.fn();
   const onKeyDown = vi.fn();
+  const onCopyAttachments = vi.fn();
   function Controlled() {
     const [text, setText] = useState(value);
     return (
@@ -56,6 +57,7 @@ function setup(value = "before @[shot.png] between @[shot.png] after") {
         onPreview={onPreview}
         onRemove={onRemove}
         onKeyDown={onKeyDown}
+        onCopyAttachments={onCopyAttachments}
         placeholder="Write a message"
       />
     );
@@ -73,6 +75,7 @@ function setup(value = "before @[shot.png] between @[shot.png] after") {
     onRemove,
     onChange,
     onKeyDown,
+    onCopyAttachments,
   };
 }
 
@@ -199,6 +202,30 @@ describe("AttachmentComposer", () => {
     expect(onChange.mock.lastCall?.[0].target.removedAttachmentIds).toEqual([
       "first",
     ]);
+  });
+
+  it("hands selections with cards to the rich copy, text-only ones stay plain", () => {
+    const { editor, handle, onCopyAttachments } = setup();
+    act(() => {
+      handle.current?.focus();
+      handle.current?.setSelectionRange(0, 6);
+    });
+    const setData = vi.fn();
+    fireEvent.copy(editor, { clipboardData: { setData } });
+    expect(onCopyAttachments).not.toHaveBeenCalled();
+
+    act(() => {
+      handle.current?.setSelectionRange(0, 39);
+    });
+    fireEvent.copy(editor, { clipboardData: { setData } });
+    expect(setData).toHaveBeenLastCalledWith(
+      "text/plain",
+      "before @[shot.png] between @[shot.png] ",
+    );
+    expect(onCopyAttachments).toHaveBeenCalledWith(
+      "before @[shot.png] between @[shot.png] ",
+      ["first", "second"],
+    );
   });
 
   it("defers attachment DOM refresh until composition ends", () => {

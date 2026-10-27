@@ -157,6 +157,27 @@ export function removeAttachmentTokenOccurrence(
   return token ? removeTokenMatch(text, token) : null;
 }
 
+/**
+ * Removes the last `count` tokens referencing `name`, e.g. for pasted
+ * attachments that could not be restored, so no orphaned token remains.
+ */
+export function dropAttachmentTokens(
+  text: string,
+  name: string,
+  count: number,
+): string {
+  let next = text;
+  for (let i = 0; i < count; i++) {
+    const target = sanitizeAttachmentTokenName(name);
+    const token = findAttachmentTokens(next)
+      .filter((candidate) => candidate.name === target)
+      .at(-1);
+    if (!token) break;
+    next = removeTokenMatch(next, token).text;
+  }
+  return next;
+}
+
 function removeTokenMatch(
   text: string,
   token: AttachmentTokenMatch,

@@ -61,6 +61,16 @@ interface Props {
   attachments: ComposerAttachment[];
   onPreview?: (id: string) => void;
   onRemove?: (id: string) => void;
+  /**
+   * A copy/cut selection includes attachment cards. The plain text is already
+   * on the clipboard; the handler may replace it with a rich copy.
+   */
+  onCopyAttachments?: (text: string, attachmentIds: string[]) => void;
+  /**
+   * Files dropped onto the editor; the caret is first moved to the drop
+   * point. Absent: drops are ignored.
+   */
+  onDropFiles?: (files: File[]) => void;
 }
 
 type Point = { node: Node; offset: number };
@@ -189,6 +199,57 @@ function offsetPoint(
   return { node: root, offset: root.childNodes.length };
 }
 
+/** Move the DOM caret to a viewport point inside `root`, when supported. */
+function placeCaretAtPoint(root: HTMLElement, x: number, y: number): void {
+  const doc = root.ownerDocument as Document & {
+    caretPositionFromPoint?: (
+      x: number,
+      y: number,
+    ) => { offsetNode: Node; offset: number } | null;
+    caretRangeFromPoint?: (x: number, y: number) => Range | null;
+  };
+  let range: Range | null = null;
+  const position = doc.caretPositionFromPoint?.(x, y);
+  if (position) {
+    range = doc.createRange();
+    range.setStart(position.offsetNode, position.offset);
+  } else {
+    range = doc.caretRangeFromPoint?.(x, y) ?? null;
+  }
+  // Card labels are not text positions; keep the previous caret then.
+  if (
+    !range ||
+    !root.contains(range.startContainer) ||
+    (range.startContainer instanceof Element
+      ? range.startContainer
+      : range.startContainer.parentElement
+    )?.closest("[data-attachment-id]")
+  )
+    return;
+  range.collapse(true);
+  const selection = doc.getSelection();
+  selection?.removeAllRanges();
+  selection?.addRange(range);
+}
+
+/** Attachment cards overlapping the serialized range, in document order. */
+function attachmentIdsInRange(
+  root: HTMLElement,
+  start: number,
+  end: number,
+): string[] {
+  if (start === end) return [];
+  const snapshot = readContent(root);
+  return Array.from(
+    root.querySelectorAll<HTMLElement>("[data-attachment-id]"),
+  ).flatMap((card) => {
+    const offsets = snapshot.boundaries.get(card);
+    return offsets && start < (offsets[1] ?? 0) && end > (offsets[0] ?? 0)
+      ? [card.dataset.attachmentId ?? ""]
+      : [];
+  });
+}
+
 function readSelection(root: HTMLElement): [number, number] | null {
   const selection = window.getSelection();
   if (!selection?.rangeCount) return null;
@@ -257,6 +318,7 @@ export const AttachmentComposer = forwardRef<AttachmentComposerHandle, Props>(
     }
     const renderedSignatureRef = useRef("");
     const [compositionRevision, setCompositionRevision] = useState(0);
+    const [dragOver, setDragOver] = useState(false);
 
     const rememberSelection = () => {
       const root = rootRef.current;
@@ -290,16 +352,7 @@ export const AttachmentComposer = forwardRef<AttachmentComposerHandle, Props>(
         const root = rootRef.current;
         if (!root) return [];
         const [start, end] = rememberSelection();
-        if (start === end) return [];
-        const snapshot = readContent(root);
-        return Array.from(
-          root.querySelectorAll<HTMLElement>("[data-attachment-id]"),
-        ).flatMap((card) => {
-          const offsets = snapshot.boundaries.get(card);
-          return offsets && start < (offsets[1] ?? 0) && end > (offsets[0] ?? 0)
-            ? [card.dataset.attachmentId ?? ""]
-            : [];
-        });
+        return attachmentIdsInRange(root, start, end);
       },
       get scrollTop() {
         return rootRef.current?.scrollTop ?? 0;
@@ -580,10 +633,12 @@ export const AttachmentComposer = forwardRef<AttachmentComposerHandle, Props>(
       const [start, end] = selected;
       if (start === end) return;
       event.preventDefault();
-      event.clipboardData.setData(
-        "text/plain",
-        serializeComposerContent(root).slice(start, end),
-      );
+      const text = serializeComposerContent(root).slice(start, end);
+      event.clipboardData.setData("text/plain", text);
+      const attachmentIds = attachmentIdsInRange(root, start, end);
+      if (attachmentIds.length > 0) {
+        propsRef.current.onCopyAttachments?.(text, attachmentIds);
+      }
       if (cut && !disabled) replaceSelection("");
     };
 
@@ -656,10 +711,32 @@ export const AttachmentComposer = forwardRef<AttachmentComposerHandle, Props>(
           const text = event.clipboardData.getData("text/plain");
           if (text) replaceSelection(text);
         }}
+        data-drag-over={dragOver || undefined}
+        onDragOver={(event) => {
+          if (disabled || !propsRef.current.onDropFiles) return;
+          if (!Array.from(event.dataTransfer.types).includes("Files")) return;
+          event.preventDefault();
+          event.dataTransfer.dropEffect = "copy";
+          if (!dragOver) setDragOver(true);
+        }}
+        onDragLeave={(event) => {
+          if (
+            !(event.relatedTarget instanceof Node) ||
+            !event.currentTarget.contains(event.relatedTarget)
+          )
+            setDragOver(false);
+        }}
         onDrop={(event) => {
           // Native rich drops would bypass the attachment upload flow and
           // introduce HTML/images that cannot be represented by the prompt.
           event.preventDefault();
+          setDragOver(false);
+          const files = Array.from(event.dataTransfer.files ?? []);
+          const onDropFiles = propsRef.current.onDropFiles;
+          if (disabled || !onDropFiles || files.length === 0) return;
+          placeCaretAtPoint(event.currentTarget, event.clientX, event.clientY);
+          rememberSelection();
+          onDropFiles(files);
         }}
         onCopy={(event) => copySelection(event, false)}
         onCut={(event) => copySelection(event, true)}
