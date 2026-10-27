@@ -1,5 +1,7 @@
 # 消息输入框：入口、状态与共享流程
 
+> 2026-10-23 更新：新建会话、续聊与旁聊已统一为 `useComposer` + `ComposerEditor` + `ComposerToolbar`，命令目录、skills、富剪贴板 v2 见 [composer-unification-plan.md](composer-unification-plan.md)。快速新建 FAB 已移除（仅保留旧草稿 `fab-prefill` 的一次性迁移）。下文为此前一轮收敛的记录。
+
 本次梳理针对客户端聊天／任务输入链路，不涉及 provider 的执行协议。依据是现有源码、用户提供的截图及组件／hook 回归测试；未运行浏览器自动化，未重启或部署服务。
 
 ## 结论
@@ -19,7 +21,6 @@
 | 编辑历史用户消息 | 同一 `MessageInput` + `editRewind` | 正文和附件作为同一编辑请求还原 | 全部附件准备成功后一起替换；失败保留当前草稿；保留原有 provider 分支语义；历史编辑禁用普通排队 |
 | 等待工具审批 | `ToolApprovalPanel` + 保持挂载的 `MessageInput` | 主草稿仍存在，输入框按状态隐藏 | 审批反馈独立提交；开始历史编辑时显示完整消息输入框 |
 | 等待问题回答 | `QuestionAnswerPanel` + 折叠的 `MessageInput` | 选项、Other 文本及主草稿分别保存 | 问答结果按 request 提交，消息草稿不充当问答答案 |
-| 快速新建 FAB | `FloatingActionButton` 原生 textarea | 仅文字草稿，无附件 | 通过 `fab-prefill` 转交新建表单；共用 Enter／IME 策略 |
 | 问答 Other、直接回答、秘密输入 | `QuestionAnswerPanel` | Other 按 session/request 保存；秘密只留内存 | 多行回答中 Enter 换行；完成或失败由问题流程处理 |
 | 拒绝工具时的反馈 | `ToolApprovalPanel` 单行 input | `useToolApprovalFeedbackDraft` | 拒绝成功才清理，失败保留 |
 | 目标描述 | `GoalModal` textarea | 弹窗内存状态 | 按钮提交，忙碌时锁定；关闭不保留 |
