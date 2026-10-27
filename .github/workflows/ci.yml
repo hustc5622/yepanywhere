@@ -2,7 +2,11 @@ name: CI
 on: [push, pull_request]
 jobs:
   test:
-    runs-on: ubuntu-latest
+    # Playwright 1.58 ships no ubuntu26.04 browser builds. ubuntu-latest moved
+    # to 26.04 in Oct 2026, so this job stays on the last image that can
+    # install Chromium. To float the label again, bump @playwright/test to
+    # >=1.61 and confirm `playwright install chromium` on that image first.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
       - uses: pnpm/action-setup@v2
@@ -11,9 +15,9 @@ jobs:
           node-version-file: ".nvmrc"
           cache: "pnpm"
       - run: pnpm install
+      - run: pnpm -F @yep-anywhere/client exec playwright install chromium
       - run: pnpm test:typography
       - run: pnpm lint
       - run: pnpm typecheck
       - run: pnpm test
-      - run: pnpm -F @yep-anywhere/client exec playwright install chromium
       - run: pnpm test:e2e
