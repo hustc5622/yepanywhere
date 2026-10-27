@@ -1,4 +1,5 @@
 import type {
+  AgentCommandListing,
   SessionDisplayGroupPage,
   SessionDisplaySnapshot,
   SessionDisplayToolDetail,
@@ -1650,6 +1651,19 @@ export const api = {
     fetchJSON<{ cancelled: boolean }>(`/queue/${encodeURIComponent(queueId)}`, {
       method: "DELETE",
     }),
+
+  /** Commands and skills for the composer (no session needed). */
+  getAgentCommands: (
+    projectId: string,
+    provider: string,
+    sessionId?: string,
+  ) => {
+    const params = new URLSearchParams({ provider });
+    if (sessionId) params.set("sessionId", sessionId);
+    return fetchJSON<AgentCommandListing>(
+      `/projects/${encodeURIComponent(projectId)}/agent-commands?${params}`,
+    );
+  },
 
   executeCodexControl: (
     sessionId: string,

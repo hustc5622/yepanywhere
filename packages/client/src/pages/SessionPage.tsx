@@ -6,7 +6,7 @@ import type {
   ProviderName,
   SessionDisplayPage,
   SessionDisplaySegment,
-  UploadedFile,
+  SlashCommand,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -20,7 +20,6 @@ import {
 import { api, isQueuedResumeSessionResponse } from "../api/client";
 import { ExpandableSessionTitle } from "../components/ExpandableSessionTitle";
 import { GoalModal } from "../components/GoalModal";
-import type { UploadProgress } from "../components/MessageInput";
 import { ModelSwitchModal } from "../components/ModelSwitchModal";
 import { PinIcon } from "../components/PinIcon";
 import { ProcessInfoModal } from "../components/ProcessInfoModal";
@@ -39,6 +38,9 @@ import {
 } from "../contexts/StreamingMarkdownContext";
 import { useToastContext } from "../contexts/ToastContext";
 import { useActivityBusState } from "../hooks/useActivityBusState";
+import { useAgentCommandCatalog } from "../hooks/useAgentCommandCatalog";
+import { useAgentCommandListing } from "../hooks/useAgentCommandListing";
+import { useComposerUploads } from "../hooks/useComposerUploads";
 import { useConnection } from "../hooks/useConnection";
 import { useDeveloperMode } from "../hooks/useDeveloperMode";
 import { useDocumentTitle } from "../hooks/useDocumentTitle";
@@ -61,15 +63,9 @@ import { useSessionInspectorPreference } from "../hooks/useSessionInspectorPrefe
 import { useSideConversation } from "../hooks/useSideConversation";
 import { useI18n } from "../i18n";
 import { useNavigationLayout } from "../layouts";
-import {
-  buildSlashCommandDetails,
-  getAgentCommandConfig,
-  getAgentCommandConfigs,
-} from "../lib/agentCommands";
 import { stripAttachmentTokensForTitle } from "../lib/attachmentTokens";
 import {
   type CodexSkillCommand,
-  parseCodexSkillsList,
   parseCodexSlashCommand,
   resolveCodexSkillInputs,
 } from "../lib/codexInputCommands";
@@ -108,7 +104,6 @@ import {
   needsPromptAttachmentHydration,
   parseUserPromptContent,
 } from "../lib/userPromptContent";
-import { generateUUID } from "../lib/uuid";
 import type { Message, Session, SessionNavigationState } from "../types";
 import { getSessionDisplayTitle } from "../utils";
 import { SessionComposer, SessionTranscript } from "./SessionStreamPanes";
@@ -276,6 +271,8 @@ function useStableCallback<Args extends unknown[], Result>(
   return useCallback((...args: Args) => callbackRef.current(...args), []);
 }
 
+const NO_PROVIDER_COMMANDS: SlashCommand[] = [];
+
 function SessionPageContent({
   projectId,
   sessionId,
@@ -357,7 +354,6 @@ function SessionPageContent({
     removePendingMessage,
     updatePendingMessage,
     deferredMessages,
-    slashCommands,
     slashCommandDetails,
     setSessionModel,
     sessionTools,
@@ -707,40 +703,41 @@ function SessionPageContent({
   // Connection for uploads (uses WebSocket when enabled)
   const connection = useConnection();
 
-  // Inject custom client-side commands alongside SDK-discovered ones
-  const allSlashCommands = useMemo(() => {
-    if (status.owner === "self") {
-      return slashCommands.includes("model")
-        ? slashCommands
-        : ["model", ...slashCommands];
-    }
-    return slashCommands;
-  }, [slashCommands, status.owner]);
-
-  const [codexSkills, setCodexSkills] = useState<CodexSkillCommand[]>([]);
+  // Commands and skills: the running process when there is one, else the
+  // provider's last report for this project, else its skill directories.
   const ownedProcessId = status.owner === "self" ? status.processId : undefined;
-  useEffect(() => {
-    if (effectiveProvider !== "codex" || !ownedProcessId) {
-      setCodexSkills([]);
-      return;
-    }
-
-    let cancelled = false;
-    api
-      .executeCodexControl(actualSessionId ?? sessionId, {
-        control: "skills/list",
-      })
-      .then((response) => {
-        if (!cancelled) setCodexSkills(parseCodexSkillsList(response.data));
-      })
-      .catch(() => {
-        if (!cancelled) setCodexSkills([]);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [actualSessionId, effectiveProvider, sessionId, ownedProcessId]);
+  const { listing: commandListing, refresh: refreshCommandListing } =
+    useAgentCommandListing({
+      projectId,
+      provider: effectiveProvider,
+      sessionId: actualSessionId ?? sessionId,
+      refreshKey: `${status.owner}:${ownedProcessId ?? ""}`,
+    });
+  const codexSkills = useMemo<CodexSkillCommand[]>(
+    () =>
+      effectiveProvider === "codex"
+        ? (commandListing?.skills ?? []).flatMap((skill) =>
+            skill.path
+              ? [
+                  {
+                    name: skill.name,
+                    path: skill.path,
+                    ...(skill.description
+                      ? { description: skill.description }
+                      : {}),
+                  },
+                ]
+              : [],
+          )
+        : [],
+    [commandListing, effectiveProvider],
+  );
+  // The init message / session load carries the live list; the listing
+  // covers idle sessions and providers whose list arrives later (ACP).
+  const providerCommands =
+    slashCommandDetails.length > 0
+      ? slashCommandDetails
+      : (commandListing?.commands ?? NO_PROVIDER_COMMANDS);
 
   // Get provider capabilities based on session's provider
   const { providers } = useProviders();
@@ -762,86 +759,21 @@ function SessionPageContent({
   const supportsThinkingToggle =
     currentProviderInfo?.supportsThinkingToggle ?? true;
   const supportsSlashCommands = currentProviderInfo?.supportsSlashCommands;
-  const commandConfig = useMemo(() => {
-    return getAgentCommandConfig(
-      effectiveProvider,
-      supportsSlashCommands,
-      allSlashCommands,
-    );
-  }, [allSlashCommands, effectiveProvider, supportsSlashCommands]);
-  // A Pi session without a live process still resumes when a message is
-  // sent, so its last known `/` list stays usable while idle.
-  const canUseCommands =
-    status.owner === "self" ||
-    (effectiveProvider === "pi" && status.owner === "none");
-  const showCommandButton = canUseCommands && commandConfig.showButton;
-  const activeCommands = useMemo(() => {
-    if (!canUseCommands) return [];
-    return commandConfig.commands;
-  }, [commandConfig.commands, canUseCommands]);
-  const commandPrefix = commandConfig.prefix;
-  const commandLabel = commandConfig.label;
-  const commandButtons = useMemo(() => {
-    if (!canUseCommands) return [];
-    return getAgentCommandConfigs(
-      effectiveProvider,
-      supportsSlashCommands,
-      allSlashCommands,
-      codexSkills.map((skill) => skill.name),
-      {
-        codexCommands: t("codexCommandsLabel"),
-        skills: t("codexSkillsLabel"),
-        slashCommands: t("slashCommandsLabel"),
-      },
-    ).map((group) =>
-      group.prefix !== "/"
-        ? {
-            ...group,
-            details: Object.fromEntries(
-              codexSkills.flatMap((skill) =>
-                skill.description
-                  ? [[skill.name, { description: skill.description }]]
-                  : [],
-              ),
-            ),
-          }
-        : {
-            ...group,
-            commands: [
-              ...group.commands.filter(
-                (command) => command !== "side" && command !== "btw",
-              ),
-              ...(hasSideConversation ? ["side", "btw"] : []),
-            ],
-            details: {
-              // Provider-reported descriptions win; Yep-handled commands get
-              // their own so the menu explains what Yep will do with them.
-              model: {
-                description: t("slashCommandModelDescription"),
-                source: "yep" as const,
-              },
-              ...(effectiveProvider === "pi"
-                ? {
-                    compact: {
-                      description: t("slashCommandCompactDescription"),
-                      source: "yep" as const,
-                    },
-                  }
-                : {}),
-              ...buildSlashCommandDetails(slashCommandDetails),
-            },
-          },
-    );
-  }, [
-    hasSideConversation,
-    allSlashCommands,
-    slashCommandDetails,
-    codexSkills,
-    effectiveProvider,
-    canUseCommands,
+  const commandButtons = useAgentCommandCatalog({
+    provider: effectiveProvider,
     supportsSlashCommands,
-    t,
-  ]);
+    providerCommands,
+    codexSkills,
+    availability: {
+      scope: "session",
+      ownsProcess: status.owner === "self",
+      // Sending a message resumes an idle session, so its provider commands
+      // (Claude init list, Pi cache) stay usable.
+      canResume: status.owner === "none",
+      // A side conversation forks the live provider process.
+      hasSideConversation: hasSideConversation && status.owner === "self",
+    },
+  });
 
   // Inline title editing state
   const [isEditingTitle, setIsEditingTitle] = useState(false);
@@ -908,18 +840,26 @@ function SessionPageContent({
   const [attachments, setAttachments] = useDraftAttachments(
     `draft-attachments-${sessionId}`,
   );
-  const [uploadProgress, setUploadProgress] = useState<UploadProgress[]>([]);
-  // Track in-flight upload promises so handleSend can wait for them
-  const pendingUploadsRef = useRef<Map<string, Promise<UploadedFile | null>>>(
-    new Map(),
-  );
-  const cancelledUploadIdsRef = useRef(new Set<string>());
-  // Preserve selection order when same-named uploads finish out of order.
-  const attachmentOrderRef = useRef<string[]>([]);
-  for (const file of attachments) {
-    if (!attachmentOrderRef.current.includes(file.id))
-      attachmentOrderRef.current.push(file.id);
-  }
+  // Upload-on-attach with selection order and in-flight tracking (shared
+  // with the side chat composer); handleSend waits for pending uploads.
+  const uploads = useComposerUploads({
+    projectId,
+    sessionId,
+    state: [attachments, setAttachments],
+    onError: useCallback(
+      (file: File, err: unknown) => {
+        console.error("Upload failed:", err);
+        showToast(
+          t("sessionUploadFailed", {
+            file: file.name,
+            message: err instanceof Error ? err.message : String(err),
+          }),
+          "error",
+        );
+      },
+      [showToast, t],
+    ),
+  });
 
   const handleEditUserPrompt = useCallback(
     async ({
@@ -980,13 +920,8 @@ function SessionPageContent({
         if (generation !== editRestoreGenerationRef.current) return;
         // Existing uploads belong to the draft being replaced. Ignore their
         // eventual completions so they cannot enter this historical edit.
-        for (const id of pendingUploadsRef.current.keys())
-          cancelledUploadIdsRef.current.add(id);
-        pendingUploadsRef.current.clear();
-        setUploadProgress([]);
-        attachmentOrderRef.current = restored.attachments.map(
-          (file) => file.id,
-        );
+        uploads.cancelPending();
+        uploads.setOrder(restored.attachments.map((file) => file.id));
         setAttachments(restored.attachments);
         setEditRewind({
           parentUuid,
@@ -1022,6 +957,8 @@ function SessionPageContent({
       setAttachments,
       showToast,
       t,
+      uploads.cancelPending,
+      uploads.setOrder,
     ],
   );
 
@@ -1033,12 +970,9 @@ function SessionPageContent({
     }
     setEditRewind(null);
     draftControlsRef.current?.clearDraft();
-    for (const id of pendingUploadsRef.current.keys())
-      cancelledUploadIdsRef.current.add(id);
-    pendingUploadsRef.current.clear();
-    setUploadProgress([]);
+    uploads.cancelPending();
     setAttachments([]);
-  }, [isRestoringEdit, setAttachments]);
+  }, [isRestoringEdit, setAttachments, uploads.cancelPending]);
 
   // Approval panel collapsed state (separate from message input collapse)
   const [approvalCollapsed, setApprovalCollapsed] = useState(false);
@@ -1049,6 +983,7 @@ function SessionPageContent({
   // Model switch modal state
   const [showModelSwitchModal, setShowModelSwitchModal] = useState(false);
   const [showGoalModal, setShowGoalModal] = useState(false);
+  const [goalInitialObjective, setGoalInitialObjective] = useState("");
   const [isRequestingPiCompaction, setIsRequestingPiCompaction] =
     useState(false);
   const [isStartingCodexCompaction, setIsStartingCodexCompaction] =
@@ -1172,15 +1107,47 @@ function SessionPageContent({
     }
   };
 
+  const requestCodexReview = async (
+    instructions?: string,
+  ): Promise<boolean> => {
+    if (status.owner !== "self" || !status.processId) {
+      showToast(t("codexReviewSessionNotRunning"), "error");
+      return false;
+    }
+    setScrollTrigger((prev) => prev + 1);
+    try {
+      await api.executeCodexControl(actualSessionId ?? sessionId, {
+        control: "review/start",
+        target: instructions
+          ? { type: "custom", instructions }
+          : { type: "uncommittedChanges" },
+        delivery: "inline",
+      });
+      showToast(t("codexReviewStarted"), "success");
+      return true;
+    } catch (err) {
+      console.error("Failed to start Codex review:", err);
+      const errorMsg = err instanceof Error ? err.message : String(err);
+      showToast(t("codexReviewFailed", { message: errorMsg }), "error");
+      return false;
+    }
+  };
+
+  const openCodexGoal = (objective?: string): boolean => {
+    if (status.owner !== "self" || !status.processId) {
+      showToast(t("codexGoalSessionNotRunning"), "error");
+      return false;
+    }
+    setGoalInitialObjective(objective ?? "");
+    setShowGoalModal(true);
+    return true;
+  };
+
   const handleSend = async (text: string, interruptBeforeSend = false) => {
     if (isRestoringEdit) return;
     const sideCommand = parseSideConversationCommand(text);
     if (sideCommand) {
-      if (
-        editRewind ||
-        attachments.length > 0 ||
-        pendingUploadsRef.current.size > 0
-      ) {
+      if (editRewind || attachments.length > 0 || uploads.hasPendingUploads) {
         draftControlsRef.current?.restoreFromStorage();
         showToast(
           t(editRewind ? "sideChatHistoricalEdit" : "sideChatAttachments"),
@@ -1212,6 +1179,22 @@ function SessionPageContent({
       }
       if (command.kind === "compact") {
         if (await requestCodexCompaction()) {
+          draftControlsRef.current?.clearDraft();
+        } else {
+          draftControlsRef.current?.restoreFromStorage();
+        }
+        return;
+      }
+      if (command.kind === "review" && !editRewind) {
+        if (await requestCodexReview(command.instructions)) {
+          draftControlsRef.current?.clearDraft();
+        } else {
+          draftControlsRef.current?.restoreFromStorage();
+        }
+        return;
+      }
+      if (command.kind === "goal" && !editRewind) {
+        if (openCodexGoal(command.objective)) {
           draftControlsRef.current?.clearDraft();
         } else {
           draftControlsRef.current?.restoreFromStorage();
@@ -1259,7 +1242,7 @@ function SessionPageContent({
     const currentAttachments = [...attachments];
 
     // Wait for any in-flight uploads to complete before sending
-    const pendingAtSendTime = [...pendingUploadsRef.current.values()];
+    const pendingAtSendTime = uploads.pendingUploads();
     if (pendingAtSendTime.length > 0) {
       updatePendingMessage(tempId, { status: t("sessionUploading") });
       setAttachments([]); // Clear input area immediately
@@ -1269,10 +1252,10 @@ function SessionPageContent({
       }
       currentAttachments.sort(
         (left, right) =>
-          attachmentOrderRef.current.indexOf(left.id) -
-          attachmentOrderRef.current.indexOf(right.id),
+          uploads.orderRef.current.indexOf(left.id) -
+          uploads.orderRef.current.indexOf(right.id),
       );
-      // Remove uploaded files that handleAttach added to state during the wait
+      // Remove uploaded files that uploads.attach added to state during the wait
       // (they're already captured in currentAttachments). Preserve any new uploads
       // started after send was clicked.
       const sentIds = new Set(currentAttachments.map((a) => a.id));
@@ -1626,7 +1609,7 @@ function SessionPageContent({
     const currentAttachments = [...attachments];
 
     // Wait for any in-flight uploads to complete before queuing
-    const pendingAtSendTime = [...pendingUploadsRef.current.values()];
+    const pendingAtSendTime = uploads.pendingUploads();
     if (pendingAtSendTime.length > 0) {
       updatePendingMessage(tempId, { status: t("sessionUploading") });
       setAttachments([]);
@@ -1636,8 +1619,8 @@ function SessionPageContent({
       }
       currentAttachments.sort(
         (left, right) =>
-          attachmentOrderRef.current.indexOf(left.id) -
-          attachmentOrderRef.current.indexOf(right.id),
+          uploads.orderRef.current.indexOf(left.id) -
+          uploads.orderRef.current.indexOf(right.id),
       );
       const sentIds = new Set(currentAttachments.map((a) => a.id));
       setAttachments((prev) => prev.filter((a) => !sentIds.has(a.id)));
@@ -1683,13 +1666,28 @@ function SessionPageContent({
     [setSessionModel, showToast, t],
   );
 
-  const handleCustomCommand = useCallback((command: string) => {
-    if (command === "model") {
-      setShowModelSwitchModal(true);
-      return true;
-    }
-    return false;
-  }, []);
+  const handleCustomCommand = useCallback(
+    (command: string) => {
+      if (command === "model") {
+        setShowModelSwitchModal(true);
+        return true;
+      }
+      // Picking `/goal` from the menu opens the dialog directly; typing
+      // `/goal <objective>` and sending prefills it instead.
+      if (
+        command === "goal" &&
+        effectiveProvider === "codex" &&
+        status.owner === "self" &&
+        status.processId
+      ) {
+        setGoalInitialObjective("");
+        setShowGoalModal(true);
+        return true;
+      }
+      return false;
+    },
+    [effectiveProvider, status],
+  );
 
   const handleAbort = async () => {
     if (status.owner === "self" && status.processId) {
@@ -1940,120 +1938,6 @@ function SessionPageContent({
       showToast,
       t,
     ],
-  );
-
-  // Handle file attachment uploads
-  // Each file uploads independently (parallel) and its promise is tracked
-  // so handleSend can wait for in-flight uploads before sending
-  const handleAttach = useCallback(
-    (files: File[], beforeAttachmentId?: string) => {
-      for (const file of files) {
-        const tempId = generateUUID();
-        const order = attachmentOrderRef.current;
-        const anchorIndex = beforeAttachmentId
-          ? order.indexOf(beforeAttachmentId)
-          : -1;
-        order.splice(anchorIndex < 0 ? order.length : anchorIndex, 0, tempId);
-
-        // Add to progress tracking
-        setUploadProgress((prev) => [
-          ...prev,
-          {
-            fileId: tempId,
-            fileName: file.name,
-            mimeType: file.type,
-            bytesUploaded: 0,
-            totalBytes: file.size,
-            percent: 0,
-          },
-        ]);
-
-        // Start upload and track promise for handleSend to await
-        const uploadPromise = connection
-          .upload(projectId, sessionId, file, {
-            onProgress: (bytesUploaded) => {
-              setUploadProgress((prev) =>
-                prev.map((p) =>
-                  p.fileId === tempId
-                    ? {
-                        ...p,
-                        bytesUploaded,
-                        percent: Math.round((bytesUploaded / file.size) * 100),
-                      }
-                    : p,
-                ),
-              );
-            },
-          })
-          .then(
-            (uploaded) => {
-              if (cancelledUploadIdsRef.current.has(tempId)) return null;
-              const order = attachmentOrderRef.current;
-              const index = order.indexOf(tempId);
-              if (index >= 0) order[index] = uploaded.id;
-              else order.push(uploaded.id);
-              setAttachments((prev) =>
-                [...prev, uploaded].sort(
-                  (left, right) =>
-                    order.indexOf(left.id) - order.indexOf(right.id),
-                ),
-              );
-              return uploaded;
-            },
-            (err) => {
-              if (cancelledUploadIdsRef.current.has(tempId)) return null;
-              console.error("Upload failed:", err);
-              const errorMsg =
-                err instanceof Error ? err.message : t("sessionShareFailed");
-              showToast(
-                t("sessionUploadFailed", {
-                  file: file.name,
-                  message: errorMsg,
-                }),
-                "error",
-              );
-              return null as UploadedFile | null;
-            },
-          )
-          .finally(() => {
-            setUploadProgress((prev) =>
-              prev.filter((p) => p.fileId !== tempId),
-            );
-            pendingUploadsRef.current.delete(tempId);
-            cancelledUploadIdsRef.current.delete(tempId);
-          });
-
-        pendingUploadsRef.current.set(tempId, uploadPromise);
-      }
-    },
-    [projectId, sessionId, setAttachments, showToast, connection, t],
-  );
-
-  const handleRemoveAttachment = useCallback(
-    (id: string) => {
-      if (pendingUploadsRef.current.has(id)) {
-        cancelledUploadIdsRef.current.add(id);
-        pendingUploadsRef.current.delete(id);
-        setUploadProgress((prev) =>
-          prev.filter((progress) => progress.fileId !== id),
-        );
-      }
-      setAttachments((prev) => prev.filter((a) => a.id !== id));
-    },
-    [setAttachments],
-  );
-
-  const restoreAttachment = useCallback(
-    (file: UploadedFile) => {
-      setAttachments((prev) =>
-        [...prev.filter((item) => item.id !== file.id), file].sort(
-          (left, right) =>
-            attachmentOrderRef.current.indexOf(left.id) -
-            attachmentOrderRef.current.indexOf(right.id),
-        ),
-      );
-    },
-    [setAttachments],
   );
 
   // Check if pending request is an AskUserQuestion
@@ -2536,7 +2420,10 @@ function SessionPageContent({
                       session?.provider === "codex" &&
                       status.owner === "self" &&
                       status.processId
-                        ? () => setShowGoalModal(true)
+                        ? () => {
+                            setGoalInitialObjective("");
+                            setShowGoalModal(true);
+                          }
                         : undefined
                     }
                     sharingConfigured={sharingConfigured}
@@ -2677,6 +2564,7 @@ function SessionPageContent({
         {showGoalModal && status.owner === "self" && status.processId && (
           <GoalModal
             processId={status.processId}
+            initialObjective={goalInitialObjective}
             onClose={() => setShowGoalModal(false)}
           />
         )}
@@ -2788,16 +2676,13 @@ function SessionPageContent({
             onQueue={queueMessage}
             editRewindActive={Boolean(editRewind)}
             attachments={attachments}
-            onAttach={handleAttach}
-            onRemoveAttachment={handleRemoveAttachment}
-            onRestoreAttachment={restoreAttachment}
-            attachmentOrder={attachmentOrderRef.current}
-            uploadProgress={uploadProgress}
-            commandPrefix={commandPrefix}
-            commandLabel={commandLabel}
-            commands={activeCommands}
-            showCommandButton={showCommandButton}
+            onAttach={uploads.attach}
+            onRemoveAttachment={(id) => uploads.remove([id])}
+            onRestoreAttachment={uploads.restoreFile}
+            attachmentOrder={uploads.orderRef.current}
+            uploadProgress={uploads.uploadProgress}
             commandButtons={commandButtons}
+            onCommandMenuOpen={refreshCommandListing}
             onCustomCommand={handleCustomCommand}
             onDraftControlsReady={handleDraftControlsReady}
             onQuestionSubmit={handleQuestionSubmit}

@@ -19,7 +19,7 @@ import { serializeComposerContent } from "../AttachmentComposer";
 import { MessageInput } from "../MessageInput";
 import { NewSessionForm } from "../NewSessionForm";
 
-const { upload } = vi.hoisted(() => ({
+const { upload, fetchBlob } = vi.hoisted(() => ({
   upload:
     vi.fn<
       (
@@ -28,10 +28,11 @@ const { upload } = vi.hoisted(() => ({
         file: File,
       ) => Promise<UploadedFile>
     >(),
+  fetchBlob: vi.fn<(path: string) => Promise<Blob>>(),
 }));
 
 vi.mock("../../hooks/useConnection", () => ({
-  useConnection: () => ({ upload }),
+  useConnection: () => ({ upload, fetchBlob }),
 }));
 vi.mock("../../hooks/useProviders", async (importOriginal) => ({
   ...(await importOriginal<typeof import("../../hooks/useProviders")>()),
@@ -182,6 +183,32 @@ async function chooseFiles(files: File[]) {
   });
 }
 
+type WrittenClipboardItem = Record<string, Blob | Promise<Blob>>;
+
+function installRichClipboard(): WrittenClipboardItem[] {
+  const written: WrittenClipboardItem[] = [];
+  vi.stubGlobal(
+    "ClipboardItem",
+    class {
+      constructor(representations: WrittenClipboardItem) {
+        written.push(representations);
+      }
+      static supports(type: string) {
+        return type === "text/html";
+      }
+    },
+  );
+  Object.defineProperty(window, "isSecureContext", {
+    configurable: true,
+    value: true,
+  });
+  Object.defineProperty(navigator, "clipboard", {
+    configurable: true,
+    value: { write: vi.fn(async () => {}), writeText: vi.fn(async () => {}) },
+  });
+  return written;
+}
+
 function image(name: string, content: string) {
   return new File([content], name, { type: "image/png" });
 }
@@ -198,6 +225,7 @@ async function readFile(file: File): Promise<string> {
 beforeEach(() => {
   localStorage.clear();
   upload.mockReset();
+  fetchBlob.mockReset();
   upload.mockImplementation(async (_project, _session, file) =>
     uploadedFile(file),
   );
@@ -354,6 +382,105 @@ describe.each<Entry>(["reply", "new session", "compact new session"])(
       ]);
     });
 
+    it("attaches dropped files at the caret and ignores drops without files", async () => {
+      const { composer, submit } = setup(entry);
+      composer.textContent = "look here";
+      fireEvent.input(composer);
+      const dropped = image("drop.png", "dropped");
+      const dataTransfer = {
+        types: ["Files"],
+        files: [dropped],
+        dropEffect: "",
+      };
+      const over = fireEvent.dragOver(composer, { dataTransfer });
+      expect(over).toBe(false);
+      expect(composer.getAttribute("data-drag-over")).toBe("true");
+      await act(async () => {
+        fireEvent.drop(composer, { dataTransfer });
+      });
+      expect(composer.getAttribute("data-drag-over")).toBeNull();
+      await waitFor(() => expect(cards(composer)).toHaveLength(1));
+      expect(serializeComposerContent(composer)).toContain("@[drop.png]");
+
+      fireEvent.drop(composer, {
+        dataTransfer: { types: ["text/plain"], files: [] },
+      });
+      expect(cards(composer)).toHaveLength(1);
+      const submitted = await submit();
+      expect(submitted.files.map((file) => file.name)).toEqual(["drop.png"]);
+    });
+
+    it("restores every attachment of a v2 copy and drops tokens it cannot restore", async () => {
+      const { composer, submit } = setup(entry);
+      const reference =
+        "/api/projects/cHJvamVjdA/sessions/other/upload/123e4567-e89b-12d3-a456-426614174000_big.zip";
+      fetchBlob.mockResolvedValue(
+        new Blob(["zip bytes"], { type: "application/zip" }),
+      );
+      const copied = "a @[shot.png] b @[notes.pdf] c @[big.zip] d @[gone.txt]";
+      await act(async () => {
+        fireEvent.paste(composer, {
+          clipboardData: {
+            items: [],
+            getData: (type: string) =>
+              type === "text/plain"
+                ? copied
+                : type === "text/html"
+                  ? `<div data-yep-anywhere-user-input="2">
+                      <img src="data:image/png;base64,Zmlyc3Q=" data-yep-anywhere-attachment-name="shot.png" data-yep-anywhere-attachment-type="image/png">
+                      <span data-yep-anywhere-attachment-name="notes.pdf" data-yep-anywhere-attachment-type="application/pdf" data-yep-anywhere-attachment-data="data:application/pdf;base64,JVBERg=="></span>
+                      <span data-yep-anywhere-attachment-name="big.zip" data-yep-anywhere-attachment-type="application/zip" data-yep-anywhere-attachment-ref="${reference}"></span>
+                      <span data-yep-anywhere-attachment-name="gone.txt" data-yep-anywhere-attachment-missing=""></span>
+                    </div>`
+                  : "",
+          },
+        });
+      });
+
+      await waitFor(() => expect(cards(composer)).toHaveLength(3));
+      expect(fetchBlob).toHaveBeenCalledWith(reference.slice("/api".length));
+      const pastedText = serializeComposerContent(composer);
+      expect(pastedText).toBe("a @[shot.png] b @[notes.pdf] c @[big.zip] d");
+      const submitted = await submit();
+      expect(submitted.files.map((file) => [file.name, file.type])).toEqual([
+        ["shot.png", "image/png"],
+        ["notes.pdf", "application/pdf"],
+        ["big.zip", "application/zip"],
+      ]);
+      expect(await Promise.all(submitted.files.map(readFile))).toEqual([
+        "first",
+        "%PDF",
+        "zip bytes",
+      ]);
+    });
+
+    it("copies the whole draft with every attachment", async () => {
+      const { composer } = setup(entry);
+      const written = installRichClipboard();
+      fetchBlob.mockImplementation(async () => new Blob(["uploaded"]));
+      const pdf = new File(["%PDF"], "notes.pdf", { type: "application/pdf" });
+      await chooseFiles([image("shot.png", "pixels"), pdf]);
+      composer.focus();
+
+      await act(async () => {
+        fireEvent.click(
+          screen.getByRole("button", { name: "Copy input with attachments" }),
+        );
+      });
+
+      await waitFor(() => expect(written).toHaveLength(1));
+      const html = await readFile(
+        (await written[0]?.["text/html"]) as unknown as File,
+      );
+      expect(html).toContain('data-yep-anywhere-user-input="2"');
+      expect(html).toContain('data-yep-anywhere-attachment-name="shot.png"');
+      expect(html).toContain('data-yep-anywhere-attachment-name="notes.pdf"');
+      expect(html).not.toContain("data-yep-anywhere-attachment-missing");
+      expect(
+        await readFile(written[0]?.["text/plain"] as unknown as File),
+      ).toBe(serializeComposerContent(composer));
+    });
+
     it("restores the original file and order when native undo restores a deleted same-name card", async () => {
       const { composer, submit } = setup(entry);
       const firstFile = image("shot.png", "first");
@@ -383,6 +510,35 @@ describe.each<Entry>(["reply", "new session", "compact new session"])(
       expect(submitted.files[0]).toBe(firstFile);
       expect(submitted.files[1]).toBe(secondFile);
       expect(submitted.text).toBe(originalText.trim());
+    });
+  },
+);
+
+describe.each<Exclude<Entry, "reply">>(["new session", "compact new session"])(
+  "%s command completion",
+  (entry) => {
+    it("completes provider commands inline like the reply composer", () => {
+      const { composer } = setup(entry);
+      composer.focus();
+      composer.textContent = "/doc";
+      const selection = window.getSelection();
+      const range = document.createRange();
+      const text = composer.firstChild;
+      if (!text) throw new Error("Missing editable text");
+      range.setStart(text, 4);
+      range.collapse(true);
+      selection?.removeAllRanges();
+      selection?.addRange(range);
+      fireEvent.input(composer, { inputType: "insertText", data: "/doc" });
+      fireEvent.keyUp(composer);
+
+      const listbox = screen.getByRole("listbox", { name: "Slash commands" });
+      expect(listbox.className).toContain("command-completion-menu-below");
+      expect(screen.getByRole("option", { name: "/doctor" })).toBeDefined();
+
+      fireEvent.keyDown(composer, { key: "Tab" });
+      expect(serializeComposerContent(composer)).toBe("/doctor ");
+      expect(screen.queryByRole("listbox")).toBeNull();
     });
   },
 );

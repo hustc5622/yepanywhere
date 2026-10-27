@@ -3,13 +3,15 @@ import { type RefObject, useState } from "react";
 import { useModelSettings } from "../hooks/useModelSettings";
 import { useI18n } from "../i18n";
 import type { AgentCommandConfig } from "../lib/agentCommands";
+import type { ClipboardUserInputCopyResult } from "../lib/clipboard";
 import type { ContextUsage, PermissionMode } from "../types";
+import { ComposerToolbar } from "./ComposerToolbar";
 import { ContextStatusModal } from "./ContextStatusModal";
 import { ContextUsageIndicator } from "./ContextUsageIndicator";
 import { ModeSelector } from "./ModeSelector";
 import { SideConversationButton } from "./SideConversationButton";
-import { SlashCommandButton } from "./SlashCommandButton";
-import { VoiceInputButton, type VoiceInputButtonRef } from "./VoiceInputButton";
+import { ThinkingToggleButton } from "./ThinkingToggleButton";
+import type { VoiceInputButtonRef } from "./VoiceInputButton";
 
 export interface MessageInputToolbarProps {
   // Mode selector
@@ -28,6 +30,9 @@ export interface MessageInputToolbarProps {
   canAttach?: boolean;
   attachmentCount?: number;
   onAttachClick?: () => void;
+  /** Copy the whole draft, attachments included. */
+  onCopyInput?: () => Promise<ClipboardUserInputCopyResult>;
+  canCopy?: boolean;
 
   // Voice input
   voiceButtonRef?: RefObject<VoiceInputButtonRef | null>;
@@ -83,6 +88,8 @@ export function MessageInputToolbar({
   canAttach,
   attachmentCount = 0,
   onAttachClick,
+  onCopyInput,
+  canCopy,
   voiceButtonRef,
   onVoiceTranscript,
   onInterimTranscript,
@@ -134,11 +141,11 @@ export function MessageInputToolbar({
       : []);
 
   return (
-    <div
-      className={`message-input-toolbar${onQueue ? " message-input-toolbar-send-options" : ""}`}
-    >
-      <div className="message-input-left">
-        {onModeChange && supportsPermissionMode && (
+    <ComposerToolbar
+      variant="session"
+      className={onQueue ? "message-input-toolbar-send-options" : undefined}
+      leading={
+        onModeChange && supportsPermissionMode ? (
           <ModeSelector
             mode={mode}
             onModeChange={onModeChange}
@@ -147,236 +154,181 @@ export function MessageInputToolbar({
             provider={provider}
             permissionModes={permissionModes}
           />
-        )}
-        <button
-          type="button"
-          className="attach-button"
-          onClick={onAttachClick}
-          disabled={!canAttach}
-          title={
-            canAttach ? t("toolbarAttachFiles") : t("toolbarAttachDisabled")
-          }
-        >
-          <svg
-            width="16"
-            height="16"
-            viewBox="0 0 24 24"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="2"
-            aria-hidden="true"
-          >
-            <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-          </svg>
-          {attachmentCount > 0 && (
-            <span className="attach-count">{attachmentCount}</span>
-          )}
-        </button>
-        {supportsThinkingToggle && (
-          <button
-            type="button"
-            className={`thinking-toggle-button ${thinkingMode !== "off" ? `active ${thinkingMode}` : ""}`}
-            onClick={cycleThinkingMode}
-            title={
-              thinkingMode === "off"
-                ? t("newSessionThinkingOff")
-                : thinkingMode === "auto"
-                  ? t("newSessionThinkingAuto")
-                  : t("newSessionThinkingOn", { level: thinkingLevel })
-            }
-            aria-label={t("newSessionThinkingMode", { mode: thinkingMode })}
-          >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
-            >
-              <circle cx="12" cy="12" r="10" />
-              <polyline points="12 6 12 12 16 14" />
-              {thinkingMode === "auto" && (
-                <g>
-                  <circle
-                    cx="19"
-                    cy="5"
-                    r="5.5"
-                    fill="currentColor"
-                    stroke="none"
-                  />
-                  <text
-                    x="19"
-                    y="5"
-                    textAnchor="middle"
-                    dominantBaseline="central"
-                    fill="var(--bg-primary, #1a1a2e)"
-                    fontSize="8"
-                    fontWeight="700"
-                    fontFamily="var(--font-sans)"
-                    stroke="none"
-                  >
-                    A
-                  </text>
-                </g>
-              )}
-            </svg>
-          </button>
-        )}
-        {voiceButtonRef && onVoiceTranscript && onInterimTranscript && (
-          <VoiceInputButton
-            ref={voiceButtonRef}
-            onTranscript={onVoiceTranscript}
-            onInterimTranscript={onInterimTranscript}
-            onListeningStart={onListeningStart}
-            disabled={voiceDisabled}
+        ) : undefined
+      }
+      attach={{
+        onClick: () => onAttachClick?.(),
+        disabled: !canAttach,
+        title: canAttach ? t("toolbarAttachFiles") : t("toolbarAttachDisabled"),
+        count: attachmentCount,
+      }}
+      copy={onCopyInput ? { onCopy: onCopyInput, disabled: !canCopy } : null}
+      thinking={
+        supportsThinkingToggle ? (
+          <ThinkingToggleButton
+            mode={thinkingMode}
+            levelLabel={thinkingLevel}
+            onCycle={cycleThinkingMode}
           />
-        )}
-        {onSelectCommand &&
-          visibleCommandButtons.map((button) => (
-            <SlashCommandButton
-              key={button.prefix}
-              commands={button.commands}
-              details={button.details}
-              onSelectCommand={onSelectCommand}
-              disabled={voiceDisabled}
-              prefix={button.prefix}
-              label={button.label}
+        ) : undefined
+      }
+      voice={
+        voiceButtonRef && onVoiceTranscript && onInterimTranscript
+          ? {
+              ref: voiceButtonRef,
+              onTranscript: onVoiceTranscript,
+              onInterimTranscript,
+              onListeningStart,
+              disabled: voiceDisabled,
+            }
+          : null
+      }
+      commands={
+        onSelectCommand
+          ? {
+              buttons: visibleCommandButtons,
+              onSelect: onSelectCommand,
+              disabled: voiceDisabled,
+            }
+          : null
+      }
+      trailing={
+        <>
+          {onOpenSideConversation && (
+            <SideConversationButton
+              onClick={onOpenSideConversation}
+              expanded={sideConversationOpen}
             />
-          ))}
-        {onOpenSideConversation && (
-          <SideConversationButton
-            onClick={onOpenSideConversation}
-            expanded={sideConversationOpen}
-          />
-        )}
-        <ContextUsageIndicator
-          usage={contextUsage}
-          size={16}
-          labelMode="tokens"
-          onClick={
-            projectId && sessionId
-              ? () => setIsContextModalOpen(true)
-              : undefined
-          }
-          ariaLabel={t("contextBreakdownTitle")}
-        />
-      </div>
-      <div className="message-input-actions">
-        {/* Pending approval indicator */}
-        {pendingApproval && (
-          <button
-            type="button"
-            className={`pending-approval-indicator ${pendingApproval.type}`}
-            onClick={pendingApproval.onExpand}
-            title={
-              pendingApproval.type === "tool-approval"
-                ? t("toolbarPendingApprovalExpand")
-                : t("toolbarPendingQuestionExpand")
+          )}
+          <ContextUsageIndicator
+            usage={contextUsage}
+            size={16}
+            labelMode="tokens"
+            onClick={
+              projectId && sessionId
+                ? () => setIsContextModalOpen(true)
+                : undefined
             }
-          >
-            <span className="pending-approval-dot" />
-            <span className="pending-approval-text">
-              {pendingApproval.type === "tool-approval"
-                ? t("toolbarApproval")
-                : t("toolbarQuestion")}
-            </span>
-          </button>
-        )}
-        {/* Keep both submission choices visible while the agent is running. */}
-        {onQueue && (
-          <button
-            type="button"
-            onClick={onQueue}
-            disabled={disabled || !canSend}
-            className="queue-button message-submit-choice"
-            title={t("toolbarQueueTitle")}
-            aria-label={t("toolbarQueueLabel")}
-          >
-            <svg
-              width="16"
-              height="16"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              strokeLinecap="round"
-              strokeLinejoin="round"
-              aria-hidden="true"
+            ariaLabel={t("contextBreakdownTitle")}
+          />
+        </>
+      }
+      actionsClassName="message-input-actions"
+      actions={
+        <>
+          {/* Pending approval indicator */}
+          {pendingApproval && (
+            <button
+              type="button"
+              className={`pending-approval-indicator ${pendingApproval.type}`}
+              onClick={pendingApproval.onExpand}
+              title={
+                pendingApproval.type === "tool-approval"
+                  ? t("toolbarPendingApprovalExpand")
+                  : t("toolbarPendingQuestionExpand")
+              }
             >
-              <line x1="8" y1="6" x2="21" y2="6" />
-              <line x1="8" y1="12" x2="21" y2="12" />
-              <line x1="8" y1="18" x2="21" y2="18" />
-              <line x1="3" y1="6" x2="3.01" y2="6" />
-              <line x1="3" y1="12" x2="3.01" y2="12" />
-              <line x1="3" y1="18" x2="3.01" y2="18" />
-            </svg>
-            <span>{t("toolbarQueueLabel")}</span>
-          </button>
-        )}
-        {onInterruptSend && (
-          <button
-            type="button"
-            onClick={onInterruptSend}
-            disabled={disabled || !canSend}
-            className="queue-button message-submit-choice"
-            title={t("toolbarInterruptTitle")}
-            aria-label={t("toolbarInterruptLabel")}
-          >
-            <span className="message-submit-label-full">
-              {t("toolbarInterruptLabel")}
-            </span>
-            <span className="message-submit-label-compact" aria-hidden="true">
-              {t("toolbarInterruptCompact")}
-            </span>
-          </button>
-        )}
-        {onSend && (onQueue || !showStop || canSend) && (
-          <button
-            type="button"
-            onClick={onSend}
-            disabled={disabled || !canSend}
-            className={`send-button${onQueue ? " message-submit-choice" : ""}`}
-            title={onQueue ? activeSendTitle : undefined}
-            aria-label={onQueue ? activeSendLabel : t("toolbarSend")}
-          >
-            <span className="send-icon" aria-hidden="true">
-              ↑
-            </span>
-            {onQueue && (
-              <>
-                <span className="message-submit-label-full">
-                  {activeSendLabel}
-                </span>
-                <span
-                  className="message-submit-label-compact"
-                  aria-hidden="true"
-                >
-                  {t(
-                    replyOnSend
-                      ? "toolbarReplyContinueCompact"
-                      : "toolbarInsertCompact",
-                  )}
-                </span>
-              </>
-            )}
-          </button>
-        )}
-        {showStop && (onQueue || !canSend) && (
-          <button
-            type="button"
-            onClick={onStop}
-            className="stop-button"
-            title={t("toolbarStop")}
-            aria-label={t("toolbarStop")}
-          >
-            <span className="stop-icon" />
-          </button>
-        )}
-      </div>
+              <span className="pending-approval-dot" />
+              <span className="pending-approval-text">
+                {pendingApproval.type === "tool-approval"
+                  ? t("toolbarApproval")
+                  : t("toolbarQuestion")}
+              </span>
+            </button>
+          )}
+          {/* Keep both submission choices visible while the agent is running. */}
+          {onQueue && (
+            <button
+              type="button"
+              onClick={onQueue}
+              disabled={disabled || !canSend}
+              className="queue-button message-submit-choice"
+              title={t("toolbarQueueTitle")}
+              aria-label={t("toolbarQueueLabel")}
+            >
+              <svg
+                width="16"
+                height="16"
+                viewBox="0 0 24 24"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+                aria-hidden="true"
+              >
+                <line x1="8" y1="6" x2="21" y2="6" />
+                <line x1="8" y1="12" x2="21" y2="12" />
+                <line x1="8" y1="18" x2="21" y2="18" />
+                <line x1="3" y1="6" x2="3.01" y2="6" />
+                <line x1="3" y1="12" x2="3.01" y2="12" />
+                <line x1="3" y1="18" x2="3.01" y2="18" />
+              </svg>
+              <span>{t("toolbarQueueLabel")}</span>
+            </button>
+          )}
+          {onInterruptSend && (
+            <button
+              type="button"
+              onClick={onInterruptSend}
+              disabled={disabled || !canSend}
+              className="queue-button message-submit-choice"
+              title={t("toolbarInterruptTitle")}
+              aria-label={t("toolbarInterruptLabel")}
+            >
+              <span className="message-submit-label-full">
+                {t("toolbarInterruptLabel")}
+              </span>
+              <span className="message-submit-label-compact" aria-hidden="true">
+                {t("toolbarInterruptCompact")}
+              </span>
+            </button>
+          )}
+          {onSend && (onQueue || !showStop || canSend) && (
+            <button
+              type="button"
+              onClick={onSend}
+              disabled={disabled || !canSend}
+              className={`send-button${onQueue ? " message-submit-choice" : ""}`}
+              title={onQueue ? activeSendTitle : undefined}
+              aria-label={onQueue ? activeSendLabel : t("toolbarSend")}
+            >
+              <span className="send-icon" aria-hidden="true">
+                ↑
+              </span>
+              {onQueue && (
+                <>
+                  <span className="message-submit-label-full">
+                    {activeSendLabel}
+                  </span>
+                  <span
+                    className="message-submit-label-compact"
+                    aria-hidden="true"
+                  >
+                    {t(
+                      replyOnSend
+                        ? "toolbarReplyContinueCompact"
+                        : "toolbarInsertCompact",
+                    )}
+                  </span>
+                </>
+              )}
+            </button>
+          )}
+          {showStop && (onQueue || !canSend) && (
+            <button
+              type="button"
+              onClick={onStop}
+              className="stop-button"
+              title={t("toolbarStop")}
+              aria-label={t("toolbarStop")}
+            >
+              <span className="stop-icon" />
+            </button>
+          )}
+        </>
+      }
+    >
       {isContextModalOpen && projectId && sessionId && (
         <ContextStatusModal
           projectId={projectId}
@@ -384,6 +336,6 @@ export function MessageInputToolbar({
           onClose={() => setIsContextModalOpen(false)}
         />
       )}
-    </div>
+    </ComposerToolbar>
   );
 }

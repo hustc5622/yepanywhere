@@ -10,6 +10,8 @@ import { Modal } from "./ui/Modal";
 
 interface GoalModalProps {
   processId: string;
+  /** Prefill for the objective field, e.g. from `/goal <objective>`. */
+  initialObjective?: string;
   onClose: () => void;
 }
 
@@ -29,13 +31,17 @@ const PROMPT_ACTIONS = [
  * Supported providers: Codex (`thread/goal/*` native controls, formatted
  * into a `ProviderGoalState` text summary).
  */
-export function GoalModal({ processId, onClose }: GoalModalProps) {
+export function GoalModal({
+  processId,
+  initialObjective = "",
+  onClose,
+}: GoalModalProps) {
   const { t } = useI18n();
   const { showToast } = useToastContext();
   const [loading, setLoading] = useState(true);
   const [busy, setBusy] = useState(false);
   const [status, setStatus] = useState("");
-  const [objective, setObjective] = useState("");
+  const [objective, setObjective] = useState(initialObjective);
 
   useEffect(() => {
     api

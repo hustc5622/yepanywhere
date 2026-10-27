@@ -17,6 +17,21 @@ describe("Codex input commands", () => {
     expect(parseCodexSlashCommand("/compactness")).toEqual({ kind: "none" });
   });
 
+  it("parses review and goal commands with optional text", () => {
+    expect(parseCodexSlashCommand("/review")).toEqual({ kind: "review" });
+    expect(parseCodexSlashCommand(" /review focus on auth\n ")).toEqual({
+      kind: "review",
+      instructions: "focus on auth",
+    });
+    expect(parseCodexSlashCommand("/reviewer")).toEqual({ kind: "none" });
+    expect(parseCodexSlashCommand("/goal")).toEqual({ kind: "goal" });
+    expect(parseCodexSlashCommand("/goal ship v2")).toEqual({
+      kind: "goal",
+      objective: "ship v2",
+    });
+    expect(parseCodexSlashCommand("please /goal x")).toEqual({ kind: "none" });
+  });
+
   it("normalizes enabled skills from app-server skills/list", () => {
     expect(
       parseCodexSkillsList({

@@ -9,13 +9,31 @@ export interface CodexSkillCommand {
 export type CodexSlashCommandResult =
   | { kind: "none" }
   | { kind: "compact" }
-  | { kind: "invalid-compact-args" };
+  | { kind: "invalid-compact-args" }
+  /** `review/start`: bare → uncommitted changes, text → custom instructions. */
+  | { kind: "review"; instructions?: string }
+  /** Opens the goal dialog; trailing text prefills the objective. */
+  | { kind: "goal"; objective?: string };
 
+/**
+ * Codex slash commands Yep intercepts. Codex itself parses slash commands
+ * only in its terminal UI, so anything else is sent as ordinary text.
+ */
 export function parseCodexSlashCommand(text: string): CodexSlashCommandResult {
   const trimmed = text.trim();
   if (trimmed === "/compact") return { kind: "compact" };
   if (/^\/compact\s+/u.test(trimmed)) {
     return { kind: "invalid-compact-args" };
+  }
+  const review = /^\/review(?:\s+([\s\S]*))?$/u.exec(trimmed);
+  if (review) {
+    const instructions = review[1]?.trim();
+    return instructions ? { kind: "review", instructions } : { kind: "review" };
+  }
+  const goal = /^\/goal(?:\s+([\s\S]*))?$/u.exec(trimmed);
+  if (goal) {
+    const objective = goal[1]?.trim();
+    return objective ? { kind: "goal", objective } : { kind: "goal" };
   }
   return { kind: "none" };
 }

@@ -1,33 +1,17 @@
 import type { ProviderName, UploadedFile } from "@yep-anywhere/shared";
-import {
-  type KeyboardEvent,
-  useCallback,
-  useEffect,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import { useComposerDocument } from "../hooks/useComposerDocument";
+import { useEffect, useMemo, useRef, useState } from "react";
+import { useComposer } from "../hooks/useComposer";
+import { useConnection } from "../hooks/useConnection";
 import {
   type DraftControls,
   useDraftPersistence,
 } from "../hooks/useDraftPersistence";
 import { useI18n } from "../i18n";
 import type { AgentCommandConfig } from "../lib/agentCommands";
-import {
-  handleComposerSubmitKey,
-  isComposerComposing,
-} from "../lib/composerKeyboard";
 import type { ContextUsage, PermissionMode } from "../types";
-import {
-  AttachmentComposer,
-  type AttachmentComposerHandle,
-} from "./AttachmentComposer";
-import { AttachmentPreviewModal } from "./AttachmentPreviewModal";
-import { CommandMenuItemContent } from "./CommandMenuItemContent";
-import { ComposerAttachmentCard } from "./ComposerAttachmentCard";
+import type { ComposerAttachment } from "./AttachmentComposer";
+import { ComposerEditor } from "./ComposerEditor";
 import { MessageInputToolbar } from "./MessageInputToolbar";
-import type { VoiceInputButtonRef } from "./VoiceInputButton";
 
 /** Progress info for an in-flight upload */
 export interface UploadProgress {
@@ -40,54 +24,6 @@ export interface UploadProgress {
 }
 
 type CommandPrefix = "/" | "$";
-
-interface ActiveCommandToken {
-  start: number;
-  end: number;
-  query: string;
-}
-
-function findActiveCommandToken(
-  text: string,
-  cursorPosition: number,
-  prefix: CommandPrefix,
-): ActiveCommandToken | null {
-  if (cursorPosition < 0 || cursorPosition > text.length) return null;
-
-  const beforeCursor = text.slice(0, cursorPosition);
-  const tokenStart = Math.max(
-    beforeCursor.lastIndexOf(" "),
-    beforeCursor.lastIndexOf("\n"),
-    beforeCursor.lastIndexOf("\t"),
-  );
-  const start = tokenStart + 1;
-  const token = beforeCursor.slice(start);
-
-  if (!token.startsWith(prefix)) return null;
-  if (token.length > 1 && token.includes(prefix, 1)) return null;
-
-  return {
-    start,
-    end: cursorPosition,
-    query: token.slice(prefix.length),
-  };
-}
-
-function filterCommands(commands: string[], query: string): string[] {
-  const normalizedQuery = query.toLowerCase();
-  const deduped = Array.from(new Set(commands)).filter(Boolean);
-
-  if (!normalizedQuery) return deduped;
-
-  return deduped
-    .filter((command) => command.toLowerCase().includes(normalizedQuery))
-    .sort((a, b) => {
-      const aStarts = a.toLowerCase().startsWith(normalizedQuery);
-      const bStarts = b.toLowerCase().startsWith(normalizedQuery);
-      if (aStarts !== bStarts) return aStarts ? -1 : 1;
-      return a.localeCompare(b);
-    });
-}
 
 interface Props {
   onSend: (text: string) => void;
@@ -147,6 +83,8 @@ interface Props {
   commandButtons?: AgentCommandConfig[];
   /** Callback for custom client-side "/" commands (e.g., "model"). Return true if handled. */
   onCustomCommand?: (command: string) => boolean;
+  /** A command menu opened (inline or toolbar); a good moment to refresh. */
+  onCommandMenuOpen?: () => void;
 }
 
 export function MessageInput({
@@ -186,10 +124,11 @@ export function MessageInput({
   commandLabel = "Commands",
   commandButtons,
   onCustomCommand,
+  onCommandMenuOpen,
 }: Props) {
   const { t } = useI18n();
+  const connection = useConnection();
   const [text, setText, controls] = useDraftPersistence(draftKey);
-  const textareaRef = useRef<AttachmentComposerHandle>(null);
   const removedAttachmentsRef = useRef<{
     key: string;
     files: Map<string, UploadedFile>;
@@ -202,42 +141,12 @@ export function MessageInput({
     if (file) removedAttachmentsRef.current.files.set(id, file);
     onRemoveAttachment?.(id);
   };
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const voiceButtonRef = useRef<VoiceInputButtonRef>(null);
   // User-controlled collapse state (independent of external collapse from approval panel)
   const [userCollapsed, setUserCollapsed] = useState(false);
-  const [interimTranscript, setInterimTranscript] = useState("");
-  const [cursorPosition, setCursorPosition] = useState(0);
-  const [activeCommandIndex, setActiveCommandIndex] = useState(0);
-  const [dismissedCompletionKey, setDismissedCompletionKey] = useState<
-    string | null
-  >(null);
-
-  // Combined display text: committed text + interim transcript
-  const displayText = interimTranscript
-    ? text + (text.trimEnd() ? " " : "") + interimTranscript
-    : text;
-
-  // Auto-scroll textarea when voice input updates (interim transcript changes)
-  // Browser handles scrolling for normal typing, but programmatic updates need explicit scroll
-  useEffect(() => {
-    if (interimTranscript) {
-      const textarea = textareaRef.current;
-      if (textarea) {
-        textarea.scrollTop = textarea.scrollHeight;
-      }
-    }
-  }, [interimTranscript]);
-
   // Panel is collapsed if user collapsed it OR if externally collapsed (approval panel showing)
   const collapsed = userCollapsed || externalCollapsed;
 
   const canAttach = !!(projectId && sessionId && onAttach);
-
-  const updateCursorPosition = useCallback(() => {
-    const textarea = textareaRef.current;
-    setCursorPosition(textarea?.selectionStart ?? text.length);
-  }, [text.length]);
 
   const completionConfigs = useMemo<AgentCommandConfig[]>(
     () =>
@@ -252,226 +161,24 @@ export function MessageInput({
     [commandButtons, commandLabel, commandPrefix, commands, showCommandButton],
   );
 
-  const activeCompletion = useMemo(() => {
-    for (const config of completionConfigs) {
-      if (config.commands.length === 0) continue;
-      const token = findActiveCommandToken(text, cursorPosition, config.prefix);
-      if (token) return { config, token };
-    }
-    return null;
-  }, [completionConfigs, cursorPosition, text]);
-
-  const activeCommandToken = activeCompletion?.token ?? null;
-  const activeCommandConfig = activeCompletion?.config ?? null;
-
-  const filteredCommands = useMemo(
-    () =>
-      activeCommandToken && activeCommandConfig
-        ? filterCommands(activeCommandConfig.commands, activeCommandToken.query)
-        : [],
-    [activeCommandConfig, activeCommandToken],
-  );
-
-  const completionKey =
-    activeCommandToken && activeCommandConfig
-      ? `${activeCommandConfig.prefix}:${activeCommandToken.start}:${activeCommandToken.end}:${activeCommandToken.query}`
-      : null;
-  const isCommandCompletionOpen =
-    !!completionKey &&
-    dismissedCompletionKey !== completionKey &&
-    filteredCommands.length > 0;
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: reset selection when the active command token changes.
-  useEffect(() => {
-    setActiveCommandIndex(0);
-  }, [completionKey]);
-
-  const insertCommand = useCallback(
-    (command: string) => {
-      const prefix = command.startsWith("$") ? "$" : "/";
-      const bare =
-        command.startsWith("/") || command.startsWith("$")
-          ? command.slice(1)
-          : command;
-      const activeToken = findActiveCommandToken(
-        text,
-        textareaRef.current?.selectionStart ?? cursorPosition,
-        prefix,
-      );
-
-      if (prefix === "/" && onCustomCommand?.(bare)) {
-        if (activeToken) {
-          const nextText =
-            text.slice(0, activeToken.start) + text.slice(activeToken.end);
-          setText(nextText);
-          setCursorPosition(activeToken.start);
-          setTimeout(() => {
-            const textarea = textareaRef.current;
-            textarea?.focus();
-            textarea?.setSelectionRange(activeToken.start, activeToken.start);
-          }, 0);
-        }
-        setDismissedCompletionKey(null);
-        textareaRef.current?.focus();
-        return;
-      }
-
-      const fullCommand = `${prefix}${bare}`;
-      let nextText: string;
-      let nextCursor: number;
-
-      if (activeToken) {
-        nextText = `${text.slice(
-          0,
-          activeToken.start,
-        )}${fullCommand} ${text.slice(activeToken.end)}`;
-        nextCursor = activeToken.start + fullCommand.length + 1;
-      } else {
-        const textarea = textareaRef.current;
-        const cursor = textarea?.selectionStart ?? text.length;
-        const before = text.slice(0, cursor);
-        const after = text.slice(cursor);
-        const leading = before.length > 0 && !/\s$/.test(before) ? " " : "";
-        const trailing = after.length > 0 && !/^\s/.test(after) ? " " : " ";
-
-        nextText = `${before}${leading}${fullCommand}${trailing}${after}`;
-        nextCursor = before.length + leading.length + fullCommand.length + 1;
-      }
-
-      setText(nextText);
-      setCursorPosition(nextCursor);
-      setDismissedCompletionKey(null);
-      setTimeout(() => {
-        const textarea = textareaRef.current;
-        textarea?.focus();
-        textarea?.setSelectionRange(nextCursor, nextCursor);
-      }, 0);
-    },
-    [cursorPosition, onCustomCommand, setText, text],
-  );
-
   // Provide controls to parent via callback
   useEffect(() => {
     onDraftControlsReady?.(controls);
   }, [controls, onDraftControlsReady]);
 
-  const submitMessage = useCallback(
-    (send: (message: string) => void) => {
-      // Stop voice recording and get any pending interim text
-      const pendingVoice = voiceButtonRef.current?.stopAndFinalize() ?? "";
-
-      // Combine committed text with any pending voice text
-      let finalText = text.trimEnd();
-      if (pendingVoice) {
-        finalText = finalText ? `${finalText} ${pendingVoice}` : pendingVoice;
-      }
-
-      const hasContent = finalText.trim() || attachments.length > 0;
-      if (hasContent && !disabled) {
-        const message = finalText.trim();
-        // Clear input state but keep localStorage for failure recovery
-        controls.clearInput();
-        setInterimTranscript("");
-        send(message);
-        // Refocus the textarea so user can continue typing
-        textareaRef.current?.focus();
-      }
-    },
-    [text, disabled, controls, attachments.length],
+  const uploadedComposerAttachments: ComposerAttachment[] = attachments.map(
+    (file) => ({
+      id: file.id,
+      name: file.originalName,
+      mimeType: file.mimeType,
+      apiPath:
+        projectId && sessionId
+          ? `/api/projects/${projectId}/sessions/${sessionId}/upload/${encodeURIComponent(file.name)}`
+          : undefined,
+    }),
   );
 
-  const handleSubmit = useCallback(
-    () => submitMessage(onSend),
-    [submitMessage, onSend],
-  );
-
-  const handleQueue = useCallback(() => {
-    if (onQueue) submitMessage(onQueue);
-  }, [submitMessage, onQueue]);
-
-  const handleKeyDown = (e: KeyboardEvent) => {
-    // IME confirmation and deletion belong to the native editor.
-    if (isComposerComposing(e)) return;
-    // Ctrl+Space toggles voice input
-    if (e.key === " " && e.ctrlKey && !e.shiftKey && !e.altKey) {
-      e.preventDefault();
-      if (voiceButtonRef.current?.isAvailable) {
-        voiceButtonRef.current.toggle();
-      }
-      return;
-    }
-
-    if (isCommandCompletionOpen) {
-      const selectedCommand = filteredCommands[activeCommandIndex];
-      const hasExactMatch =
-        activeCommandToken !== null &&
-        filteredCommands.some(
-          (command) =>
-            command.toLowerCase() === activeCommandToken.query.toLowerCase(),
-        );
-
-      if (e.key === "ArrowDown") {
-        e.preventDefault();
-        setActiveCommandIndex((index) => (index + 1) % filteredCommands.length);
-        return;
-      }
-
-      if (e.key === "ArrowUp") {
-        e.preventDefault();
-        setActiveCommandIndex(
-          (index) =>
-            (index - 1 + filteredCommands.length) % filteredCommands.length,
-        );
-        return;
-      }
-
-      if (e.key === "Tab" && selectedCommand) {
-        e.preventDefault();
-        insertCommand(
-          `${activeCommandConfig?.prefix ?? commandPrefix}${selectedCommand}`,
-        );
-        return;
-      }
-
-      if (
-        e.key === "Enter" &&
-        !hasExactMatch &&
-        !e.shiftKey &&
-        !e.ctrlKey &&
-        selectedCommand
-      ) {
-        e.preventDefault();
-        insertCommand(
-          `${activeCommandConfig?.prefix ?? commandPrefix}${selectedCommand}`,
-        );
-        return;
-      }
-
-      if (e.key === "Escape") {
-        e.preventDefault();
-        setDismissedCompletionKey(completionKey);
-        return;
-      }
-    }
-
-    handleComposerSubmitKey(e, {
-      onSubmit: handleSubmit,
-      onQueue: onQueue ? handleQueue : undefined,
-      isListening: voiceButtonRef.current?.isListening,
-    });
-  };
-
-  const uploadedComposerAttachments = attachments.map((file) => ({
-    id: file.id,
-    name: file.originalName,
-    mimeType: file.mimeType,
-    apiPath:
-      projectId && sessionId
-        ? `/api/projects/${projectId}/sessions/${sessionId}/upload/${encodeURIComponent(file.name)}`
-        : undefined,
-  }));
-
-  const orderedAttachments = [
+  const orderedAttachments: ComposerAttachment[] = [
     ...uploadedComposerAttachments,
     ...uploadProgress.map((progress) => ({
       id: progress.fileId,
@@ -486,18 +193,30 @@ export function MessageInput({
       : 0,
   );
 
-  const {
-    composerAttachments,
-    detachedAttachments,
-    handleChange,
-    handleFileSelect,
-    handlePaste,
-    removeAttachment: handleRemoveAttachment,
-  } = useComposerDocument({
-    value: displayText,
-    editorRef: textareaRef,
+  // Late-bound: the composer needs the submit handlers, which need the
+  // composer's `takeText`.
+  const submitRef = useRef<{ submit: () => void; queue?: () => void }>({
+    submit: () => {},
+  });
+
+  const composer = useComposer({
+    text,
+    setText,
     attachments: orderedAttachments,
     describeAttachment: (file) => file,
+    // Uploads are read back through the active connection; files over the
+    // inline limit travel as their managed upload path. In-flight uploads
+    // have no bytes yet and are reported as missing.
+    getClipboardSource: (file) => {
+      const apiPath = file.apiPath;
+      if (!apiPath) return null;
+      return {
+        name: file.name,
+        mimeType: file.mimeType,
+        read: () => connection.fetchBlob(apiPath.slice("/api".length)),
+        reference: apiPath,
+      };
+    },
     disabled,
     canAttach,
     onAttach,
@@ -512,59 +231,27 @@ export function MessageInput({
         if (file) onRestoreAttachment?.(file);
       }
     },
-    onTextChange: (value, cursor) => {
-      setInterimTranscript("");
-      setDismissedCompletionKey(null);
-      setCursorPosition(cursor);
-      setText(value);
-    },
+    commandConfigs: completionConfigs,
+    onCustomCommand,
+    onCommandMenuOpen,
+    onSubmit: () => submitRef.current.submit(),
+    onQueue: onQueue ? () => submitRef.current.queue?.() : undefined,
   });
 
-  const [previewAttachmentId, setPreviewAttachmentId] = useState<string | null>(
-    null,
-  );
-  const previewAttachment = uploadedComposerAttachments.find(
-    (file) => file.id === previewAttachmentId,
-  );
-
-  // Voice input handlers
-  const handleVoiceTranscript = useCallback(
-    (transcript: string) => {
-      // Append transcript to existing text with space separator
-      // Trim the transcript since mobile speech API includes leading/trailing spaces
-      const trimmedTranscript = transcript.trim();
-      if (!trimmedTranscript) return;
-
-      const trimmedText = text.trimEnd();
-      if (trimmedText) {
-        setText(`${trimmedText} ${trimmedTranscript}`);
-      } else {
-        setText(trimmedTranscript);
-      }
-      setInterimTranscript("");
-      // Scroll to bottom after committing voice transcript
-      // Use setTimeout to ensure state update has rendered
-      setTimeout(() => {
-        const textarea = textareaRef.current;
-        if (textarea) {
-          textarea.scrollTop = textarea.scrollHeight;
-        }
-      }, 0);
-    },
-    [text, setText],
-  );
-
-  const handleInterimTranscript = useCallback((transcript: string) => {
-    setInterimTranscript(transcript);
-  }, []);
-
-  // Handle slash command selection - insert command into text
-  const handleSlashCommand = useCallback(
-    (command: string) => {
-      insertCommand(command);
-    },
-    [insertCommand],
-  );
+  const submitMessage = (send: (message: string) => void) => {
+    const finalText = composer.takeText();
+    const hasContent = finalText.trim() || attachments.length > 0;
+    if (hasContent && !disabled) {
+      // Clear input state but keep localStorage for failure recovery
+      controls.clearInput();
+      send(finalText.trim());
+      // Refocus the editor so the user can continue typing
+      composer.editorRef.current?.focus();
+    }
+  };
+  const handleSubmit = () => submitMessage(onSend);
+  const handleQueue = onQueue ? () => submitMessage(onQueue) : undefined;
+  submitRef.current = { submit: handleSubmit, queue: handleQueue };
 
   return (
     <div className="message-input-wrapper">
@@ -596,83 +283,19 @@ export function MessageInput({
         </button>
       )}
       <div
-        className={`message-input ${collapsed ? "message-input-collapsed" : ""} ${interimTranscript ? "voice-recording" : ""}`}
+        className={`message-input ${collapsed ? "message-input-collapsed" : ""} ${composer.isDictating ? "voice-recording" : ""}`}
       >
-        {isCommandCompletionOpen && (
-          <div
-            className="command-completion-menu"
-            role="listbox"
-            tabIndex={-1}
-            aria-label={activeCommandConfig?.label ?? commandLabel}
-          >
-            {filteredCommands.map((command, index) => (
-              <button
-                key={command}
-                type="button"
-                className={`command-completion-item ${index === activeCommandIndex ? "active" : ""}`}
-                onMouseDown={(event) => event.preventDefault()}
-                onClick={() =>
-                  insertCommand(
-                    `${activeCommandConfig?.prefix ?? commandPrefix}${command}`,
-                  )
-                }
-                role="option"
-                aria-selected={index === activeCommandIndex}
-              >
-                <CommandMenuItemContent
-                  prefix={activeCommandConfig?.prefix ?? commandPrefix}
-                  command={command}
-                  detail={activeCommandConfig?.details?.[command]}
-                />
-              </button>
-            ))}
-          </div>
-        )}
-        <div className="message-input-composer">
-          <AttachmentComposer
-            ref={textareaRef}
-            value={displayText}
-            attachments={composerAttachments}
-            onPreview={setPreviewAttachmentId}
-            onRemove={onRemoveAttachment ? handleRemoveAttachment : undefined}
-            onChange={handleChange}
-            onKeyDown={handleKeyDown}
-            onKeyUp={updateCursorPosition}
-            onClick={updateCursorPosition}
-            onSelect={updateCursorPosition}
-            onPaste={handlePaste}
-            placeholder={
-              externalCollapsed ? t("messageInputContinueAbove") : placeholder
-            }
-            disabled={disabled}
-            rows={collapsed ? 1 : 3}
-          />
-        </div>
-
-        {/* Attachment chips - only for files not referenced inline in the text */}
-        {!collapsed && detachedAttachments.length > 0 && (
-          <div className="attachment-list">
-            {detachedAttachments.map((file) => (
-              <ComposerAttachmentCard
-                key={file.id}
-                attachment={file}
-                disabled={disabled}
-                onPreview={setPreviewAttachmentId}
-                onRemove={
-                  onRemoveAttachment ? handleRemoveAttachment : undefined
-                }
-              />
-            ))}
-          </div>
-        )}
-
-        {/* Hidden file input */}
-        <input
-          ref={fileInputRef}
-          type="file"
-          multiple
-          style={{ display: "none" }}
-          onChange={handleFileSelect}
+        <ComposerEditor
+          composer={composer}
+          containerClassName="message-input-composer"
+          menuFallbackLabel={commandLabel}
+          placeholder={
+            externalCollapsed ? t("messageInputContinueAbove") : placeholder
+          }
+          disabled={disabled}
+          rows={collapsed ? 1 : 3}
+          showDetachedAttachments={!collapsed}
+          canRemove={!!onRemoveAttachment}
         />
 
         {!collapsed && (
@@ -687,18 +310,20 @@ export function MessageInput({
             supportsThinkingToggle={supportsThinkingToggle}
             canAttach={canAttach}
             attachmentCount={attachments.length}
-            onAttachClick={() => fileInputRef.current?.click()}
-            voiceButtonRef={voiceButtonRef}
-            onVoiceTranscript={handleVoiceTranscript}
-            onInterimTranscript={handleInterimTranscript}
-            onListeningStart={() => textareaRef.current?.focus()}
+            onAttachClick={composer.openFilePicker}
+            onCopyInput={composer.document.copyAll}
+            canCopy={!!(text.trim() || orderedAttachments.length > 0)}
+            voiceButtonRef={composer.voiceRef}
+            onVoiceTranscript={composer.voice.onTranscript}
+            onInterimTranscript={composer.voice.onInterimTranscript}
+            onListeningStart={composer.voice.onListeningStart}
             voiceDisabled={disabled}
             commandPrefix={commandPrefix}
             commandLabel={commandLabel}
             commands={commands}
             showCommandButton={showCommandButton}
             commandButtons={commandButtons}
-            onSelectCommand={handleSlashCommand}
+            onSelectCommand={composer.completion.insertCommand}
             contextUsage={contextUsage}
             projectId={projectId}
             sessionId={sessionId}
@@ -711,19 +336,12 @@ export function MessageInput({
             onInterruptSend={
               onInterruptSend ? () => submitMessage(onInterruptSend) : undefined
             }
-            onQueue={onQueue ? handleQueue : undefined}
+            onQueue={handleQueue}
             canSend={!!(text.trim() || attachments.length > 0)}
             disabled={disabled}
           />
         )}
       </div>
-      {previewAttachment && (
-        <AttachmentPreviewModal
-          name={previewAttachment.name}
-          apiPath={previewAttachment.apiPath}
-          onClose={() => setPreviewAttachmentId(null)}
-        />
-      )}
     </div>
   );
 }

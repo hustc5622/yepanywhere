@@ -16,7 +16,6 @@ import {
 } from "@yep-anywhere/shared";
 import {
   type CSSProperties,
-  type KeyboardEvent,
   useCallback,
   useEffect,
   useMemo,
@@ -26,7 +25,9 @@ import {
 import { useNavigate } from "react-router-dom";
 import { type UploadedFile, api } from "../api/client";
 import { useToastContext } from "../contexts/ToastContext";
-import { useComposerDocument } from "../hooks/useComposerDocument";
+import { useAgentCommandCatalog } from "../hooks/useAgentCommandCatalog";
+import { useAgentCommandListing } from "../hooks/useAgentCommandListing";
+import { useComposer } from "../hooks/useComposer";
 import { useConnection } from "../hooks/useConnection";
 import { useDraftPersistence } from "../hooks/useDraftPersistence";
 import { useLlmGatewayKeys } from "../hooks/useLlmGatewayKeys";
@@ -47,12 +48,15 @@ import {
 import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
 import { useServerSettings } from "../hooks/useServerSettings";
 import { useI18n } from "../i18n";
-import { getAgentCommandConfigs } from "../lib/agentCommands";
+import type { AgentCommandAvailability } from "../lib/agentCommands";
+import {
+  type CodexSkillCommand,
+  resolveCodexSkillInputs,
+} from "../lib/codexInputCommands";
 import {
   getModelReasoningEfforts,
   resolveModelReasoningEffort,
 } from "../lib/codexReasoning";
-import { handleComposerSubmitKey } from "../lib/composerKeyboard";
 import { getPreferredCursorModelId } from "../lib/cursorModels";
 import {
   clearLegacySessionPrefill,
@@ -69,21 +73,20 @@ import {
   shouldRestoreHistoricalEditAfterFailure,
 } from "../lib/sessionBranching";
 import type { PermissionMode, SessionNavigationState } from "../types";
-import {
-  AttachmentComposer,
-  type AttachmentComposerHandle,
-} from "./AttachmentComposer";
-import { AttachmentPreviewModal } from "./AttachmentPreviewModal";
 import { CodexAccountSelect } from "./CodexAccountSelect";
 import { CodexUsageCard } from "./CodexUsageCard";
-import { ComposerAttachmentCard } from "./ComposerAttachmentCard";
+import { ComposerEditor } from "./ComposerEditor";
+import {
+  ComposerToolbar,
+  composerToolbarButtonClass,
+  composerToolbarIconSize,
+} from "./ComposerToolbar";
 import { CursorAccountCard } from "./CursorAccountCard";
 import { CursorModelSelect } from "./CursorModelSelect";
 import { FilterDropdown, type FilterOption } from "./FilterDropdown";
 import { NewSessionSetupSkeleton } from "./NewSessionSkeleton";
 import { PiGatewayKeySelect } from "./PiGatewayKeySelect";
-import { SlashCommandButton } from "./SlashCommandButton";
-import { VoiceInputButton, type VoiceInputButtonRef } from "./VoiceInputButton";
+import { ThinkingToggleButton } from "./ThinkingToggleButton";
 
 interface PendingFile {
   id: string;
@@ -92,6 +95,9 @@ interface PendingFile {
 }
 
 const CODEX_MCP_MODE_ORDER: CodexMcpMode[] = ["clear", "standard", "full"];
+const NEW_SESSION_COMMAND_AVAILABILITY: AgentCommandAvailability = {
+  scope: "new-session",
+};
 const DEFAULT_CODEX_MODEL = "gpt-5.6-sol";
 
 const NEW_SESSION_PROVIDER_ACCENTS = {
@@ -347,7 +353,6 @@ export function NewSessionForm({
   >(null);
   const llmGatewayKeys = useLlmGatewayKeys(selectedProvider === "pi");
   const [pendingFiles, setPendingFiles] = useState<PendingFile[]>([]);
-  const [previewFileId, setPreviewFileId] = useState<string | null>(null);
   const pendingFilesRef = useRef<PendingFile[]>(pendingFiles);
   const removedPendingFilesRef = useRef(new Map<string, PendingFile>());
   const pendingFileOrderRef = useRef<string[]>([]);
@@ -359,7 +364,6 @@ export function NewSessionForm({
   const [uploadProgress, setUploadProgress] = useState<
     Record<string, { uploaded: number; total: number }>
   >({});
-  const [interimTranscript, setInterimTranscript] = useState("");
   const [isSavingDefaults, setIsSavingDefaults] = useState(false);
 
   const [cursorCatalog, setCursorCatalog] = useState<ModelInfo[] | null>(null);
@@ -386,9 +390,6 @@ export function NewSessionForm({
   // so the selector grid stays tidy instead of showing tall, uneven cards.
   const [showUnavailableProviders, setShowUnavailableProviders] =
     useState(false);
-  const fileInputRef = useRef<HTMLInputElement>(null);
-  const textareaRef = useRef<AttachmentComposerHandle>(null);
-  const voiceButtonRef = useRef<VoiceInputButtonRef>(null);
   const hasInitializedDefaultsRef = useRef(false);
   // Thinking toggle state
   const {
@@ -665,21 +666,41 @@ export function NewSessionForm({
       !selectedModelInfo ||
       selectedModelInfo.supportsAdaptiveThinking === true ||
       selectedModelInfo.supportsEffort === true);
-  const commandButtons = useMemo(
+  // Skills and provider commands for this project, without a session: the
+  // provider's last report for the directory, or its skill directories.
+  const { listing: commandListing, refresh: refreshCommandListing } =
+    useAgentCommandListing({ projectId, provider: selectedProvider });
+  const codexSkills = useMemo<CodexSkillCommand[]>(
     () =>
-      getAgentCommandConfigs(
-        selectedProvider,
-        selectedProviderInfo?.supportsSlashCommands,
-        [],
-        [],
-        {
-          codexCommands: t("codexCommandsLabel"),
-          skills: t("codexSkillsLabel"),
-          slashCommands: t("slashCommandsLabel"),
-        },
-      ),
-    [selectedProvider, selectedProviderInfo?.supportsSlashCommands, t],
+      selectedProvider === "codex"
+        ? (commandListing?.skills ?? []).flatMap((skill) =>
+            skill.path
+              ? [
+                  {
+                    name: skill.name,
+                    path: skill.path,
+                    ...(skill.description
+                      ? { description: skill.description }
+                      : {}),
+                  },
+                ]
+              : [],
+          )
+        : [],
+    [commandListing, selectedProvider],
   );
+  const codexInputsForMessage = (text: string) => {
+    if (selectedProvider !== "codex") return undefined;
+    const inputs = resolveCodexSkillInputs(text, codexSkills);
+    return inputs.length > 0 ? inputs : undefined;
+  };
+  const commandButtons = useAgentCommandCatalog({
+    provider: selectedProvider,
+    supportsSlashCommands: selectedProviderInfo?.supportsSlashCommands,
+    providerCommands: commandListing?.commands,
+    codexSkills,
+    availability: NEW_SESSION_COMMAND_AVAILABILITY,
+  });
 
   const applyProviderSelection = useCallback(
     (provider: ProviderInfo, savedDefaults?: NewSessionProviderDefaults) => {
@@ -1073,43 +1094,6 @@ export function NewSessionForm({
     [selectedGatewayProtocols],
   );
 
-  // Combined display text: committed text + interim transcript
-  const displayText = interimTranscript
-    ? message + (message.trimEnd() ? " " : "") + interimTranscript
-    : message;
-
-  // Auto-scroll textarea when voice input updates (interim transcript changes)
-  // Browser handles scrolling for normal typing, but programmatic updates need explicit scroll
-  useEffect(() => {
-    if (interimTranscript) {
-      const textarea = textareaRef.current;
-      if (textarea) {
-        textarea.scrollTop = textarea.scrollHeight;
-      }
-    }
-  }, [interimTranscript]);
-
-  // Focus textarea on mount if autoFocus is enabled
-  useEffect(() => {
-    if (autoFocus) {
-      textareaRef.current?.focus();
-    }
-  }, [autoFocus]);
-
-  // Recover a pending draft handoff from clients with the retired floating composer.
-  useEffect(() => {
-    const prefill = getLegacySessionPrefill();
-    if (prefill) {
-      setMessage(prefill);
-      clearLegacySessionPrefill();
-      // Focus and move cursor to end
-      if (textareaRef.current) {
-        textareaRef.current.focus();
-        textareaRef.current.setSelectionRange(prefill.length, prefill.length);
-      }
-    }
-  }, [setMessage]);
-
   const addPendingFiles = (files: File[], beforeAttachmentId?: string) => {
     const newPendingFiles: PendingFile[] = files.map((file) => ({
       id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
@@ -1143,16 +1127,9 @@ export function NewSessionForm({
     setPendingFiles((prev) => prev.filter((file) => !ids.includes(file.id)));
   };
 
-  const {
-    composerAttachments,
-    detachedAttachments: detachedPendingFiles,
-    handleChange,
-    handleFileSelect,
-    handlePaste,
-    removeAttachment: handleRemoveFile,
-  } = useComposerDocument({
-    value: displayText,
-    editorRef: textareaRef,
+  const composer = useComposer({
+    text: message,
+    setText: setMessage,
     attachments: pendingFiles,
     describeAttachment: (pending) => {
       const progress = isStarting ? uploadProgress[pending.id] : undefined;
@@ -1169,6 +1146,12 @@ export function NewSessionForm({
           : undefined,
       };
     },
+    // Pending files are still local, so copies carry their bytes.
+    getClipboardSource: (pending) => ({
+      name: pending.file.name,
+      mimeType: pending.file.type,
+      read: async () => pending.file,
+    }),
     disabled: isStarting,
     onAttach: addPendingFiles,
     onRemove: removePendingFiles,
@@ -1188,11 +1171,34 @@ export function NewSessionForm({
           ),
         );
     },
-    onTextChange: (value) => {
-      setInterimTranscript("");
-      setMessage(value);
+    commandConfigs: commandButtons,
+    onCommandMenuOpen: refreshCommandListing,
+    onSubmit: () => {
+      void handleStartSession();
     },
   });
+  const editorRef = composer.editorRef;
+
+  // Focus the editor on mount if autoFocus is enabled
+  useEffect(() => {
+    if (autoFocus) {
+      editorRef.current?.focus();
+    }
+  }, [autoFocus, editorRef]);
+
+  // Recover a pending draft handoff from clients with the retired floating composer.
+  useEffect(() => {
+    const prefill = getLegacySessionPrefill();
+    if (prefill) {
+      setMessage(prefill);
+      clearLegacySessionPrefill();
+      // Focus and move cursor to end
+      if (editorRef.current) {
+        editorRef.current.focus();
+        editorRef.current.setSelectionRange(prefill.length, prefill.length);
+      }
+    }
+  }, [setMessage, editorRef]);
 
   const handleModeSelect = (selectedMode: PermissionMode) => {
     setMode(selectedMode);
@@ -1408,16 +1414,8 @@ export function NewSessionForm({
   ]);
 
   const handleStartSession = async () => {
-    // Stop voice recording and get any pending interim text
-    const pendingVoice = voiceButtonRef.current?.stopAndFinalize() ?? "";
-
-    // Combine committed text with any pending voice text
-    let finalMessage = message.trimEnd();
-    if (pendingVoice) {
-      finalMessage = finalMessage
-        ? `${finalMessage} ${pendingVoice}`
-        : pendingVoice;
-    }
+    // Stop dictation and include any pending transcript.
+    const finalMessage = composer.takeText();
 
     const hasContent = finalMessage.trim() || pendingFiles.length > 0;
     if (
@@ -1433,7 +1431,6 @@ export function NewSessionForm({
 
     const trimmedMessage = finalMessage.trim();
 
-    setInterimTranscript("");
     setIsStarting(true);
     let sessionStartOutcomePending = false;
 
@@ -1474,6 +1471,7 @@ export function NewSessionForm({
             ? (selectedLlmGatewayKeyId ?? undefined)
             : undefined,
         llmGatewayConfig: llmGatewayConfigForRequest,
+        codexInputs: codexInputsForMessage(trimmedMessage),
       };
 
       if (pendingFiles.length > 0) {
@@ -1532,6 +1530,8 @@ export function NewSessionForm({
           undefined, // tempId
           thinking, // Pass the captured thinking setting to avoid process restart
           sessionOptions.reasoningEffort,
+          undefined, // deferred
+          sessionOptions.codexInputs,
         );
       } else {
         // No files - use single-step flow for efficiency
@@ -1627,82 +1627,7 @@ export function NewSessionForm({
     }
   };
 
-  const handleKeyDown = (event: KeyboardEvent) => {
-    handleComposerSubmitKey(event, {
-      onSubmit: () => {
-        void handleStartSession();
-      },
-      isListening: voiceButtonRef.current?.isListening,
-    });
-  };
-
-  // Voice input handlers
-  const handleVoiceTranscript = useCallback(
-    (transcript: string) => {
-      const trimmed = message.trimEnd();
-      if (trimmed) {
-        setMessage(`${trimmed} ${transcript}`);
-      } else {
-        setMessage(transcript);
-      }
-      setInterimTranscript("");
-      // Scroll to bottom after committing voice transcript
-      // Use setTimeout to ensure state update has rendered
-      setTimeout(() => {
-        const textarea = textareaRef.current;
-        if (textarea) {
-          textarea.scrollTop = textarea.scrollHeight;
-        }
-      }, 0);
-    },
-    [message, setMessage],
-  );
-
-  const handleInterimTranscript = useCallback((transcript: string) => {
-    setInterimTranscript(transcript);
-  }, []);
-
-  const insertIntoMessage = useCallback(
-    (insertText: string) => {
-      const textarea = textareaRef.current;
-      const start = textarea?.selectionStart ?? message.length;
-      const end = textarea?.selectionEnd ?? message.length;
-      const before = message.slice(0, start);
-      const after = message.slice(end);
-      const leading = before.length > 0 && !/\s$/.test(before) ? " " : "";
-      const trailing = after.length > 0 && !/^\s/.test(after) ? " " : " ";
-      const nextMessage = `${before}${leading}${insertText}${trailing}${after}`;
-      const nextCursor =
-        before.length + leading.length + insertText.length + trailing.length;
-
-      setInterimTranscript("");
-      setMessage(nextMessage);
-
-      const restoreFocus = () => {
-        textareaRef.current?.focus();
-        textareaRef.current?.setSelectionRange(nextCursor, nextCursor);
-      };
-
-      if (typeof requestAnimationFrame === "function") {
-        requestAnimationFrame(restoreFocus);
-      } else {
-        setTimeout(restoreFocus, 0);
-      }
-    },
-    [message, setMessage],
-  );
-
-  const handleSelectCommand = useCallback(
-    (command: string) => {
-      insertIntoMessage(command);
-    },
-    [insertIntoMessage],
-  );
-
   const hasContent = message.trim() || pendingFiles.length > 0;
-  const previewFile = previewFileId
-    ? pendingFiles.find((pf) => pf.id === previewFileId)
-    : undefined;
   const savedDefaults = settings?.newSessionDefaults;
   const savedProviderDefaults = selectedProvider
     ? getNewSessionProviderDefaults(savedDefaults, selectedProvider)
@@ -1807,154 +1732,81 @@ export function NewSessionForm({
     );
   };
 
-  // Shared input area with toolbar (textarea + attach/voice on left, send on right)
+  // Shared composer (editor + toolbar); the send button starts the session.
   const inputArea = (
     <>
-      <div className="new-session-composer">
-        <AttachmentComposer
-          ref={textareaRef}
-          value={displayText}
-          attachments={composerAttachments}
-          onPreview={setPreviewFileId}
-          onRemove={handleRemoveFile}
-          onChange={handleChange}
-          onKeyDown={handleKeyDown}
-          onPaste={handlePaste}
-          placeholder={resolvedPlaceholder}
-          disabled={isStarting}
-          rows={rows}
-          className="new-session-form-textarea"
-        />
-      </div>
-      <div className="new-session-form-toolbar">
-        <div className="new-session-form-toolbar-left">
-          <input
-            ref={fileInputRef}
-            type="file"
-            multiple
-            style={{ display: "none" }}
-            onChange={handleFileSelect}
-          />
+      <ComposerEditor
+        composer={composer}
+        containerClassName="new-session-composer"
+        className="new-session-form-textarea"
+        menuPlacement="below"
+        placeholder={resolvedPlaceholder}
+        disabled={isStarting}
+        rows={rows}
+        attachmentDetail={(pending) => {
+          const progress = isStarting ? uploadProgress[pending.id] : undefined;
+          return progress
+            ? `${Math.round((progress.uploaded / progress.total) * 100)}%`
+            : formatSize(pending.file.size);
+        }}
+      />
+      <ComposerToolbar
+        variant="new-session"
+        attach={{
+          onClick: composer.openFilePicker,
+          disabled: isStarting,
+          title: t("newSessionAttachFiles"),
+        }}
+        copy={{
+          onCopy: composer.document.copyAll,
+          disabled: isStarting || !hasContent,
+        }}
+        thinking={
+          supportsThinkingToggle && compact ? (
+            <ThinkingToggleButton
+              mode={thinkingMode}
+              levelLabel={getEffortLabel(
+                effectiveCodexReasoningEffort ?? thinkingLevel,
+              )}
+              onCycle={cycleThinkingMode}
+              disabled={isStarting}
+              className={composerToolbarButtonClass("new-session")}
+              iconSize={composerToolbarIconSize("new-session")}
+            />
+          ) : undefined
+        }
+        voice={{
+          ...composer.voice,
+          disabled: isStarting,
+        }}
+        commands={{
+          buttons: commandButtons,
+          onSelect: composer.completion.insertCommand,
+          disabled: isStarting,
+        }}
+        actions={
           <button
             type="button"
-            className="toolbar-button"
-            onClick={() => fileInputRef.current?.click()}
-            disabled={isStarting}
-            aria-label={t("newSessionAttachFiles")}
+            onClick={handleStartSession}
+            disabled={
+              isStarting ||
+              Boolean(startRetryBlockedMessage) ||
+              Boolean(selectedProviderInfo?.unavailableReason) ||
+              !hasContent ||
+              hasGatewayConfigError
+            }
+            className="send-button"
+            aria-label={t("newSessionStartAction")}
+            title={startRetryBlockedMessage ?? undefined}
           >
-            <svg
-              width="18"
-              height="18"
-              viewBox="0 0 24 24"
-              fill="none"
-              stroke="currentColor"
-              strokeWidth="2"
-              aria-hidden="true"
-            >
-              <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
-            </svg>
+            {isStarting ? (
+              <span className="send-spinner" />
+            ) : (
+              <span className="send-icon">↑</span>
+            )}
           </button>
-          <VoiceInputButton
-            ref={voiceButtonRef}
-            onTranscript={handleVoiceTranscript}
-            onInterimTranscript={handleInterimTranscript}
-            onListeningStart={() => textareaRef.current?.focus()}
-            disabled={isStarting}
-            className="toolbar-button"
-          />
-          {commandButtons
-            .filter((button) => button.showButton && button.commands.length > 0)
-            .map((button) => (
-              <SlashCommandButton
-                key={button.prefix}
-                commands={button.commands}
-                onSelectCommand={handleSelectCommand}
-                disabled={isStarting}
-                prefix={button.prefix}
-                label={button.label}
-              />
-            ))}
-          {supportsThinkingToggle && compact && (
-            <button
-              type="button"
-              className={`toolbar-button thinking-toggle-button ${thinkingMode !== "off" ? `active ${thinkingMode}` : ""}`}
-              onClick={cycleThinkingMode}
-              disabled={isStarting}
-              title={
-                thinkingMode === "off"
-                  ? t("newSessionThinkingOff")
-                  : thinkingMode === "auto"
-                    ? t("newSessionThinkingAuto")
-                    : t("newSessionThinkingOn", {
-                        level: getEffortLabel(
-                          effectiveCodexReasoningEffort ?? thinkingLevel,
-                        ),
-                      })
-              }
-              aria-label={t("newSessionThinkingMode", { mode: thinkingMode })}
-            >
-              <svg
-                width="18"
-                height="18"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-                aria-hidden="true"
-              >
-                <circle cx="12" cy="12" r="10" />
-                <polyline points="12 6 12 12 16 14" />
-                {thinkingMode === "auto" && (
-                  <g>
-                    <circle
-                      cx="19"
-                      cy="5"
-                      r="5.5"
-                      fill="currentColor"
-                      stroke="none"
-                    />
-                    <text
-                      x="19"
-                      y="5"
-                      textAnchor="middle"
-                      dominantBaseline="central"
-                      fill="var(--bg-primary, #1a1a2e)"
-                      fontSize="8"
-                      fontWeight="700"
-                      fontFamily="var(--font-sans)"
-                      stroke="none"
-                    >
-                      A
-                    </text>
-                  </g>
-                )}
-              </svg>
-            </button>
-          )}
-        </div>
-        <button
-          type="button"
-          onClick={handleStartSession}
-          disabled={
-            isStarting ||
-            Boolean(startRetryBlockedMessage) ||
-            Boolean(selectedProviderInfo?.unavailableReason) ||
-            !hasContent ||
-            hasGatewayConfigError
-          }
-          className="send-button"
-          aria-label={t("newSessionStartAction")}
-          title={startRetryBlockedMessage ?? undefined}
-        >
-          {isStarting ? (
-            <span className="send-spinner" />
-          ) : (
-            <span className="send-icon">↑</span>
-          )}
-        </button>
-      </div>
+        }
+      />
       {startRetryBlockedMessage && (
         <p className="new-session-limit-error" role="alert">
           {startRetryBlockedMessage}
@@ -2013,39 +1865,6 @@ export function NewSessionForm({
           </div>
         </div>
       )}
-      {detachedPendingFiles.length > 0 && (
-        <div className="attachment-list">
-          {detachedPendingFiles.map((pf) => {
-            const progress = isStarting ? uploadProgress[pf.id] : undefined;
-            return (
-              <ComposerAttachmentCard
-                key={pf.id}
-                attachment={{
-                  id: pf.id,
-                  name: pf.file.name,
-                  mimeType: pf.file.type,
-                  previewUrl: pf.previewUrl,
-                }}
-                detail={
-                  progress
-                    ? `${Math.round((progress.uploaded / progress.total) * 100)}%`
-                    : formatSize(pf.file.size)
-                }
-                disabled={isStarting}
-                onPreview={setPreviewFileId}
-                onRemove={handleRemoveFile}
-              />
-            );
-          })}
-        </div>
-      )}
-      {previewFile && (
-        <AttachmentPreviewModal
-          name={previewFile.file.name}
-          src={previewFile.previewUrl ?? null}
-          onClose={() => setPreviewFileId(null)}
-        />
-      )}
     </>
   );
 
@@ -2053,7 +1872,7 @@ export function NewSessionForm({
   if (compact) {
     return (
       <div
-        className={`new-session-form new-session-form-compact ${interimTranscript ? "voice-recording" : ""}`}
+        className={`new-session-form new-session-form-compact ${composer.isDictating ? "voice-recording" : ""}`}
         data-provider={selectedProvider ?? undefined}
         style={newSessionThemeStyle}
       >
@@ -2073,7 +1892,7 @@ export function NewSessionForm({
   // Full mode: form with header, input area, and mode selector
   return (
     <div
-      className={`new-session-form new-session-container ${interimTranscript ? "voice-recording" : ""}`}
+      className={`new-session-form new-session-container ${composer.isDictating ? "voice-recording" : ""}`}
       data-provider={selectedProvider ?? undefined}
       style={newSessionThemeStyle}
     >

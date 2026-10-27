@@ -4696,6 +4696,11 @@ a.sidebar-nav-item {
   padding: var(--space-1);
 }
 
+.command-completion-menu-below {
+  top: calc(100% + var(--space-1));
+  bottom: auto;
+}
+
 .command-completion-item {
   display: flex;
   flex-direction: column;
@@ -5954,6 +5959,16 @@ a.sidebar-nav-item {
   color: var(--text-muted);
   pointer-events: none;
   position: absolute;
+}
+
+.attachment-composer[data-drag-over="true"] {
+  border-color: var(--new-session-accent, var(--app-yep-green));
+  border-style: dashed;
+  background: color-mix(
+    in srgb,
+    var(--new-session-accent, var(--app-yep-green)) 6%,
+    transparent
+  );
 }
 
 .attachment-composer[aria-disabled="true"] {

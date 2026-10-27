@@ -257,11 +257,8 @@ export const SessionComposer = memo(function SessionComposer({
   onRestoreAttachment,
   attachmentOrder,
   uploadProgress,
-  commandPrefix,
-  commandLabel,
-  commands,
-  showCommandButton,
   commandButtons,
+  onCommandMenuOpen,
   onCustomCommand,
   onDraftControlsReady,
   onQuestionSubmit,
@@ -313,11 +310,8 @@ export const SessionComposer = memo(function SessionComposer({
   onRestoreAttachment: (file: UploadedFile) => void;
   attachmentOrder: string[];
   uploadProgress: UploadProgress[];
-  commandPrefix?: ComponentProps<typeof MessageInput>["commandPrefix"];
-  commandLabel?: ComponentProps<typeof MessageInput>["commandLabel"];
-  commands: string[];
-  showCommandButton: boolean;
   commandButtons: AgentCommandConfig[];
+  onCommandMenuOpen?: () => void;
   onCustomCommand?: (command: string) => boolean;
   onDraftControlsReady?: (controls: DraftControls) => void;
   onQuestionSubmit: (answers: UserQuestionAnswers) => Promise<void>;
@@ -537,11 +531,8 @@ export const SessionComposer = memo(function SessionComposer({
             onRestoreAttachment={onRestoreAttachment}
             attachmentOrder={attachmentOrder}
             uploadProgress={uploadProgress}
-            commandPrefix={commandPrefix}
-            commandLabel={commandLabel}
-            commands={commands}
-            showCommandButton={showCommandButton}
             commandButtons={commandButtons}
+            onCommandMenuOpen={onCommandMenuOpen}
             onCustomCommand={onCustomCommand}
           />
         </div>

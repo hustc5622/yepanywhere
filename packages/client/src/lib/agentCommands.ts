@@ -6,54 +6,20 @@ import type {
 
 export type AgentCommandPrefix = "/" | "$";
 
+/**
+ * Codex `/` commands that actually do something in Yep. Codex parses every
+ * other slash command inside its terminal UI; sent through app-server
+ * `turn/start` the text would only reach the model as an ordinary prompt
+ * (see `references/codex/codex-rs/tui/src/slash_command.rs`). Each entry here
+ * is intercepted by Yep and mapped to an app-server control or a Yep feature.
+ */
 export const CODEX_SLASH_COMMANDS = [
-  "permissions",
-  "ide",
-  "keymap",
-  "vim",
-  "sandbox-add-read-dir",
-  "agent",
-  "apps",
-  "plugins",
-  "hooks",
-  "clear",
-  "archive",
-  "delete",
   "compact",
-  "copy",
-  "diff",
-  "exit",
-  "experimental",
-  "approve",
-  "memories",
-  "skills",
-  "import",
-  "feedback",
-  "init",
-  "logout",
-  "mcp",
-  "mention",
   "model",
-  "fast",
-  "plan",
+  "review",
   "goal",
-  "personality",
-  "ps",
-  "stop",
-  "fork",
   "side",
   "btw",
-  "raw",
-  "resume",
-  "new",
-  "quit",
-  "review",
-  "status",
-  "usage",
-  "debug-config",
-  "statusline",
-  "title",
-  "theme",
 ];
 
 /**
@@ -168,6 +134,18 @@ const DEFAULT_AGENT_COMMAND_LABELS: AgentCommandLabels = {
   slashCommands: "Slash commands",
 };
 
+/** Menu descriptions for the commands Yep intercepts. */
+export interface AgentCommandDescriptions {
+  model: string;
+  /** Pi compaction, which accepts guidance after the command. */
+  compact: string;
+  /** Codex compaction, which takes no arguments. */
+  codexCompact: string;
+  review: string;
+  goal: string;
+  side: string;
+}
+
 export function isCodexCommandProvider(
   provider: ProviderName | string | undefined | null,
 ): provider is "codex" | "codex-oss" {
@@ -180,74 +158,183 @@ export function providerDefaultsToSlashCommands(
   return provider === "claude" || provider === "claude-ollama";
 }
 
-function mergeCommands(...commandGroups: string[][]): string[] {
+function mergeCommands(...commandGroups: readonly string[][]): string[] {
   return Array.from(new Set(commandGroups.flat().filter(Boolean)));
 }
 
-export function getAgentCommandConfigs(
-  provider: ProviderName | string | undefined | null,
-  supportsSlashCommands?: boolean,
-  slashCommands: string[] = [],
-  codexSkills: string[] = [],
-  labels: AgentCommandLabels = DEFAULT_AGENT_COMMAND_LABELS,
-): AgentCommandConfig[] {
-  if (isCodexCommandProvider(provider)) {
-    return [
-      {
-        prefix: "/",
-        label: labels.codexCommands,
-        showButton: true,
-        commands: CODEX_SLASH_COMMANDS,
+/**
+ * Where the composer lives and what the session can currently do. Commands
+ * are offered only when sending them would actually work.
+ */
+export interface AgentCommandAvailability {
+  scope: "new-session" | "session";
+  /** This server owns a live provider process for the session. */
+  ownsProcess?: boolean;
+  /** No process, but sending a message resumes the session. */
+  canResume?: boolean;
+  /** The provider offers Yep side conversations. */
+  hasSideConversation?: boolean;
+}
+
+export interface AgentCommandCatalogInput {
+  provider: ProviderName | string | undefined | null;
+  supportsSlashCommands?: boolean;
+  /** Provider-reported commands (init message, live list or cache). */
+  providerCommands?: readonly SlashCommand[];
+  /** Codex `$` skills. */
+  codexSkills?: readonly { name: string; description?: string }[];
+  availability: AgentCommandAvailability;
+  labels?: AgentCommandLabels;
+  descriptions?: Partial<AgentCommandDescriptions>;
+}
+
+type YepCommandName = "model" | "compact" | "review" | "goal" | "side" | "btw";
+
+function yepCommandDescription(
+  name: YepCommandName,
+  descriptions: Partial<AgentCommandDescriptions> | undefined,
+  codex: boolean,
+): string | undefined {
+  if (name === "btw") return descriptions?.side;
+  if (name === "compact" && codex) return descriptions?.codexCompact;
+  return descriptions?.[name];
+}
+
+/**
+ * The single source for every composer command menu. New sessions and
+ * replies share it so a provider shows the same commands everywhere, minus
+ * the ones that need an existing session or a running process.
+ */
+export function buildAgentCommandCatalog({
+  provider,
+  supportsSlashCommands,
+  providerCommands = [],
+  codexSkills = [],
+  availability,
+  labels = DEFAULT_AGENT_COMMAND_LABELS,
+  descriptions,
+}: AgentCommandCatalogInput): AgentCommandConfig[] {
+  const inSession = availability.scope === "session";
+  const ownsProcess = inSession && availability.ownsProcess === true;
+  const canSend = !inSession || ownsProcess || availability.canResume === true;
+  const hasSide = inSession && availability.hasSideConversation === true;
+
+  const yepCommands: YepCommandName[] = [];
+  const addYep = (name: YepCommandName, enabled: boolean) => {
+    if (enabled) yepCommands.push(name);
+  };
+  const sideCommands = (enabled: boolean) => {
+    addYep("side", enabled);
+    addYep("btw", enabled);
+  };
+
+  const yepDetails = (): Record<string, AgentCommandDetail> =>
+    Object.fromEntries(
+      yepCommands.map((name) => {
+        const description = yepCommandDescription(
+          name,
+          descriptions,
+          isCodexCommandProvider(provider),
+        );
+        return [
+          name,
+          {
+            ...(description ? { description } : {}),
+            source: "yep" as const,
+          },
+        ];
+      }),
+    );
+
+  const slashGroup = (
+    label: string,
+    commands: string[],
+  ): AgentCommandConfig => {
+    const yepNames = new Set<string>(yepCommands);
+    return {
+      prefix: "/",
+      label,
+      showButton: commands.length > 0,
+      commands,
+      // Provider descriptions fill in their own commands; Yep's text wins for
+      // the commands Yep intercepts, since that is what will happen.
+      details: {
+        ...buildSlashCommandDetails(
+          providerCommands.filter((command) => !yepNames.has(command.name)),
+        ),
+        ...yepDetails(),
       },
+    };
+  };
+
+  if (isCodexCommandProvider(provider)) {
+    // Codex compaction can resume an idle session; the other controls need
+    // the live app-server thread.
+    addYep("compact", inSession && canSend);
+    addYep("model", ownsProcess);
+    addYep("review", ownsProcess);
+    addYep("goal", ownsProcess);
+    sideCommands(hasSide);
+    const skillDetails = Object.fromEntries(
+      codexSkills.flatMap((skill) =>
+        skill.description
+          ? [[skill.name, { description: skill.description }]]
+          : [],
+      ),
+    );
+    const skills = mergeCommands(codexSkills.map((skill) => skill.name));
+    return [
+      slashGroup(labels.codexCommands, [...yepCommands]),
       {
         prefix: "$",
         label: labels.skills,
-        showButton: true,
-        commands: mergeCommands(codexSkills),
+        showButton: skills.length > 0,
+        commands: skills,
+        details: skillDetails,
       },
     ];
   }
 
+  const live = canSend ? providerCommands.map((command) => command.name) : [];
+
   if (provider === "pi") {
+    addYep("compact", ownsProcess);
+    addYep("model", ownsProcess);
+    sideCommands(hasSide);
+    // Yep always intercepts these names for Pi, so a provider entry with the
+    // same name must not reappear when the Yep version is unavailable.
+    const intercepted = new Set(["compact", "model", "side", "btw"]);
     return [
-      {
-        prefix: "/",
-        label: labels.slashCommands,
-        showButton: true,
-        commands: mergeCommands(PI_SLASH_COMMANDS, slashCommands),
-      },
+      slashGroup(
+        labels.slashCommands,
+        mergeCommands(
+          yepCommands,
+          live.filter((name) => !intercepted.has(name)),
+        ),
+      ),
     ];
+  }
+
+  // MiniMax Code and Cursor report their built-ins and skills over ACP;
+  // everything in that list is resolved by the agent itself.
+  if (provider === "mcode" || provider === "cursor") {
+    // Only MiniMax Code can switch models mid-session through Yep.
+    addYep("model", provider === "mcode" && ownsProcess);
+    return [slashGroup(labels.slashCommands, mergeCommands(yepCommands, live))];
   }
 
   const canUseSlashCommands =
     supportsSlashCommands ?? providerDefaultsToSlashCommands(provider);
+  if (!canUseSlashCommands) {
+    return [slashGroup(labels.slashCommands, [])];
+  }
 
+  addYep("model", ownsProcess);
+  sideCommands(hasSide);
   return [
-    {
-      prefix: "/",
-      label: labels.slashCommands,
-      showButton: canUseSlashCommands,
-      commands: canUseSlashCommands
-        ? mergeCommands(STATIC_SLASH_COMMANDS, slashCommands)
-        : [],
-    },
+    slashGroup(
+      labels.slashCommands,
+      canSend ? mergeCommands(yepCommands, STATIC_SLASH_COMMANDS, live) : [],
+    ),
   ];
-}
-
-export function getStaticAgentCommandConfigs(
-  slashCommands: string[] = [],
-): AgentCommandConfig[] {
-  return getAgentCommandConfigs("claude", true, slashCommands);
-}
-
-export function getAgentCommandConfig(
-  provider: ProviderName | string | undefined | null,
-  supportsSlashCommands?: boolean,
-  slashCommands: string[] = [],
-): AgentCommandConfig {
-  return getAgentCommandConfigs(
-    provider,
-    supportsSlashCommands,
-    slashCommands,
-  )[0] as AgentCommandConfig;
 }
