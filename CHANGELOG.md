@@ -34,6 +34,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - 移除 ZCode provider 及其全部逻辑：app-server 接入、`~/.zcode` SQLite 会话读取与变更监视（每 15 秒轮询）、会话归档写回、ZCode TUI hook bridge（`/api/zcode-bridge` 与「全部会话」页的审批卡片）、新建会话页的 MCP 状态面板，以及 `test:zcode-app-server-smoke` 脚本。旧数据中的 `zcode` 会话不再出现在列表中，按已退役 provider 处理（相关接口返回 410）；Yep 从未修改的 ZCode 原始数据仍保留在 `~/.zcode`。曾安装 hook 插件的用户可删除 `~/.zcode/plugins/yep-bridge` 与 `~/.zcode/yep-bridge.json`。仅被 ZCode 使用的 SQLite 查询 worker 一并删除；Pi 与 Codex 共用的编辑分支推导迁至 `sessions/copied-prefix-branch.ts`，行为不变。
 
 ### Fixed
+- 修复 MiniMax Code 模型列表一直保留已删除模型、看不到新模型的问题：查询目录时跳过因旧模型退役而不返回模型选项的会话；本机配置变更立即使缓存失效，旧活跃会话不再覆盖目录；新建页选中 MiniMax Code 后会接收刷新后的模型列表。
 - Pi 进程启动尚未就绪时查询命令列表（会话加载、输入框命令菜单）不再抛错并在 runtime 日志里打印完整堆栈，改为返回该目录最近一次记录的命令列表；进程就绪后照常返回实时列表。
 - 修复 Codex 会话切换到轻量目录后，侧栏及项目会话列表不再显示累计 token 用量的问题。只为实际返回的会话补齐用量，复用按文件变化校验的摘要缓存，并保留压缩、回退后的统计口径。
 - 修复外置 agent runtime（`YEP_RUNTIME_EXTERNAL=true`）下会话中途切换思考等级与上下文压缩请求返回 404：runtime 控制端口补上 `/processes/:id/reasoning-effort` 与 `/processes/:id/compact`。

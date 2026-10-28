@@ -22,7 +22,7 @@ MiniMax Code（provider 名 `mcode`）通过本机 CLI `mcode acp`（Agent Clien
 
 - 新建：`session/new`；接管或继续：`session/resume`（不回放历史），失败时退回 `session/load`。不会在接管失败时偷偷新建会话。
 - 权限：Yep 的 `default` / `auto` / `bypassPermissions` 映射到 mcode 的 `permissionMode` 配置项（Ask / Auto / Full access）；`plan` 映射到 `session/set_mode plan`。mcode 自己先应用权限策略，只有它认为需要确认时才发 `session/request_permission`，Yep 不会再自动批准。Ask 模式下工作区内的读写本来就直接放行，越过工作区边界才会询问。
-- 模型：来自 ACP `model` 配置项，值的格式是 `m:<provider>:<model>:v:<variant>`。Yep 每个 `provider/model` 显示一项，把 plain 和 `thinking` 两个 variant 折叠成推理强度：`off` 加 `thinkingEffort` 的各档。模型目录不新建会话（ACP 没有 `session/delete`），而是从活跃会话的 configOptions 更新，或对最近一个空闲会话做 resume 再 close（不改动它的历史和时间戳）。
+- 模型：来自 ACP `model` 配置项，值的格式是 `m:<provider>:<model>:v:<variant>`。Yep 每个 `provider/model` 显示一项，把 plain 和 `thinking` 两个 variant 折叠成推理强度：`off` 加 `thinkingEffort` 的各档。模型目录不新建会话（ACP 没有 `session/delete`），而是用新 CLI 进程对空闲会话做 resume 再 close（不改动它的历史和时间戳），在 20 秒总预算内跳过无法打开的会话、已删除的工作目录，以及因旧模型退役而不再提供 `model` 选项的会话。目录缓存最多 10 分钟，`config.yaml` 变化后立即失效；旧活跃进程的配置通知不再覆盖目录。新建页选中 MiniMax Code 时会等待后台目录刷新并更新选项。
 - 中断：`session/cancel`。Steer：mcode 扩展方法 `mcode/session/steer`，只在 prompt 进行中可用。
 - 提问（`ask_user`）：Yep 声明了 `elicitation.form` 能力，mcode 会通过 `elicitation/create` 发送完整问卷（多步骤、多选、Other 自由输入），映射到 Yep 的 AskUserQuestion 面板。回答之后，mcode 在 ACP prompt 返回后再起一个后台 turn 续跑，期间 ACP 不推送正文。provider 会等到 `messages.jsonl` 出现回答时间之后的最终 assistant 消息才结束本轮；transcript 90 秒无变化或队列里有积压时提前结束。
 - 队列竞态：问卷回答如果赶在提问的那个 turn 结束之前到达，mcode 会把它放进自己的 Queue，下一次 `session/prompt` 会被 `An earlier queued message has priority` 拒绝。provider 会把积压消息（问卷取 Q/A 摘要）按顺序拼到本次 prompt 前面，从 Queue 删除后重发一次。

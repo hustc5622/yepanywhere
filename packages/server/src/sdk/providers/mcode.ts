@@ -17,7 +17,7 @@
  */
 
 import { exec } from "node:child_process";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
 import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -32,7 +32,6 @@ import type {
   PromptResponse,
   RequestPermissionRequest,
   RequestPermissionResponse,
-  SessionConfigOption,
   SessionNotification,
   SessionUpdate,
 } from "@agentclientprotocol/sdk";
@@ -93,16 +92,15 @@ const MCODE_CLIENT_CAPABILITIES = {
 const MODEL_CATALOG_TTL_MS = 10 * 60_000;
 const MODEL_PROBE_TIMEOUT_MS = 20_000;
 
-let modelCatalogCache: { at: number; models: ModelInfo[] } | null = null;
-let modelProbeInFlight: Promise<ModelInfo[]> | null = null;
-
-function rememberModelCatalog(
-  configOptions: readonly SessionConfigOption[] | undefined,
-): void {
-  const models = buildMcodeModelCatalog(
-    configOptions as unknown as Parameters<typeof buildMcodeModelCatalog>[0],
-  );
-  if (models.length > 0) modelCatalogCache = { at: Date.now(), models };
+async function modelConfigRevision(): Promise<string> {
+  try {
+    // mcode may atomically rewrite identical config on startup. File metadata
+    // would invalidate every successful probe; retain only a content digest.
+    const content = await readFile(join(MCODE_DATA_DIR, "config.yaml"));
+    return createHash("sha256").update(content).digest("hex");
+  } catch {
+    return "unavailable";
+  }
 }
 
 export type McodePermissionValue = "default" | "auto" | "bypassPermissions";
@@ -346,6 +344,15 @@ export class McodeProvider implements AgentProvider {
   readonly supportsSlashCommands = true;
 
   private readonly mcodePath?: string;
+  private modelCatalogCache?: {
+    at: number;
+    revision: string;
+    models: ModelInfo[];
+  };
+  private modelProbeInFlight?: {
+    revision: string;
+    promise: Promise<ModelInfo[]>;
+  };
 
   constructor(config: McodeProviderConfig = {}) {
     this.mcodePath = config.mcodePath;
@@ -391,59 +398,109 @@ export class McodeProvider implements AgentProvider {
   /**
    * Models come from mcode's ACP `model` config option. Listing never creates
    * a MiniMax session (ACP has no session/delete): the catalog is refreshed
-   * from live sessions, or by resuming then closing the most recent idle
-   * session, which leaves its history and timestamps untouched.
+   * by a fresh CLI process resuming then closing idle sessions, which leaves
+   * their history and timestamps untouched. A live process may retain an old
+   * config snapshot, so its updates must not overwrite this global catalog.
    */
   async getAvailableModels(options?: {
     waitForRefresh?: boolean;
   }): Promise<ModelInfo[]> {
-    const fresh =
-      modelCatalogCache &&
-      Date.now() - modelCatalogCache.at < MODEL_CATALOG_TTL_MS;
-    if (fresh && modelCatalogCache) return modelCatalogCache.models;
-    if (!modelProbeInFlight) {
-      modelProbeInFlight = this.probeModelCatalog().finally(() => {
-        modelProbeInFlight = null;
-      });
+    const revision = await modelConfigRevision();
+    const cached =
+      this.modelCatalogCache?.revision === revision
+        ? this.modelCatalogCache
+        : undefined;
+    if (cached && Date.now() - cached.at < MODEL_CATALOG_TTL_MS) {
+      return cached.models;
     }
-    const probe = modelProbeInFlight;
+    if (this.modelProbeInFlight?.revision !== revision) {
+      const flight = {
+        revision,
+        promise: Promise.resolve([] as ModelInfo[]),
+      };
+      this.modelProbeInFlight = flight;
+      flight.promise = this.probeModelCatalog()
+        .then(async (models) => {
+          // A config edit during the probe must not bless an obsolete catalog.
+          if ((await modelConfigRevision()) !== revision) {
+            return MCODE_FALLBACK_MODELS;
+          }
+          if (models.length > 0 && this.modelProbeInFlight === flight) {
+            this.modelCatalogCache = { at: Date.now(), revision, models };
+          }
+          return models.length > 0
+            ? models
+            : (cached?.models ?? MCODE_FALLBACK_MODELS);
+        })
+        .finally(() => {
+          if (this.modelProbeInFlight === flight) {
+            this.modelProbeInFlight = undefined;
+          }
+        });
+    }
+    const probe = this.modelProbeInFlight.promise;
     if (options?.waitForRefresh === false) {
       void probe.catch(() => undefined);
-      return modelCatalogCache?.models ?? MCODE_FALLBACK_MODELS;
+      return cached?.models ?? MCODE_FALLBACK_MODELS;
     }
     return probe;
   }
 
   private async probeModelCatalog(): Promise<ModelInfo[]> {
     const mcodePath = await this.findMcodePath();
-    if (!mcodePath) return modelCatalogCache?.models ?? MCODE_FALLBACK_MODELS;
+    if (!mcodePath) return [];
     const records = await listMcodeSessionRecords();
-    const target = records.find((record) => record.status !== "started");
-    if (!target || !existsSync(target.cwd)) {
-      return modelCatalogCache?.models ?? MCODE_FALLBACK_MODELS;
-    }
+    const targets = records.filter(
+      (record) => record.status !== "started" && existsSync(record.cwd),
+    );
+    const first = targets[0];
+    if (!first) return [];
     const client = new ACPClient();
-    const timeout = setTimeout(() => client.close(), MODEL_PROBE_TIMEOUT_MS);
+    let timedOut = false;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      client.close();
+    }, MODEL_PROBE_TIMEOUT_MS);
     try {
       await client.connect({
         command: mcodePath,
         args: ["acp"],
-        cwd: target.cwd,
+        cwd: first.cwd,
         env: mcodeSpawnEnv(mcodePath),
       });
       await client.initialize({});
-      await client.resumeSession(target.sessionId, target.cwd);
-      rememberModelCatalog(client.getSessionConfigOptions(target.sessionId));
-      await client
-        .requestExtension("session/close", { sessionId: target.sessionId })
-        .catch(() => undefined);
+      for (const target of targets) {
+        if (timedOut) break;
+        let attached = false;
+        try {
+          await client.resumeSession(target.sessionId, target.cwd);
+          attached = true;
+          const models = buildMcodeModelCatalog(
+            client.getSessionConfigOptions(target.sessionId),
+          );
+          // mcode 0.6.12 omits the entire model option if the session's
+          // saved model/variant is no longer in its catalog (ACP px/eh).
+          // Try another idle session instead of keeping stale models forever.
+          if (models.length > 0) return models;
+        } catch (error) {
+          log.debug({ err: error }, "MiniMax Code catalog session unavailable");
+        } finally {
+          if (attached && !timedOut) {
+            await client
+              .requestExtension("session/close", {
+                sessionId: target.sessionId,
+              })
+              .catch(() => undefined);
+          }
+        }
+      }
     } catch (error) {
       log.debug({ err: error }, "MiniMax Code model catalog probe failed");
     } finally {
       clearTimeout(timeout);
       client.close();
     }
-    return modelCatalogCache?.models ?? MCODE_FALLBACK_MODELS;
+    return [];
   }
 
   async startSession(options: StartSessionOptions): Promise<AgentSession> {
@@ -623,9 +680,6 @@ export class McodeProvider implements AgentProvider {
           );
         }
       }
-      const configOptions = client.getSessionConfigOptions(sessionId);
-      rememberModelCatalog(configOptions);
-
       yield {
         type: "system",
         subtype: "init",
@@ -907,9 +961,6 @@ export class McodeProvider implements AgentProvider {
           continue;
         }
         if (update.sessionUpdate === "config_option_update") {
-          rememberModelCatalog(
-            (update as { configOptions?: SessionConfigOption[] }).configOptions,
-          );
           continue;
         }
         const converted = convertMcodeUpdate(update, sessionId, toolNames);

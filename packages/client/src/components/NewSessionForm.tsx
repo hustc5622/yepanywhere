@@ -370,6 +370,7 @@ export function NewSessionForm({
 
   const [cursorCatalog, setCursorCatalog] = useState<ModelInfo[] | null>(null);
   const [cursorCatalogLoading, setCursorCatalogLoading] = useState(false);
+  const [mcodeCatalog, setMcodeCatalog] = useState<ModelInfo[] | null>(null);
   const cursorPrepareKeyRef = useRef<string | null>(null);
 
   // Object URLs keep their backing Blob alive for the lifetime of the page.
@@ -445,12 +446,14 @@ export function NewSessionForm({
   // form loads it only after Cursor is selected and the list is still empty.
   const listedModels = selectedProviderInfo?.models ?? [];
   const availableModels: ModelInfo[] =
-    selectedProvider === "cursor" &&
-    listedModels.length === 0 &&
-    cursorCatalog &&
-    cursorCatalog.length > 0
-      ? cursorCatalog
-      : listedModels;
+    selectedProvider === "mcode" && mcodeCatalog
+      ? mcodeCatalog
+      : selectedProvider === "cursor" &&
+          listedModels.length === 0 &&
+          cursorCatalog &&
+          cursorCatalog.length > 0
+        ? cursorCatalog
+        : listedModels;
   const selectedModelInfo = availableModels.find(
     (model) => model.id === selectedModel,
   );
@@ -1324,6 +1327,28 @@ export function NewSessionForm({
   const cursorListedCount =
     providers.find((provider) => provider.name === "cursor")?.models?.length ??
     0;
+  useEffect(() => {
+    if (selectedProvider !== "mcode") {
+      setMcodeCatalog(null);
+      return;
+    }
+    let cancelled = false;
+    // The shared provider list returns immediately while ACP refreshes in the
+    // background. Consume that refresh even when the previous list was nonempty.
+    api
+      .getProvider("mcode", { fresh: true })
+      .then(({ provider }) => {
+        if (cancelled) return;
+        const models = provider.models ?? [];
+        setMcodeCatalog(models);
+        setSelectedModel((current) => getPreferredModelId(models, current));
+      })
+      .catch(() => undefined);
+    return () => {
+      cancelled = true;
+    };
+  }, [selectedProvider]);
+
   useEffect(() => {
     if (selectedProvider !== "cursor" || cursorListedCount > 0) return;
     let cancelled = false;

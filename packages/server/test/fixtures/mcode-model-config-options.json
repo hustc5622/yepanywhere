@@ -1,0 +1,140 @@
+{
+  "retiredModel": [
+    {
+      "type": "select",
+      "id": "permissionMode",
+      "name": "Permission mode",
+      "description": "Controls how MiniMax Code handles tool permission requests in this process.",
+      "category": "_permission",
+      "currentValue": "bypassPermissions",
+      "options": [
+        {
+          "value": "default",
+          "name": "Ask"
+        },
+        {
+          "value": "auto",
+          "name": "Auto"
+        },
+        {
+          "value": "bypassPermissions",
+          "name": "Full access"
+        }
+      ],
+      "_meta": {
+        "minimax-code/scope": "process"
+      }
+    }
+  ],
+  "current": [
+    {
+      "type": "select",
+      "id": "permissionMode",
+      "name": "Permission mode",
+      "description": "Controls how MiniMax Code handles tool permission requests in this process.",
+      "category": "_permission",
+      "currentValue": "bypassPermissions",
+      "options": [
+        {
+          "value": "default",
+          "name": "Ask"
+        },
+        {
+          "value": "auto",
+          "name": "Auto"
+        },
+        {
+          "value": "bypassPermissions",
+          "name": "Full access"
+        }
+      ],
+      "_meta": {
+        "minimax-code/scope": "process"
+      }
+    },
+    {
+      "type": "select",
+      "id": "model",
+      "name": "Model",
+      "description": "Selects the model used by subsequent turns in this Session.",
+      "category": "model",
+      "currentValue": "m:custom_provider%3Aappintheloop:MiniMax-M3.1-Flash:v:thinking",
+      "options": [
+        {
+          "value": "m:minimax:MiniMax-M3.1-Flash:v:",
+          "name": "M3.1-Flash"
+        },
+        {
+          "value": "m:minimax:MiniMax-M3.1-Flash:v:thinking",
+          "name": "M3.1-Flash · thinking"
+        },
+        {
+          "value": "m:minimax:MiniMax-M3:v:",
+          "name": "M3"
+        },
+        {
+          "value": "m:minimax:MiniMax-M3:v:thinking",
+          "name": "M3 · thinking"
+        },
+        {
+          "value": "m:custom_provider%3Aappintheloop:claude-fable-5:v:thinking",
+          "name": "claude-fable-5 · thinking"
+        },
+        {
+          "value": "m:custom_provider%3Aappintheloop:claude-opus-5-5:v:",
+          "name": "claude-opus-5-5"
+        },
+        {
+          "value": "m:custom_provider%3Aappintheloop:claude-fable-5-1:v:",
+          "name": "claude-fable-5-1"
+        },
+        {
+          "value": "m:custom_provider%3Aappintheloop:claude-opus-4-20250514:v:",
+          "name": "claude-opus-4-20250514"
+        },
+        {
+          "value": "m:custom_provider%3Aappintheloop:MiniMax-M3.1-Flash:v:thinking",
+          "name": "MiniMax-M3.1-Flash · thinking"
+        },
+        {
+          "value": "m:custom_provider%3Aappintheloop:MiniMax-M78:v:",
+          "name": "MiniMax-M78"
+        }
+      ]
+    },
+    {
+      "type": "select",
+      "id": "thinkingEffort",
+      "name": "Thinking effort",
+      "description": "Controls the reasoning effort for the selected model in this Session.",
+      "category": "thought_level",
+      "currentValue": "high",
+      "options": [
+        {
+          "value": "default",
+          "name": "Default"
+        },
+        {
+          "value": "low",
+          "name": "Low"
+        },
+        {
+          "value": "medium",
+          "name": "Medium"
+        },
+        {
+          "value": "high",
+          "name": "High"
+        },
+        {
+          "value": "xhigh",
+          "name": "Xhigh"
+        },
+        {
+          "value": "max",
+          "name": "Max"
+        }
+      ]
+    }
+  ]
+}
