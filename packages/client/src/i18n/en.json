@@ -1750,6 +1750,8 @@
   "sessionDisplayPlan": "Proposed plan",
   "sessionDisplaySubagent": "Sub-agent activity",
   "sessionDisplayProviderEvent": "Provider event",
+  "sessionDisplayCursorTask": "Background task finished: {detail}",
+  "sessionDisplayCursorTaskBare": "Background task finished",
   "sessionInspectorExternal": "External",
   "sessionInspectorSelf": "Owned",
   "sessionInspectorIdle": "Idle",

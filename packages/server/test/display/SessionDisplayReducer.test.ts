@@ -937,6 +937,109 @@ describe("SessionDisplayReducer", () => {
       required(required(replay.groupSteps(replayGroupId))[0]).timestamp,
     ).toBeUndefined();
   });
+
+  it("keeps Cursor progress text that shares a message with its tool calls", () => {
+    const model = new SessionDisplayReducer(view, "cursor");
+    model.message({
+      uuid: "user",
+      type: "user",
+      turnId: "cursor-turn-1",
+      cursorTurnIndex: 1,
+      message: { role: "user", content: "下一问" },
+    });
+    model.message({
+      uuid: "step",
+      type: "assistant",
+      turnId: "cursor-turn-1",
+      cursorTurnIndex: 1,
+      message: {
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "Check epoch first" },
+          { type: "text", text: "先确认 8090 自己会不会核对" },
+          {
+            type: "tool_use",
+            id: "read-a",
+            name: "Read",
+            input: { path: "a.ts" },
+          },
+          {
+            type: "tool_use",
+            id: "read-b",
+            name: "Read",
+            input: { path: "b.ts" },
+          },
+        ],
+      },
+    });
+    expect(
+      model
+        .snapshot()
+        .nodes.map((node) =>
+          node.type === "segment" ? node.segment.type : node.type,
+        ),
+    ).toEqual(["question", "thinking", "assistant_text", "tool_group"]);
+  });
+
+  it("does not turn equal Cursor start and end times into a group total", () => {
+    const model = new SessionDisplayReducer(view, "cursor");
+    model.message({
+      uuid: "user",
+      type: "user",
+      turnId: "cursor-turn-1",
+      message: { role: "user", content: "Run" },
+    });
+    model.message({
+      ...tool("same"),
+      turnId: "cursor-turn-1",
+      codexTurnId: undefined,
+      timestamp: "2026-01-01T00:00:01.000Z",
+    });
+    model.message({
+      ...result("same"),
+      turnId: "cursor-turn-1",
+      codexTurnId: undefined,
+      timestamp: "2026-01-01T00:00:01.000Z",
+    });
+    expect(groups(model.snapshot())[0]).toMatchObject({ count: 1 });
+    expect(groups(model.snapshot())[0]).not.toHaveProperty("durationMs");
+  });
+
+  it("places a short Cursor thought before the reply it names", () => {
+    const model = new SessionDisplayReducer(view, "cursor");
+    model.message({
+      uuid: "user",
+      type: "user",
+      turnId: "cursor-turn-1",
+      message: { role: "user", content: "问" },
+    });
+    model.message({
+      uuid: "answer",
+      type: "assistant",
+      turnId: "cursor-turn-1",
+      message: {
+        role: "assistant",
+        content: "先确认 8090 自己会不会核对两侧 epoch",
+      },
+    });
+    model.message({
+      uuid: "thought",
+      type: "assistant",
+      turnId: "cursor-turn-1",
+      cursorThinkingBefore: { text: "先确认 8090" },
+      message: {
+        role: "assistant",
+        content: [{ type: "thinking", thinking: "Look at the yellow note" }],
+      },
+    });
+    expect(
+      model
+        .snapshot()
+        .nodes.map((node) =>
+          node.type === "segment" ? node.segment.type : node.type,
+        ),
+    ).toEqual(["question", "thinking", "assistant_text"]);
+  });
 });
 
 function required<T>(value: T | null | undefined): T {

@@ -504,6 +504,16 @@ export function normalizeSession(
         messages: data.session.messages.map((message) => {
           if (message.role === "user") cursorTurnIndex += 1;
           const turnId = `cursor-turn-${cursorTurnIndex}`;
+          if (message.role === "notice") {
+            return {
+              type: "system",
+              subtype: "cursor_task",
+              uuid: message.id,
+              cursorTurnIndex,
+              turnId,
+              content: message.text,
+            };
+          }
           if (message.role === "compaction") {
             return {
               type: "system",

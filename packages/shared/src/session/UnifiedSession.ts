@@ -23,7 +23,11 @@ export interface CodexSessionContent {
  */
 export interface CursorTranscriptMessage {
   id: string;
-  role: "user" | "assistant" | "tool" | "compaction";
+  /**
+   * `notice` is a Cursor `<system_notification>` (a finished background task).
+   * It is not a user prompt and must not take a turn index.
+   */
+  role: "user" | "assistant" | "tool" | "compaction" | "notice";
   text: string;
   reasoning?: string;
   /** Ordered visible content, including native tool calls and results. */

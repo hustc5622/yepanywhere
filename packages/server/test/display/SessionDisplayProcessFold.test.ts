@@ -472,4 +472,77 @@ describe("SessionDisplayReducer process folding", () => {
       endedAt: at(95),
     });
   });
+
+  it("keeps the last Cursor answer outside the fold when a thought follows it", () => {
+    const model = new SessionDisplayReducer(view, "cursor", {
+      foldSettled: true,
+    });
+    const turn = "cursor-turn-1";
+    const withTurn = (message: Record<string, unknown>) => ({
+      ...message,
+      turnId: turn,
+      cursorTurnIndex: 1,
+    });
+    model.restore(
+      [
+        withTurn({
+          uuid: "user",
+          type: "user",
+          message: { role: "user", content: "开始吧" },
+        }),
+        withTurn({
+          uuid: "progress",
+          type: "assistant",
+          message: { role: "assistant", content: "先看一下" },
+        }),
+        withTurn({
+          uuid: "tool",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "read-1",
+                name: "Read",
+                input: { path: "a.ts" },
+              },
+            ],
+          },
+        }),
+        withTurn({
+          uuid: "result",
+          type: "user",
+          message: {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "read-1", content: "ok" },
+            ],
+          },
+        }),
+        withTurn({
+          uuid: "answer",
+          type: "assistant",
+          message: { role: "assistant", content: "这条黄字是核对说明" },
+        }),
+        withTurn({
+          uuid: "late-thought",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "The user wants the epoch check" },
+            ],
+          },
+        }),
+      ] as Message[],
+      { [turn]: "completed" },
+    );
+    model.setRuntime("completed");
+    expect(labels(model.snapshot().nodes)).toEqual([
+      "question",
+      "process:completed",
+      "text:这条黄字是核对说明",
+    ]);
+  });
 });

@@ -2479,6 +2479,49 @@ describe("SessionDisplayService", () => {
     ).value;
     expect(subscription.cleanup).not.toHaveBeenCalled();
   });
+  it("keeps a Cursor prompt when its turn index already has a different question", async () => {
+    const { service, source, push } = fixture();
+    const history = {
+      provider: "cursor" as const,
+      messages: [
+        {
+          uuid: "disk-user-1",
+          type: "user",
+          cursorTurnIndex: 1,
+          turnId: "cursor-turn-1",
+          message: { role: "user", content: "First" },
+        },
+        {
+          uuid: "disk-answer-1",
+          type: "assistant",
+          cursorTurnIndex: 1,
+          turnId: "cursor-turn-1",
+          message: { role: "assistant", content: "Answer" },
+        },
+      ] as Message[],
+      activity: "running" as const,
+      stamp: "1",
+    };
+    source.read.mockResolvedValue(history);
+    await service.subscribe(selection, vi.fn());
+    push("message", {
+      uuid: "live-user",
+      type: "user",
+      cursorTurnIndex: 1,
+      turnId: "cursor-turn-1",
+      message: { role: "user", content: "Second" },
+    });
+    source.read.mockResolvedValue({ ...history, stamp: "2" });
+    push("status", { state: "idle" });
+    await vi.waitFor(async () => {
+      const snapshot = await service.snapshot(selection);
+      const questions = snapshot.nodes.filter(
+        (node) => node.type === "question",
+      );
+      expect(questions).toHaveLength(2);
+      expect(JSON.stringify(questions[1])).toContain("Second");
+    });
+  });
   it("shows the prompt a replacement process was started with before the projection attached", async () => {
     vi.useFakeTimers();
     const { service, source, runtime, push } = fixture(1_000);

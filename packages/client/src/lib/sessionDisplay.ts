@@ -45,6 +45,11 @@ export function formatSessionDisplayNotice(
     case "agent_wait":
       return t("codexAgentWaiting");
     case "provider_event":
+      if (notice.title === "cursor-task") {
+        return notice.message
+          ? t("sessionDisplayCursorTask", { detail: notice.message })
+          : t("sessionDisplayCursorTaskBare");
+      }
       return withDetail(t("sessionDisplayProviderEvent"));
   }
 }

@@ -1750,6 +1750,8 @@
   "sessionDisplayPlan": "建议计划",
   "sessionDisplaySubagent": "子智能体活动",
   "sessionDisplayProviderEvent": "Provider 事件",
+  "sessionDisplayCursorTask": "后台任务已结束：{detail}",
+  "sessionDisplayCursorTaskBare": "后台任务已结束",
   "sessionInspectorExternal": "外部",
   "sessionInspectorSelf": "本会话",
   "sessionInspectorIdle": "空闲",

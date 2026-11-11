@@ -47,6 +47,7 @@ const PINNED_NOTICE_KINDS = new Set<string>([
   "warning",
   "turn_aborted",
   "goal",
+  "provider_event",
 ]);
 
 export interface SessionDisplayReducerOptions {
@@ -177,9 +178,7 @@ function cursorTextsMatch(native: string, live: string): boolean {
   const left = native.trim();
   const right = live.trim();
   if (!left || !right) return false;
-  if (left === right) return true;
-  if (Math.min(left.length, right.length) < 24) return false;
-  return left.includes(right) || right.includes(left);
+  return left === right || left.includes(right) || right.includes(left);
 }
 
 function readCursorThinkingPlacement(
@@ -378,16 +377,19 @@ export class SessionDisplayReducer {
           return index;
       }
     }
-    for (let index = this.nodes.length - 1; index >= 0; index -= 1) {
+    let lastText: number | undefined;
+    let firstTool: number | undefined;
+    for (let index = 0; index < this.nodes.length; index += 1) {
       const node = this.nodes[index];
-      if (
-        node?.type === "segment" &&
-        node.segment.type === "assistant_text" &&
-        node.turnId === section
-      )
-        return index;
+      if (node?.type !== "segment" || node.turnId !== section) continue;
+      if (node.segment.type === "assistant_text") lastText = index;
+      if (node.segment.type === "tool_group" && firstTool === undefined)
+        firstTool = index;
     }
-    return undefined;
+    // A missed anchor stays in this turn, before the reply it belongs with,
+    // or before the tools when the reply has not been written yet. It must
+    // not be appended after the answer.
+    return lastText ?? firstTool;
   }
 
   setRuntime(state: SessionDisplayActivity["state"]): void {
@@ -1120,10 +1122,31 @@ export class SessionDisplayReducer {
     let timedCount = 0;
     for (const tool of tools) {
       if (tool.status === "running") continue;
+      const started = Date.parse(tool.timestamp ?? "");
+      const ended = Date.parse(tool.completedAt ?? "");
+      const span =
+        Number.isFinite(started) && Number.isFinite(ended) && ended > started
+          ? ended - started
+          : undefined;
+      // Equal start and end is not a duration. Cursor must not turn that into
+      // a group total; an explicit positive durationMs still counts.
       const elapsed =
-        tool.durationMs ??
-        Date.parse(tool.completedAt ?? "") - Date.parse(tool.timestamp ?? "");
-      if (!Number.isFinite(elapsed) || elapsed < 0) continue;
+        this.provider === "cursor"
+          ? (span ??
+            (typeof tool.durationMs === "number" && tool.durationMs > 0
+              ? tool.durationMs
+              : undefined))
+          : (tool.durationMs ??
+            (Number.isFinite(ended) && Number.isFinite(started)
+              ? ended - started
+              : Number.NaN));
+      if (
+        typeof elapsed !== "number" ||
+        !Number.isFinite(elapsed) ||
+        elapsed < 0
+      )
+        continue;
+      if (this.provider === "cursor" && elapsed === 0) continue;
       durationMs += elapsed;
       timedCount++;
     }
@@ -1300,19 +1323,43 @@ export class SessionDisplayReducer {
       return block;
     if (block.some((node) => isActiveSegment(node.segment))) return block;
 
-    // The answer is the trailing text after the last working step. Trailing
-    // notices (late subagent/wait updates) fold into the work before it.
+    // The answer is the last real assistant text. A thought or tool row that
+    // lands after it must not pull that text into the fold.
     const tail = new Set<string>();
     let tailStart = block.length;
-    for (let index = block.length - 1; index >= 0; index--) {
-      const node = block[index];
-      if (!node) continue;
-      const segment = node.segment;
-      if (isPinnedSegment(segment) || segment.type === "notice") continue;
-      if (segment.type !== "assistant_text" || segment.phase === "progress")
-        break;
-      tail.add(node.id);
+    const isAnswerText = (segment: DisplaySegment) =>
+      segment.type === "assistant_text" &&
+      segment.phase !== "progress" &&
+      !segment.asyncMessage;
+    let index = block.length - 1;
+    while (index >= 0) {
+      const segment = block[index]?.segment;
+      if (!segment) break;
+      if (
+        isPinnedSegment(segment) ||
+        segment.type === "notice" ||
+        segment.type === "thinking" ||
+        segment.type === "tool_group" ||
+        segment.type === "action_required" ||
+        (segment.type === "assistant_text" && segment.phase === "progress")
+      ) {
+        index -= 1;
+        continue;
+      }
+      break;
+    }
+    const answer = index >= 0 ? block[index] : undefined;
+    if (answer && isAnswerText(answer.segment)) {
       tailStart = index;
+      while (tailStart > 0) {
+        const previous = block[tailStart - 1]?.segment;
+        if (!previous || !isAnswerText(previous)) break;
+        tailStart -= 1;
+      }
+      for (let cursor = tailStart; cursor <= index; cursor += 1) {
+        const node = block[cursor];
+        if (node) tail.add(node.id);
+      }
     }
     // Visible markers recorded once the answer had begun (a manual compaction
     // between turns, a late warning) keep their source position after it
@@ -1370,7 +1417,14 @@ export class SessionDisplayReducer {
     const sessionFacts = isLast && afterAnswer.size === 0;
     const status = this.blockStatus(block, anchor, sessionFacts, answered);
     const runId = this.blockRunId(block, anchor, sessionFacts);
-    const runEnd = runId ? this.runEndedAt.get(runId) : undefined;
+    const anchorRun = anchor?.turnId.startsWith("turn:")
+      ? anchor.turnId.slice("turn:".length)
+      : undefined;
+    // A shared session clock must not lend another turn's duration to this one.
+    const runEnd =
+      runId && (!anchorRun || runId === anchorRun)
+        ? this.runEndedAt.get(runId)
+        : undefined;
     const runEndTime = Date.parse(runEnd ?? "");
     const latest = this.latestTime(
       block.filter((node) => !afterAnswer.has(node.id)),

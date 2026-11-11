@@ -14,6 +14,8 @@ const SYNTHETIC_USER_PROMPT_PREFIXES = [
   // and the pre-0.16x goal wrapper. None of it is typed by the user.
   "<codex_internal_context",
   "<goal_context>",
+  // Cursor writes this after a background task and stores it as a user query.
+  "Briefly inform the user about the task result",
 ];
 
 export function isSessionSetupText(text: string): boolean {

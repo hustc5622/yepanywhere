@@ -1091,6 +1091,19 @@ function projectSystemNotice(
       ...(timestamp ? { timestamp } : {}),
     };
   }
+  if (subtype === "cursor_task") {
+    return {
+      type: "notice",
+      id: messageId,
+      kind: "provider_event",
+      title: "cursor-task",
+      message: boundedText(
+        getTextContent(message.message?.content ?? message.content) ||
+          "task finished",
+      ),
+      ...(timestamp ? { timestamp } : {}),
+    };
+  }
   if (subtype === "warning") {
     return {
       type: "notice",

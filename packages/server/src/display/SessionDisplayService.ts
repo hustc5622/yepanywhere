@@ -256,9 +256,19 @@ function isCursorUserPrompt(message: RecordValue): boolean {
   return cursorPromptBody(message).length > 0;
 }
 
+/** Drop the attachment manifest so a live prompt matches its stored query. */
+function cursorPromptIdentity(text: string): string {
+  return text
+    .replace(/\n+User uploaded files:[\s\S]*$/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+}
+
+/** Same user text. A shorter prompt must not match just because it is contained. */
 function cursorPromptsMatch(native: string, live: string): boolean {
-  if (!native || !live) return false;
-  return native === live || native.includes(live) || live.includes(native);
+  const left = cursorPromptIdentity(native);
+  const right = cursorPromptIdentity(live);
+  return left.length > 0 && left === right;
 }
 
 /**
@@ -277,7 +287,19 @@ function insertCursorPrompt(
     return [...messages];
   const stored = prompt as Message;
   const index = prompt.cursorTurnIndex;
+  const body = cursorPromptBody(prompt);
   if (typeof index === "number") {
+    const native = messages.find(
+      (message) =>
+        message.cursorTurnIndex === index &&
+        message.type === "user" &&
+        cursorPromptBody(message).length > 0,
+    );
+    if (native && cursorPromptsMatch(cursorPromptBody(native), body))
+      return [...messages];
+    // This index already belongs to a different prompt. Appending keeps the
+    // new question from being inserted into that earlier turn.
+    if (native) return [...messages, stored];
     const at = messages.findIndex(
       (message) => message.cursorTurnIndex === index,
     );
@@ -1604,7 +1626,7 @@ export class SessionDisplayService {
       }
       // Native history can contain tool or assistant rows before `<user_query>`
       // is committed. Keep the injected prompt until that row is readable.
-      const promptedTurns = new Set<number>();
+      const promptedTurns = new Map<number, string>();
       const promptTexts: string[] = [];
       for (const message of page.messages) {
         if (message.type !== "user") continue;
@@ -1612,16 +1634,18 @@ export class SessionDisplayService {
         if (!body) continue;
         promptTexts.push(body);
         if (typeof message.cursorTurnIndex === "number")
-          promptedTurns.add(message.cursorTurnIndex);
+          promptedTurns.set(message.cursorTurnIndex, body);
       }
       for (const [id, message] of entry.bootstrapReplay) {
         if (!isCursorUserPrompt(message)) continue;
-        const index = message.cursorTurnIndex;
-        if (typeof index === "number" && promptedTurns.has(index)) continue;
         const body = cursorPromptBody(message);
+        const index = message.cursorTurnIndex;
+        const native =
+          typeof index === "number" ? promptedTurns.get(index) : undefined;
+        if (native && cursorPromptsMatch(native, body)) continue;
         if (
           typeof index !== "number" &&
-          promptTexts.some((native) => cursorPromptsMatch(native, body))
+          promptTexts.some((stored) => cursorPromptsMatch(stored, body))
         )
           continue;
         entry.overlay.set(id, message);
@@ -1749,7 +1773,7 @@ export class SessionDisplayService {
               })
               .join("")
           : "";
-    const cursorTurns = new Map<number, { hasPrompt: boolean; text: string }>();
+    const cursorTurns = new Map<number, { prompt: string; text: string }>();
     const completedCursorTurns = new Set<number>();
     const cursorPromptTexts: string[] = [];
     if (page.provider === "cursor") {
@@ -1763,12 +1787,14 @@ export class SessionDisplayService {
       for (const message of page.messages) {
         const index = message.cursorTurnIndex;
         if (typeof index !== "number") continue;
-        const turn = cursorTurns.get(index) ?? { hasPrompt: false, text: "" };
+        const turn = cursorTurns.get(index) ?? { prompt: "", text: "" };
         const content = messageContent(message);
-        if (message.type === "user" && typeof content === "string") {
-          turn.hasPrompt = true;
-          const body = content.trim();
-          if (body) cursorPromptTexts.push(body);
+        if (message.type === "user") {
+          const body = cursorPromptBody(message);
+          if (body) {
+            turn.prompt = body;
+            cursorPromptTexts.push(body);
+          }
         }
         if (message.type === "assistant") turn.text += text(content);
         cursorTurns.set(index, turn);
@@ -1870,7 +1896,7 @@ export class SessionDisplayService {
         typeof message.cursorTurnIndex === "number"
           ? cursorTurns.get(message.cursorTurnIndex)
           : undefined;
-      if (cursorTurn?.hasPrompt && !tools.length) {
+      if (cursorTurn && !tools.length) {
         const body = text(content);
         const thinkingBodies = blocks.flatMap((block) =>
           block?.type === "thinking" &&
@@ -1891,8 +1917,12 @@ export class SessionDisplayService {
           ) &&
           completedCursorTurns.has(message.cursorTurnIndex as number) &&
           blocks.every((block) => block?.type === "thinking");
+        const samePrompt =
+          message.type === "user" &&
+          cursorTurn.prompt.length > 0 &&
+          cursorPromptsMatch(cursorTurn.prompt, cursorPromptBody(message));
         if (
-          message.type === "user" ||
+          samePrompt ||
           settledThinking ||
           (message.type === "assistant" &&
             body &&

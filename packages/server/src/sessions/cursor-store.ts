@@ -48,6 +48,12 @@ interface StoreMeta {
 const USER_QUERY_RE = /<user_query>\s*([\s\S]*?)\s*<\/user_query>/;
 const CONVERSATION_SUMMARY_RE =
   /^\s*<conversation_summary>\s*([\s\S]*?)\s*(?:<\/conversation_summary>\s*)?$/;
+/**
+ * Cursor appends this instruction after a background task finishes and stores
+ * it as a user query. It is not something the user typed.
+ */
+const CURSOR_TASK_FOLLOWUP_RE =
+  /^Briefly inform the user about the task result\b/;
 /** Root field holding a compacted (pre-summary) history record. */
 const COMPACTION_RECORD_FIELD = 13;
 
@@ -285,7 +291,8 @@ function transcriptFromJsonBlob(
   const role = (parsed as { role?: unknown }).role;
   const content = (parsed as { content?: unknown }).content;
   if (role === "user") {
-    const summary = flattenText(content).match(CONVERSATION_SUMMARY_RE);
+    const raw = flattenText(content);
+    const summary = raw.match(CONVERSATION_SUMMARY_RE);
     if (summary) {
       return {
         id: `cursor-${id.slice(0, 12)}`,
@@ -293,8 +300,17 @@ function transcriptFromJsonBlob(
         text: summary[1]?.trim() ?? "",
       };
     }
+    const query = raw.match(USER_QUERY_RE)?.[1]?.trim() ?? "";
+    const followUp = CURSOR_TASK_FOLLOWUP_RE.test(query);
+    if (raw.includes("<system_notification>") && (!query || followUp)) {
+      return {
+        id: `cursor-${id.slice(0, 12)}`,
+        role: "notice",
+        text: formatCursorTaskNotice(raw),
+      };
+    }
     const text = extractUserText(content);
-    if (!text) return null;
+    if (!text || CURSOR_TASK_FOLLOWUP_RE.test(text)) return null;
     return { id: `cursor-${id.slice(0, 12)}`, role: "user", text };
   }
   if (role === "assistant") {
@@ -387,6 +403,20 @@ function extractBlocks(
     }
   }
   return blocks;
+}
+
+/** One line a system row can show: task title plus kind, status, and detail. */
+function formatCursorTaskNotice(raw: string): string {
+  const body = /<task>\s*([\s\S]*?)\s*<\/task>/.exec(raw)?.[1] ?? "";
+  const field = (name: string) =>
+    new RegExp(`(?:^|\\n)\\s*${name}:\\s*(.+)$`, "m").exec(body)?.[1]?.trim() ??
+    "";
+  const title = field("title");
+  const meta = [field("kind"), field("status"), field("detail")]
+    .filter(Boolean)
+    .join(", ");
+  if (title && meta) return `${title} (${meta})`;
+  return title || meta || "task finished";
 }
 
 function extractUserText(content: unknown): string | null {

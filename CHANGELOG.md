@@ -31,6 +31,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - 修复索引写锁的过期锁删除失败（权限、只读卷）时无休止重试的问题；Codex 分支树遍历、飞书长文本切分增加防死循环保护；入站 WebSocket 压缩帧解压后上限 32 MB。
 - Codex 模型路由启动失败时，错误日志写明失败阶段和原因（代理地址中的凭据会被隐去），不再只有一句笼统的 `Codex model routing failed`；配置探测总时限 25 秒。
 - 修复同时使用三种 Cursor 模型后 runtime 卡死、页面打不开的问题：Cursor 预热池满了要淘汰最早的空闲进程时，默认模型的键是空字符串，被误判为「没有可淘汰的进程」而什么都没删，外层循环因此永远不结束，runtime 进程占满一个 CPU 核且不再响应任何请求，主服务调用 runtime 全部超时。现在按条目而不是键判断，淘汰不掉时也会立即退出循环。
+- 修复 Cursor 会话把用户消息吞掉、回答折进「已完成」、以及思考和状态行错位的问题。后台任务结束时 Cursor 写进 user 的 `<system_notification>` 和 `Briefly inform the user...` 不再占用户气泡、回合号和右侧问题索引，改成一条「后台任务已结束」系统行。直播提问只在落盘原文一致时才收掉，编号对不上时不再插进上一问。最后一段真正的助手正文留在折叠外面，后面再跟上思考或工具也不会把回答收进去；耗时只用这一问自己的时间。思考对不上锚点时留在本回合工具或正文之前，短句也能对齐。进行中的回合已经有思考预览时不再叠一句 `Working on it.`；工具组不是每个调用都有可靠起止时间时，不再显示残缺的「累计耗时」。
 - 修复 `GET /api/sessions/:sessionId/locate` 无法定位 DeepSeek Harness（dsh）和 MiniMax Code（mcode）会话的问题：最后一步「逐个 provider 扫描」没有传入这两个 provider 的 reader，因此只拿会话 ID 的跳转和 agent 永远返回「Session not found」。
 - 修复设置了反向代理前缀（如 `/yep`）时登录鉴权的路径豁免失效的问题：鉴权中间件拿带前缀的完整路径去匹配 `/api/auth/*`、`/health`，导致开启密码登录后登录接口本身也要求已登录。现在会先去掉前缀再匹配。
 - 修复会话内搜索（`Cmd/Ctrl+F`）搜得到却不跳转、长消息后半段搜不到的问题，同时把定位精确到命中的文字。

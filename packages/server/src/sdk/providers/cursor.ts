@@ -366,12 +366,22 @@ export class CursorProvider implements AgentProvider {
       }
       activeSessionId = sessionId;
       onSessionId(sessionId);
-      const history = options.resumeSessionId
-        ? await readCursorSessionDir(join(CURSOR_ACP_SESSIONS_DIR, sessionId))
-        : null;
-      let turnIndex =
-        history?.messages.filter((message) => message.role === "user").length ??
-        0;
+      // Count only real user prompts. A failed read must not look like an
+      // empty session, or the next prompt is numbered 1 and collides.
+      let turnIndex = 0;
+      let turnCountTrusted = !options.resumeSessionId;
+      const refreshTurnCount = async () => {
+        const history = await readCursorSessionDir(
+          join(CURSOR_ACP_SESSIONS_DIR, sessionId),
+        );
+        if (!history) return;
+        const persisted = history.messages.filter(
+          (message) => message.role === "user",
+        ).length;
+        if (!turnCountTrusted || persisted > turnIndex) turnIndex = persisted;
+        turnCountTrusted = true;
+      };
+      await refreshTurnCount();
       await client.setSessionMode(
         sessionId,
         toCursorMode(options.permissionMode),
@@ -388,16 +398,23 @@ export class CursorProvider implements AgentProvider {
 
       for await (const message of queue.generator()) {
         if (signal.aborted) break;
-        turnIndex += 1;
+        // Once counted, this process issues every prompt of the chat, so the
+        // count advances locally. Re-reading the store each prompt cost a
+        // full synchronous parse of a database that grows with every turn.
+        if (!turnCountTrusted) await refreshTurnCount();
         const { internalPrompt, publicPrompt } =
           getUserPromptProjection(message);
         const userUuid = (message as { uuid?: string }).uuid ?? randomUUID();
+        if (turnCountTrusted) turnIndex += 1;
+        const turnId = turnCountTrusted
+          ? `cursor-turn-${turnIndex}`
+          : `cursor-turn-uncounted-${userUuid}`;
         yield {
           type: "user",
           uuid: userUuid,
           session_id: sessionId,
-          cursorTurnIndex: turnIndex,
-          turnId: `cursor-turn-${turnIndex}`,
+          ...(turnCountTrusted ? { cursorTurnIndex: turnIndex } : {}),
+          turnId,
           message: { role: "user", content: publicPrompt },
         } as SDKMessage;
 
@@ -413,9 +430,9 @@ export class CursorProvider implements AgentProvider {
         )) {
           yield {
             ...output,
-            cursorTurnIndex: turnIndex,
-            turnId: `cursor-turn-${turnIndex}`,
-            ...(output.type === "result"
+            ...(turnCountTrusted ? { cursorTurnIndex: turnIndex } : {}),
+            turnId,
+            ...(output.type === "result" && turnCountTrusted
               ? { uuid: `cursor-result-${turnIndex}` }
               : {}),
           } as SDKMessage;

@@ -367,4 +367,93 @@ describe("cursor ACP session store", () => {
     });
     expect(normalized.messages.at(-1)).toMatchObject({ cursorTurnIndex: 2 });
   });
+
+  it("turns background task notifications into system rows instead of user questions", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "cursor-notice-"));
+    dirs.push(dir);
+    const sessionId = "33333333-3333-4333-8333-333333333333";
+    const sessionDir = join(dir, sessionId);
+    const { mkdir } = await import("node:fs/promises");
+    await mkdir(sessionDir);
+    await writeFile(
+      join(sessionDir, "meta.json"),
+      JSON.stringify({ cwd: "/tmp/cursor-project" }),
+    );
+    const sqlite = openSqlite();
+    const db = new sqlite.DatabaseSync(join(sessionDir, "store.db"));
+    db.exec(
+      "CREATE TABLE blobs (id TEXT PRIMARY KEY, data BLOB); CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT)",
+    );
+    const insert = db.prepare("INSERT INTO blobs (id, data) VALUES (?, ?)");
+    const blob = (value: unknown) => {
+      const id = randomBytes(32);
+      insert.run(id.toString("hex"), Buffer.from(JSON.stringify(value)));
+      return id;
+    };
+    const field = (number: number, id: Buffer) =>
+      Buffer.concat([Buffer.from([(number << 3) | 2, 32]), id]);
+    const first = blob({
+      role: "user",
+      content: "<user_query>开始吧</user_query>",
+    });
+    const bare = blob({
+      role: "user",
+      content:
+        "<timestamp>now</timestamp><system_notification><task>\nkind: shell\nstatus: error\ntitle: Open batches page\ndetail: signal=SIGTERM\n</task></system_notification>",
+    });
+    const followUp = blob({
+      role: "user",
+      content:
+        "<system_notification><task>\nkind: shell\nstatus: error\ntitle: Check launch button\ndetail: signal=SIGTERM\n</task></system_notification><user_query>Briefly inform the user about the task result and perform any follow-up actions (if needed).</user_query>",
+    });
+    const next = blob({
+      role: "user",
+      content: "<user_query>下一问</user_query>",
+    });
+    const root = randomBytes(32);
+    insert.run(
+      root.toString("hex"),
+      Buffer.concat([
+        field(1, first),
+        field(1, bare),
+        field(1, followUp),
+        field(1, next),
+      ]),
+    );
+    db.prepare("INSERT INTO meta (key, value) VALUES ('0', ?)").run(
+      Buffer.from(
+        JSON.stringify({ latestRootBlobId: root.toString("hex") }),
+      ).toString("hex"),
+    );
+    db.close();
+
+    const session = await readCursorSessionDir(sessionDir);
+    expect(session?.messages.map((message) => message.role)).toEqual([
+      "user",
+      "notice",
+      "notice",
+      "user",
+    ]);
+    expect(session?.messages[1]?.text).toBe(
+      "Open batches page (shell, error, signal=SIGTERM)",
+    );
+    const loaded = await new CursorSessionReader({
+      sessionsDir: dir,
+      projectPath: "/tmp/cursor-project",
+    }).getSession(sessionId, "project");
+    if (!loaded) throw new Error("Expected loaded Cursor session");
+    expect(
+      loaded.summary.userQuestions?.map((question) => question.text),
+    ).toEqual(["开始吧", "下一问"]);
+    const normalized = normalizeSession(loaded);
+    expect(normalized.messages[1]).toMatchObject({
+      type: "system",
+      subtype: "cursor_task",
+      cursorTurnIndex: 1,
+    });
+    expect(normalized.messages.at(-1)).toMatchObject({
+      type: "user",
+      cursorTurnIndex: 2,
+    });
+  });
 });
