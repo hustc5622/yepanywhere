@@ -9,9 +9,13 @@ import type {
 import type { CodexNativeControlResult } from "../sdk/providers/codex-controls.js";
 import type { UserMessage } from "../sdk/types.js";
 import type { ProcessInfo } from "../supervisor/types.js";
+import { fetchEventStream, readSseFrames, sseFrameData } from "../utils/sse.js";
 import type { BusEvent } from "../watcher/index.js";
 import { ensureRuntimeToken } from "./token.js";
-import { RUNTIME_CONTROLLER_PROTOCOL_VERSION } from "./types.js";
+import {
+  RUNTIME_CONTROLLER_PROTOCOL_VERSION,
+  RUNTIME_STREAM_IDLE_TIMEOUT_MS,
+} from "./types.js";
 import type {
   CompactOptions,
   CreateRuntimeSessionRequest,
@@ -50,18 +54,22 @@ export interface HttpRuntimeControllerOptions {
   fetch?: RuntimeFetch;
   requestTimeoutMs?: number;
   slowRequestTimeoutMs?: number;
+  streamIdleTimeoutMs?: number;
 }
 
-/**
- * "slow" covers calls that may start or authenticate a provider process.
- * "none" is for calls that wait on model work (side questions, compaction,
- * native controls); a hung runtime still fails them once the event-loop
- * watchdog kills it.
- */
-type RuntimeRequestTimeout = "default" | "slow" | "none";
+/** "slow" covers calls that may start or authenticate a provider process. */
+type RuntimeRequestTimeout = "default" | "slow";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 const SLOW_REQUEST_TIMEOUT_MS = 120_000;
+/**
+ * Model-bound calls stream heartbeats (see `longRunning` in control-server),
+ * so a wedged runtime is caught by the stream idle timeout; these deadlines
+ * only bound genuinely slow work. Pi compaction may run for 30 minutes after
+ * waiting for the current turn.
+ */
+const COMPACT_DEADLINE_MS = 35 * 60_000;
+const MODEL_CONTROL_DEADLINE_MS = 10 * 60_000;
 
 class RuntimeHttpError extends Error {
   constructor(
@@ -77,6 +85,25 @@ function encode(value: string): string {
   return encodeURIComponent(value);
 }
 
+async function readJsonResult<T>(response: Response): Promise<T> {
+  if (!response.ok) {
+    const payload = (await response.json().catch(() => null)) as {
+      error?: string;
+    } | null;
+    throw new RuntimeHttpError(
+      response.status,
+      payload?.error ?? `Runtime request failed (${response.status})`,
+    );
+  }
+  return (await response.json()) as T;
+}
+
+function deadlineError(method: string, pathname: string, ms: number): Error {
+  return new Error(
+    `Agent runtime did not finish ${method} ${pathname} within ${ms}ms`,
+  );
+}
+
 export class HttpRuntimeController implements RuntimeController {
   readonly mode = "external" as const;
   private readonly baseUrl: string;
@@ -86,6 +113,7 @@ export class HttpRuntimeController implements RuntimeController {
   private readonly subscriptionControllers = new Set<AbortController>();
   private readonly requestTimeoutMs: number;
   private readonly slowRequestTimeoutMs: number;
+  private readonly streamIdleTimeoutMs: number;
 
   constructor(options: HttpRuntimeControllerOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
@@ -94,11 +122,32 @@ export class HttpRuntimeController implements RuntimeController {
       options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
     this.slowRequestTimeoutMs =
       options.slowRequestTimeoutMs ?? SLOW_REQUEST_TIMEOUT_MS;
+    this.streamIdleTimeoutMs =
+      options.streamIdleTimeoutMs ?? RUNTIME_STREAM_IDLE_TIMEOUT_MS;
     this.token = options.token;
     this.tokenFile = options.tokenFile;
     if (!this.token && !this.tokenFile) {
       throw new Error("HttpRuntimeController requires token or tokenFile");
     }
+  }
+
+  private fetchStream(
+    pathname: string,
+    token: string,
+    signal: AbortSignal,
+  ): Promise<Response> {
+    return fetchEventStream(
+      this.fetchFn,
+      `${this.baseUrl}${pathname}`,
+      {
+        headers: {
+          accept: "text/event-stream",
+          authorization: `Bearer ${token}`,
+        },
+        signal,
+      },
+      this.requestTimeoutMs,
+    );
   }
 
   private async getToken(): Promise<string> {
@@ -119,17 +168,11 @@ export class HttpRuntimeController implements RuntimeController {
       headers.set("content-type", "application/json");
 
     const timeoutMs =
-      timeout === "none"
-        ? undefined
-        : timeout === "slow"
-          ? this.slowRequestTimeoutMs
-          : this.requestTimeoutMs;
-    const timeoutSignal =
-      timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs);
-    const signal =
-      timeoutSignal && init.signal
-        ? AbortSignal.any([init.signal, timeoutSignal])
-        : (timeoutSignal ?? init.signal);
+      timeout === "slow" ? this.slowRequestTimeoutMs : this.requestTimeoutMs;
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const signal = init.signal
+      ? AbortSignal.any([init.signal, timeoutSignal])
+      : timeoutSignal;
 
     try {
       const response = await this.fetchFn(`${this.baseUrl}${pathname}`, {
@@ -137,18 +180,9 @@ export class HttpRuntimeController implements RuntimeController {
         headers,
         signal,
       });
-      if (!response.ok) {
-        const payload = (await response.json().catch(() => null)) as {
-          error?: string;
-        } | null;
-        throw new RuntimeHttpError(
-          response.status,
-          payload?.error ?? `Runtime request failed (${response.status})`,
-        );
-      }
-      return (await response.json()) as T;
+      return await readJsonResult<T>(response);
     } catch (error) {
-      if (timeoutSignal?.aborted) {
+      if (timeoutSignal.aborted) {
         throw new Error(
           `Agent runtime did not answer ${init.method ?? "GET"} ${pathname} within ${timeoutMs}ms`,
           { cause: error },
@@ -156,6 +190,67 @@ export class HttpRuntimeController implements RuntimeController {
       }
       throw error;
     }
+  }
+
+  /**
+   * A model-bound call: the runtime answers at once, heartbeats while the
+   * work runs and sends the outcome as the final event. Silence past the
+   * stream idle timeout means the runtime is gone; `deadlineMs` bounds the
+   * work itself.
+   */
+  private async requestLongRunning<T>(
+    pathname: string,
+    init: RequestInit,
+    deadlineMs: number,
+  ): Promise<T> {
+    const token = await this.getToken();
+    const headers = new Headers(init.headers);
+    headers.set("authorization", `Bearer ${token}`);
+    headers.set("accept", "text/event-stream");
+    if (init.body !== undefined)
+      headers.set("content-type", "application/json");
+    const deadline = AbortSignal.timeout(deadlineMs);
+    const signal = init.signal
+      ? AbortSignal.any([init.signal, deadline])
+      : deadline;
+    const method = init.method ?? "GET";
+
+    let outcome: { status: number; body: unknown } | undefined;
+    try {
+      const response = await fetchEventStream(
+        this.fetchFn,
+        `${this.baseUrl}${pathname}`,
+        { ...init, headers, signal },
+        this.requestTimeoutMs,
+      );
+      if (!response.headers.get("content-type")?.includes("text/event-stream"))
+        return await readJsonResult<T>(response);
+      await readSseFrames(
+        response,
+        signal,
+        (frame) => {
+          const data = sseFrameData(frame);
+          if (data) outcome = JSON.parse(data) as typeof outcome;
+        },
+        this.streamIdleTimeoutMs,
+      );
+    } catch (error) {
+      if (deadline.aborted) throw deadlineError(method, pathname, deadlineMs);
+      throw error;
+    }
+    if (deadline.aborted) throw deadlineError(method, pathname, deadlineMs);
+    if (!outcome)
+      throw new Error(
+        `Agent runtime closed ${method} ${pathname} without a result`,
+      );
+    if (outcome.status >= 400) {
+      const error = (outcome.body as { error?: string } | null)?.error;
+      throw new RuntimeHttpError(
+        outcome.status,
+        error ?? `Runtime request failed (${outcome.status})`,
+      );
+    }
+    return outcome.body as T;
   }
 
   async start(): Promise<void> {
@@ -406,10 +501,10 @@ export class HttpRuntimeController implements RuntimeController {
     request: import("@yep-anywhere/shared").SideConversationRequest,
   ): Promise<import("@yep-anywhere/shared").SideConversationResponse> {
     try {
-      return await this.request(
+      return await this.requestLongRunning(
         `/sessions/${encode(sessionId)}/side-conversation`,
         { method: "POST", body: JSON.stringify(request) },
-        "none",
+        MODEL_CONTROL_DEADLINE_MS,
       );
     } catch (error) {
       if (error instanceof RuntimeHttpError && error.status === 404)
@@ -422,13 +517,13 @@ export class HttpRuntimeController implements RuntimeController {
     input: RuntimeCodexControlRequest,
   ): Promise<CodexNativeControlResult> {
     const { sessionId, ...body } = input;
-    return this.request<CodexNativeControlResult>(
+    return this.requestLongRunning<CodexNativeControlResult>(
       `/sessions/${encode(sessionId)}/codex-control`,
       {
         method: "POST",
         body: JSON.stringify(body),
       },
-      "none",
+      MODEL_CONTROL_DEADLINE_MS,
     );
   }
 
@@ -499,13 +594,13 @@ export class HttpRuntimeController implements RuntimeController {
     processId: string,
     options?: CompactOptions,
   ): Promise<{ success: boolean }> {
-    return this.request(
+    return this.requestLongRunning(
       `/processes/${encode(processId)}/compact`,
       {
         method: "POST",
         body: JSON.stringify(options ?? {}),
       },
-      "none",
+      COMPACT_DEADLINE_MS,
     );
   }
 
@@ -598,15 +693,10 @@ export class HttpRuntimeController implements RuntimeController {
     }
     let response: Response;
     try {
-      response = await this.fetchFn(
-        `${this.baseUrl}/events?${query.toString()}`,
-        {
-          headers: {
-            accept: "text/event-stream",
-            authorization: `Bearer ${token}`,
-          },
-          signal: controller.signal,
-        },
+      response = await this.fetchStream(
+        `/events?${query.toString()}`,
+        token,
+        controller.signal,
       );
     } catch (error) {
       options?.signal?.removeEventListener("abort", abortFromCaller);
@@ -675,15 +765,10 @@ export class HttpRuntimeController implements RuntimeController {
     reconcile = false,
   ): Promise<Response | null> {
     const token = await this.getToken();
-    const response = await this.fetchFn(
-      `${this.baseUrl}/activity-events${reconcile ? "?reconcile=true" : ""}`,
-      {
-        headers: {
-          accept: "text/event-stream",
-          authorization: `Bearer ${token}`,
-        },
-        signal: controller.signal,
-      },
+    const response = await this.fetchStream(
+      `/activity-events${reconcile ? "?reconcile=true" : ""}`,
+      token,
+      controller.signal,
     );
     if (!response.ok || !response.body) {
       await response.body?.cancel();
@@ -747,6 +832,7 @@ export class HttpRuntimeController implements RuntimeController {
     if (options.processId) query.set("processId", options.processId);
     if (options.sessionId) query.set("sessionId", options.sessionId);
     if (options.allProcesses) query.set("allProcesses", "true");
+    if (options.types?.length) query.set("types", options.types.join(","));
     if (options.afterSeq !== undefined) {
       query.set("afterSeq", String(options.afterSeq));
     }
@@ -762,42 +848,31 @@ export class HttpRuntimeController implements RuntimeController {
     emit: RuntimeSessionEventEmitter,
     options?: RuntimeSessionSubscriptionOptions,
   ): Promise<void> {
-    const reader = response.body?.getReader();
-    if (!reader) return;
-    const decoder = new TextDecoder();
-    let buffer = "";
-
+    let completed = false;
     try {
-      while (true) {
-        const { done, value } = await reader.read();
-        buffer += decoder.decode(value, { stream: !done });
-
-        let boundary = buffer.indexOf("\n\n");
-        while (boundary >= 0) {
-          const frame = buffer.slice(0, boundary).replace(/\r/g, "");
-          buffer = buffer.slice(boundary + 2);
-          const data = frame
-            .split("\n")
-            .filter((line) => line.startsWith("data:"))
-            .map((line) => line.slice(5).trimStart())
-            .join("\n");
-          if (data) {
-            const event = JSON.parse(data) as {
-              eventType: string;
-              data: unknown;
-            };
-            emit(event.eventType, event.data);
-          }
-          boundary = buffer.indexOf("\n\n");
-        }
-
-        if (done) break;
-      }
+      await readSseFrames(
+        response,
+        controller.signal,
+        (frame) => {
+          const data = sseFrameData(frame);
+          if (!data) return;
+          const event = JSON.parse(data) as {
+            eventType: string;
+            data: unknown;
+          };
+          if (event.eventType === "complete") completed = true;
+          emit(event.eventType, event.data);
+        },
+        this.streamIdleTimeoutMs,
+      );
+      // The runtime only closes a session stream after "complete". Any other
+      // end means it restarted or dropped us; subscribers must resubscribe.
+      if (!completed && !controller.signal.aborted)
+        throw new Error("Runtime event stream ended before the session did");
     } catch (error) {
       if (!controller.signal.aborted) options?.onError?.(error);
     } finally {
       this.subscriptionControllers.delete(controller);
-      reader.releaseLock();
     }
   }
 
@@ -806,40 +881,16 @@ export class HttpRuntimeController implements RuntimeController {
     controller: AbortController,
     listener: (event: BusEvent) => void,
   ): Promise<void> {
-    const reader = response.body?.getReader();
-    if (!reader) return;
-    const decoder = new TextDecoder();
-    let buffer = "";
-    const cancel = () => {
-      void reader.cancel().catch(() => {});
-    };
-    controller.signal.addEventListener("abort", cancel, { once: true });
-
-    try {
-      while (!controller.signal.aborted) {
-        const { done, value } = await reader.read();
-        buffer += decoder.decode(value, { stream: !done });
-        let boundary = buffer.indexOf("\n\n");
-        while (boundary >= 0) {
-          const frame = buffer.slice(0, boundary).replace(/\r/g, "");
-          buffer = buffer.slice(boundary + 2);
-          const data = frame
-            .split("\n")
-            .filter((line) => line.startsWith("data:"))
-            .map((line) => line.slice(5).trimStart())
-            .join("\n");
-          if (data) {
-            const payload = JSON.parse(data) as { event: BusEvent };
-            listener(payload.event);
-          }
-          boundary = buffer.indexOf("\n\n");
-        }
-        if (done) break;
-      }
-    } finally {
-      controller.signal.removeEventListener("abort", cancel);
-      await reader.cancel().catch(() => {});
-      reader.releaseLock();
-    }
+    await readSseFrames(
+      response,
+      controller.signal,
+      (frame) => {
+        const data = sseFrameData(frame);
+        if (!data) return;
+        const payload = JSON.parse(data) as { event: BusEvent };
+        listener(payload.event);
+      },
+      this.streamIdleTimeoutMs,
+    );
   }
 }

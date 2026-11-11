@@ -71,6 +71,7 @@ import { DSH_WEB_PATH, createDshRoutes } from "./routes/dsh.js";
 import { createUploadRoutes } from "./routes/upload.js";
 import { createWsRoutes } from "./routes/ws.js";
 import { HttpRuntimeController } from "./runtime/HttpRuntimeController.js";
+import { attachExternalRuntime } from "./runtime/external-runtime-attach.js";
 import type { RuntimeController } from "./runtime/types.js";
 import { detectCodexCli } from "./sdk/cli-detection.js";
 import { initMessageLogger } from "./sdk/messageLogger.js";
@@ -188,6 +189,7 @@ let sessionInteractionServiceForShutdown: SessionInteractionService | null =
 let interactionBrokerForShutdown: InteractionBroker | null = null;
 let isShuttingDown = false;
 let disposeSessionDisplays: (() => void) | undefined;
+const externalRuntimeAttachAbort = new AbortController();
 
 /**
  * Graceful shutdown handler.
@@ -202,6 +204,7 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
   isShuttingDown = true;
 
   console.log(`[Shutdown] Received ${signal}, cleaning up...`);
+  externalRuntimeAttachAbort.abort();
   disposeSessionDisplays?.();
 
   if (feishuChannelRuntimeForShutdown) {
@@ -786,96 +789,47 @@ async function startServer() {
           tokenFile: config.runtimeTokenFile,
         })
       : undefined;
-  if (configuredRuntimeController) {
-    const applyRuntimeEvent = async (event: BusEvent): Promise<void> => {
-      if (event.type === "session-id-changed") {
-        await sessionMetadataService.remapSessionId(
-          event.oldSessionId,
-          event.newSessionId,
-        );
-        if (event.executor) {
-          await sessionMetadataService.setExecutor(
-            event.newSessionId,
-            event.executor,
-          );
-        }
-        eventBus.emit(event);
-        eventBus.emit({
-          type: "session-metadata-changed",
-          sessionId: event.newSessionId,
-          projectId: event.projectId,
-          timestamp: new Date().toISOString(),
-        });
-        return;
-      }
-
-      eventBus.emit(
-        event.type === "worker-activity-changed"
-          ? { ...event, runtimeMode: "external" }
-          : event,
+  const applyRuntimeEvent = async (event: BusEvent): Promise<void> => {
+    if (event.type === "session-id-changed") {
+      await sessionMetadataService.remapSessionId(
+        event.oldSessionId,
+        event.newSessionId,
       );
-    };
-    let runtimeEventChain = Promise.resolve();
-    const enqueueRuntimeEvent = (event: BusEvent): Promise<void> => {
-      const work = runtimeEventChain
-        .catch(() => {})
-        .then(() => applyRuntimeEvent(event));
-      runtimeEventChain = work;
-      return work;
-    };
-
-    await configuredRuntimeController.start();
-    await configuredRuntimeController.updateProviderSettings({
-      claudeRemoteExecutors:
-        serverSettingsService.getSetting("remoteExecutors") ?? [],
-    });
-    const activitySubscription =
-      await configuredRuntimeController.subscribeActivity((event) => {
-        void enqueueRuntimeEvent(event).catch((error) => {
-          console.error("[AgentRuntime] Failed to apply runtime event:", error);
-        });
-      });
-    if (!activitySubscription) {
-      throw new Error("External agent runtime activity stream is unavailable");
-    }
-
-    // Delayed provider IDs can arrive while the web shell is being replaced.
-    // Replay those idempotent remaps before serving requests so metadata has a
-    // single durable owner in this process.
-    const replay = await configuredRuntimeController.replay({});
-    for (const record of replay) {
-      if (record.type !== "session-id-changed") continue;
-      const data = record.data as {
-        oldSessionId?: unknown;
-        newSessionId?: unknown;
-        projectId?: unknown;
-        executor?: unknown;
-      };
-      if (
-        typeof data.oldSessionId !== "string" ||
-        typeof data.newSessionId !== "string" ||
-        typeof data.projectId !== "string"
-      ) {
-        continue;
+      if (event.executor) {
+        await sessionMetadataService.setExecutor(
+          event.newSessionId,
+          event.executor,
+        );
       }
-      await enqueueRuntimeEvent({
-        type: "session-id-changed",
-        oldSessionId: data.oldSessionId,
-        newSessionId: data.newSessionId,
-        projectId: data.projectId as Extract<
-          BusEvent,
-          { type: "session-id-changed" }
-        >["projectId"],
-        executor: typeof data.executor === "string" ? data.executor : undefined,
-        timestamp: record.timestamp,
+      eventBus.emit(event);
+      eventBus.emit({
+        type: "session-metadata-changed",
+        sessionId: event.newSessionId,
+        projectId: event.projectId,
+        timestamp: new Date().toISOString(),
       });
+      return;
     }
-    console.log(
-      `[AgentRuntime] mode=external control=${config.runtimeControlUrl}`,
+
+    eventBus.emit(
+      event.type === "worker-activity-changed"
+        ? { ...event, runtimeMode: "external" }
+        : event,
     );
-  } else {
-    console.log("[AgentRuntime] mode=embedded");
-  }
+  };
+  let runtimeEventChain = Promise.resolve();
+  const enqueueRuntimeEvent = (event: BusEvent): Promise<void> => {
+    const work = runtimeEventChain
+      .catch(() => {})
+      .then(() => applyRuntimeEvent(event));
+    runtimeEventChain = work;
+    return work;
+  };
+  console.log(
+    configuredRuntimeController
+      ? `[AgentRuntime] mode=external control=${config.runtimeControlUrl}`
+      : "[AgentRuntime] mode=embedded",
+  );
 
   const dshWebService = new DshWebService(path.join(config.dataDir, "dsh-web"));
   const {
@@ -941,40 +895,54 @@ async function startServer() {
   await feishuChannelRuntime.start({ eventBus, sessionCommandService });
 
   if (configuredRuntimeController) {
-    const [activity, processes] = await Promise.all([
-      runtimeController.getWorkerActivity(),
-      runtimeController.listProcessSnapshots(),
-    ]);
-    eventBus.emit({
-      type: "worker-activity-changed",
-      ...activity,
-      runtimeMode: "external",
-      timestamp: new Date().toISOString(),
+    const publishRuntimeSnapshot = async (): Promise<void> => {
+      const [activity, processes] = await Promise.all([
+        runtimeController.getWorkerActivity(),
+        runtimeController.listProcessSnapshots(),
+      ]);
+      eventBus.emit({
+        type: "worker-activity-changed",
+        ...activity,
+        runtimeMode: "external",
+        timestamp: new Date().toISOString(),
+      });
+      for (const process of processes) {
+        eventBus.emit({
+          type: "session-status-changed",
+          sessionId: process.sessionId,
+          projectId: process.projectId,
+          ownership: {
+            owner: "self",
+            processId: process.id,
+            permissionMode: process.permissionMode,
+            modeVersion: process.modeVersion,
+          },
+          timestamp: new Date().toISOString(),
+        });
+        eventBus.emit({
+          type: "process-state-changed",
+          sessionId: process.sessionId,
+          projectId: process.projectId,
+          activity: process.state,
+          pendingInputType: pendingInputTypeFromRequest(
+            process.pendingInputRequest,
+          ),
+          timestamp: new Date().toISOString(),
+        });
+      }
+    };
+    // Serving must not wait on the runtime: a wedged runtime would otherwise
+    // keep the whole web UI down until it recovers.
+    void attachExternalRuntime({
+      runtime: configuredRuntimeController,
+      providerSettings: () => ({
+        claudeRemoteExecutors:
+          serverSettingsService.getSetting("remoteExecutors") ?? [],
+      }),
+      applyEvent: enqueueRuntimeEvent,
+      onAttached: publishRuntimeSnapshot,
+      signal: externalRuntimeAttachAbort.signal,
     });
-    for (const process of processes) {
-      eventBus.emit({
-        type: "session-status-changed",
-        sessionId: process.sessionId,
-        projectId: process.projectId,
-        ownership: {
-          owner: "self",
-          processId: process.id,
-          permissionMode: process.permissionMode,
-          modeVersion: process.modeVersion,
-        },
-        timestamp: new Date().toISOString(),
-      });
-      eventBus.emit({
-        type: "process-state-changed",
-        sessionId: process.sessionId,
-        projectId: process.projectId,
-        activity: process.state,
-        pendingInputType: pendingInputTypeFromRequest(
-          process.pendingInputRequest,
-        ),
-        timestamp: new Date().toISOString(),
-      });
-    }
   }
 
   const focusedPiScanner = isProviderEnabled("pi", config.enabledProviders)

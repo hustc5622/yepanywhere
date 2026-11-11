@@ -33,7 +33,12 @@ import type { BusEvent } from "../watcher/index.js";
 
 export type { CompactOptions };
 
-export const RUNTIME_CONTROLLER_PROTOCOL_VERSION = 6;
+export const RUNTIME_CONTROLLER_PROTOCOL_VERSION = 7;
+
+/** Both runtime event streams send a comment frame at least this often. */
+export const RUNTIME_STREAM_HEARTBEAT_MS = 15_000;
+/** A runtime stream silent this long is treated as lost and reopened. */
+export const RUNTIME_STREAM_IDLE_TIMEOUT_MS = 60_000;
 
 export type RuntimeMode = "embedded" | "external";
 
@@ -138,6 +143,11 @@ export interface RuntimeReplayOptions {
   afterSeq?: number;
   /** History recovery across generations; requires sessionId and no sequence cursor. */
   allProcesses?: boolean;
+  /**
+   * Only records of these types. A replay without sessionId or processId must
+   * name its types: an unscoped replay would materialize the whole journal.
+   */
+  types?: readonly string[];
 }
 
 export interface RuntimeQueueStatus extends RuntimeWorkerPoolStatus {

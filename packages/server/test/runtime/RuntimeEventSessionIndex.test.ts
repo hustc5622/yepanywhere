@@ -177,6 +177,7 @@ describe("parseIdentity", () => {
       timestamp: record.timestamp,
       processId: record.processId,
       sessionId: record.sessionId,
+      type: "message",
     });
   });
   it("falls back to a full parse for other key orders", () => {
@@ -192,7 +193,13 @@ describe("parseIdentity", () => {
           }),
         ),
       ),
-    ).toEqual({ seq: 2, timestamp: "t", processId: "p", sessionId: "s" });
+    ).toEqual({
+      seq: 2,
+      timestamp: "t",
+      processId: "p",
+      sessionId: "s",
+      type: "status",
+    });
   });
   it("rejects invalid or incomplete identities", () => {
     expect(parseIdentity(buf('{"seq":1,"timestamp":"t"'))).toBeNull();
@@ -284,10 +291,43 @@ describe("RuntimeEventStore session lookup", () => {
     expect(new Set(latest.map((r) => r.processId))).toEqual(
       new Set(["proc-3"]),
     );
-    // No session filter replays all processes.
-    const all = await store.replay({});
-    expect(new Set(all.map((r) => r.processId))).toEqual(
-      new Set(["proc-1", "proc-2", "proc-3"]),
-    );
+    // An unscoped replay must name its record types.
+    await expect(store.replay({})).rejects.toThrow(/requires sessionId/);
+  });
+
+  it("replays only the requested types across every journal", async () => {
+    const store = new RuntimeEventStore({ eventsDir: dir, maxFileBytes: 400 });
+    for (let i = 0; i < 8; i++)
+      await store.append({
+        processId: "proc-busy",
+        sessionId: "s",
+        type: "message",
+        data: { text: `payload ${i}`.repeat(20) },
+      });
+    await store.append({
+      processId: "proc-remap",
+      sessionId: "temp",
+      type: "session-id-changed",
+      data: { oldSessionId: "temp", newSessionId: "real" },
+    });
+    await store.append({
+      processId: "proc-remap",
+      sessionId: "real",
+      type: "message",
+      data: {},
+    });
+
+    const remaps = await store.replay({ types: ["session-id-changed"] });
+    expect(remaps).toEqual([
+      expect.objectContaining({
+        processId: "proc-remap",
+        type: "session-id-changed",
+        data: { oldSessionId: "temp", newSessionId: "real" },
+      }),
+    ]);
+    // A scoped replay still honours the type filter.
+    await expect(
+      store.replay({ sessionId: "s", types: ["session-id-changed"] }),
+    ).resolves.toEqual([]);
   });
 });

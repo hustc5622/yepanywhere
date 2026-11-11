@@ -2555,6 +2555,29 @@ describe("SessionDisplayService", () => {
     expect(JSON.stringify(snapshot)).not.toContain("Already seen");
   });
 
+  it("resubscribes after the runtime stream is lost without completing", async () => {
+    vi.useFakeTimers();
+    const { service, runtime } = fixture(1_000);
+    let loseStream: ((error: unknown) => void) | undefined;
+    const firstCleanup = vi.fn();
+    runtime.subscribeSession.mockImplementationOnce(
+      async (_id, _emit, options?: { onError?: (error: unknown) => void }) => {
+        loseStream = options?.onError;
+        return { cleanup: firstCleanup };
+      },
+    );
+    await service.subscribe(selection, vi.fn());
+    expect(runtime.subscribeSession).toHaveBeenCalledTimes(1);
+
+    // The runtime restarted: the stream ends with no "complete" event.
+    loseStream?.(
+      new Error("Runtime event stream ended before the session did"),
+    );
+    expect(firstCleanup).toHaveBeenCalledTimes(1);
+    await vi.advanceTimersByTimeAsync(1_000);
+    expect(runtime.subscribeSession).toHaveBeenCalledTimes(2);
+  });
+
   it("folds a settled answer in place and serves its members on demand", async () => {
     const { service, source, push } = fixture(60_000, {
       foldSettledTurns: true,

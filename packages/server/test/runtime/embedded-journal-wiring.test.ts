@@ -38,7 +38,9 @@ describe("embedded runtime event journal wiring", () => {
     });
     try {
       await app.runtimeController.start();
-      await expect(app.runtimeController.replay({})).resolves.toEqual([]);
+      await expect(
+        app.runtimeController.replay({ types: ["session-id-changed"] }),
+      ).resolves.toEqual([]);
       await expect(
         rm(path.join(dataDir, "runtime", "events"), { recursive: true }),
       ).resolves.toBeUndefined();

@@ -16,11 +16,57 @@ import type {
   RuntimeProviderSettings,
   StartRuntimeSessionRequest,
 } from "./types.js";
+import { RUNTIME_STREAM_HEARTBEAT_MS } from "./types.js";
 
 export interface RuntimeControlServerOptions {
   controller: RuntimeController;
   token: string;
   onShutdown?: () => void | Promise<void>;
+}
+
+interface LongRunningOutcome {
+  status: number;
+  body: unknown;
+}
+
+/**
+ * Model-bound control calls (compaction, side questions, native controls) can
+ * outlast any fixed HTTP timeout. Answer with headers at once, heartbeat while
+ * the work runs, and send the outcome as the final event, so the shell can
+ * tell slow model work from a wedged runtime.
+ */
+function longRunning(
+  c: Context,
+  work: () => Promise<LongRunningOutcome>,
+): Response {
+  return streamSSE(c, async (stream) => {
+    let writes = Promise.resolve();
+    const write = (send: () => Promise<unknown>) => {
+      writes = writes
+        .then(async () => {
+          await send();
+        })
+        .catch(() => {});
+      return writes;
+    };
+    const heartbeat = setInterval(() => {
+      void write(() => stream.write(": heartbeat\n\n"));
+    }, RUNTIME_STREAM_HEARTBEAT_MS);
+    heartbeat.unref();
+    try {
+      await write(() => stream.write(": accepted\n\n"));
+      let outcome: LongRunningOutcome;
+      try {
+        outcome = await work();
+      } catch (error) {
+        console.error("[AgentRuntime] Control request failed:", error);
+        outcome = { status: 500, body: { error: "Internal runtime error" } };
+      }
+      await write(() => stream.writeSSE({ data: JSON.stringify(outcome) }));
+    } finally {
+      clearInterval(heartbeat);
+    }
+  });
 }
 
 function tokensMatch(actual: string | undefined, expected: string): boolean {
@@ -119,18 +165,24 @@ export function createRuntimeControlApp(
       await c.req.json().catch(() => ({})),
     );
     if (!parsed.ok) return c.json({ error: parsed.error }, 400);
-    try {
-      return c.json(
-        await controller.compact(c.req.param("processId"), parsed.options),
-      );
-    } catch (error) {
-      // Surface the provider's reason (e.g. nothing to compact) instead of
-      // the generic onError text so the shell can show it to the user.
-      return c.json(
-        { error: error instanceof Error ? error.message : "Compact failed" },
-        502,
-      );
-    }
+    const processId = c.req.param("processId");
+    return longRunning(c, async () => {
+      try {
+        return {
+          status: 200,
+          body: await controller.compact(processId, parsed.options),
+        };
+      } catch (error) {
+        // Surface the provider's reason (e.g. nothing to compact) instead of
+        // the generic error text so the shell can show it to the user.
+        return {
+          status: 502,
+          body: {
+            error: error instanceof Error ? error.message : "Compact failed",
+          },
+        };
+      }
+    });
   });
   app.post("/processes/:processId/reasoning-effort", async (c) => {
     const body = await c.req
@@ -275,22 +327,23 @@ export function createRuntimeControlApp(
     );
     if (!parsed.success)
       return c.json({ error: "Invalid side conversation request" }, 400);
-    return c.json(
-      (await controller.sideConversation?.(
-        c.req.param("sessionId"),
-        parsed.data,
-      )) ?? { supported: false, reason: "unsupported" },
-    );
+    const sessionId = c.req.param("sessionId");
+    return longRunning(c, async () => ({
+      status: 200,
+      body: (await controller.sideConversation?.(sessionId, parsed.data)) ?? {
+        supported: false,
+        reason: "unsupported",
+      },
+    }));
   });
   app.post("/sessions/:sessionId/codex-control", async (c) => {
     const body =
       await c.req.json<Omit<RuntimeCodexControlRequest, "sessionId">>();
-    return c.json(
-      await controller.executeCodexControl({
-        ...body,
-        sessionId: c.req.param("sessionId"),
-      }),
-    );
+    const sessionId = c.req.param("sessionId");
+    return longRunning(c, async () => ({
+      status: 200,
+      body: await controller.executeCodexControl({ ...body, sessionId }),
+    }));
   });
   app.put("/sessions/:sessionId/hold", async (c) => {
     const body =
@@ -398,12 +451,26 @@ export function createRuntimeControlApp(
         return;
       }
 
-      await new Promise<void>((resolve) => {
-        finishStream = resolve;
-        stream.onAbort(resolve);
-      });
-      await writeChain.catch(() => {});
-      subscription.cleanup();
+      // A session can be silent for a whole tool call. The heartbeat lets the
+      // shell tell a quiet session from a wedged runtime.
+      const heartbeat = setInterval(() => {
+        writeChain = writeChain
+          .then(async () => {
+            await stream.write(": heartbeat\n\n");
+          })
+          .catch(() => {});
+      }, RUNTIME_STREAM_HEARTBEAT_MS);
+      heartbeat.unref();
+      try {
+        await new Promise<void>((resolve) => {
+          finishStream = resolve;
+          stream.onAbort(resolve);
+        });
+        await writeChain.catch(() => {});
+      } finally {
+        clearInterval(heartbeat);
+        subscription.cleanup();
+      }
     });
   };
 
@@ -411,6 +478,7 @@ export function createRuntimeControlApp(
 
   app.get("/replay", async (c) => {
     const afterSeq = c.req.query("afterSeq");
+    const types = c.req.query("types")?.split(",").filter(Boolean);
     return c.json({
       events: await controller.replay({
         processId: c.req.query("processId"),
@@ -419,6 +487,7 @@ export function createRuntimeControlApp(
         ...(c.req.query("allProcesses") === "true"
           ? { allProcesses: true }
           : {}),
+        ...(types?.length ? { types } : {}),
       }),
     });
   });
@@ -459,7 +528,7 @@ export function createRuntimeControlApp(
       // keep the HTTP stream alive independently of session message traffic.
       const heartbeat = setInterval(() => {
         void enqueue(() => stream.write(": heartbeat\n\n"));
-      }, 15_000);
+      }, RUNTIME_STREAM_HEARTBEAT_MS);
       heartbeat.unref();
       try {
         await enqueue(() => stream.write(": connected\n\n"));

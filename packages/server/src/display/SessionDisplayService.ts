@@ -797,10 +797,8 @@ export class SessionDisplayService {
           );
       if (process) {
         entry.sourceProcessId = process.id;
-        entry.sourceSubscription = await this.options.runtime.subscribeSession(
-          entry.selection.sessionId,
-          (type, data) => this.event(entry, type, data),
-          { signal: entry.controller.signal, displayProjection: true },
+        await this.subscribeSource(entry, (type, data) =>
+          this.event(entry, type, data),
         );
       }
     });
@@ -808,6 +806,40 @@ export class SessionDisplayService {
     await timed(timing, "replay", () => this.recoverCursorHistory(entry));
     this.poll(entry);
     this.expire(entry);
+  }
+
+  /**
+   * Attach the live runtime stream. A stream lost without "complete" (runtime
+   * restart, wedge, dropped connection) is released so polling resubscribes
+   * instead of leaving the view pinned to a dead subscription.
+   */
+  private async subscribeSource(
+    entry: Entry,
+    emit: (type: string, data: unknown) => void,
+  ): Promise<void> {
+    let lost = false;
+    let subscription: RuntimeSessionSubscription | null = null;
+    subscription = await this.options.runtime.subscribeSession(
+      entry.selection.sessionId,
+      emit,
+      {
+        signal: entry.controller.signal,
+        displayProjection: true,
+        onError: () => {
+          lost = true;
+          if (subscription && entry.sourceSubscription === subscription) {
+            subscription.cleanup();
+            entry.sourceSubscription = null;
+          }
+        },
+      },
+    );
+    if (lost) {
+      subscription?.cleanup();
+      entry.sourceSubscription = null;
+      return;
+    }
+    entry.sourceSubscription = subscription;
   }
 
   private async recoverCursorHistory(entry: Entry): Promise<void> {
@@ -1986,17 +2018,13 @@ export class SessionDisplayService {
             // treating replay as already-seen history.
             const unseenProcess = process.id !== entry.sourceProcessId;
             entry.sourceProcessId = process.id;
-            entry.sourceSubscription =
-              await this.options.runtime.subscribeSession(
-                entry.selection.sessionId,
-                (type, data) =>
-                  this.event(
-                    entry,
-                    type,
-                    unseenProcess ? asLiveReplay(type, data) : data,
-                  ),
-                { signal: entry.controller.signal, displayProjection: true },
-              );
+            await this.subscribeSource(entry, (type, data) =>
+              this.event(
+                entry,
+                type,
+                unseenProcess ? asLiveReplay(type, data) : data,
+              ),
+            );
             // Reconcile the recovered events against what native history
             // already persisted, instead of waiting for its next change.
             if (unseenProcess) await this.refresh(entry, true);

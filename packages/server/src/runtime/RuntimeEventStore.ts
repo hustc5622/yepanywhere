@@ -1,17 +1,12 @@
-import {
-  appendFile,
-  mkdir,
-  readFile,
-  readdir,
-  rename,
-  rm,
-  stat,
-} from "node:fs/promises";
+import { appendFile, mkdir, readdir, rename, rm, stat } from "node:fs/promises";
 import path from "node:path";
 import {
+  type RecordIdentity,
   RuntimeEventSessionIndex,
   isJournalFileName,
+  parseIdentity,
 } from "./RuntimeEventSessionIndex.js";
+import { forEachJournalLine } from "./journal-lines.js";
 import type { RuntimeEventRecord, RuntimeReplayOptions } from "./types.js";
 
 export interface RuntimeEventStoreOptions {
@@ -26,6 +21,7 @@ interface ProcessFileState {
   size: number;
 }
 
+const CLOSE_BRACE = 0x7d;
 const DEFAULT_MAX_FILE_BYTES = 10 * 1024 * 1024;
 const DEFAULT_MAX_TOTAL_BYTES = 512 * 1024 * 1024;
 const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
@@ -34,25 +30,23 @@ function safeProcessId(processId: string): string {
   return processId.replace(/[^a-zA-Z0-9._-]/g, "_");
 }
 
-function parseRecords(content: string): RuntimeEventRecord[] {
-  const records: RuntimeEventRecord[] = [];
-  for (const line of content.split("\n")) {
-    if (!line.trim()) continue;
-    try {
-      const record = JSON.parse(line) as RuntimeEventRecord;
-      if (
-        Number.isSafeInteger(record.seq) &&
-        typeof record.processId === "string" &&
-        typeof record.sessionId === "string" &&
-        typeof record.type === "string"
-      ) {
-        records.push(record);
-      }
-    } catch {
-      // Ignore a partial final line left by an interrupted append.
-    }
+function parseRecord(line: Buffer): RuntimeEventRecord | null {
+  try {
+    const record = JSON.parse(line.toString("utf8")) as RuntimeEventRecord;
+    return Number.isSafeInteger(record.seq) &&
+      typeof record.processId === "string" &&
+      typeof record.sessionId === "string" &&
+      typeof record.type === "string"
+      ? record
+      : null;
+  } catch {
+    // Ignore a partial final line left by an interrupted append.
+    return null;
   }
-  return records;
+}
+
+function isMissing(error: unknown): boolean {
+  return (error as NodeJS.ErrnoException).code === "ENOENT";
 }
 
 export class RuntimeEventStore {
@@ -161,13 +155,52 @@ export class RuntimeEventStore {
     return `${this.currentPath(processId)}.1`;
   }
 
-  private async readPath(filePath: string): Promise<RuntimeEventRecord[]> {
+  /**
+   * Records of one journal file, read line by line. `accept` sees only the
+   * identity prefix, so rejected lines never have their payload parsed.
+   */
+  private async readPath(
+    filePath: string,
+    accept?: (identity: RecordIdentity) => boolean,
+  ): Promise<RuntimeEventRecord[]> {
+    const records: RuntimeEventRecord[] = [];
     try {
-      return parseRecords(await readFile(filePath, "utf8"));
+      await forEachJournalLine(
+        filePath,
+        (line) => {
+          if (accept) {
+            const identity = parseIdentity(line);
+            if (!identity || !accept(identity)) return;
+          }
+          const record = parseRecord(line);
+          if (record) records.push(record);
+        },
+        { includeTrailing: true },
+      );
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+      if (isMissing(error)) return [];
       throw error;
     }
+    return records;
+  }
+
+  private async lastSeqIn(filePath: string): Promise<number> {
+    let lastSeq = 0;
+    try {
+      await forEachJournalLine(
+        filePath,
+        (line) => {
+          // A truncated final append never counts as a written record.
+          if (line[line.length - 1] !== CLOSE_BRACE) return;
+          const identity = parseIdentity(line);
+          if (identity) lastSeq = Math.max(lastSeq, identity.seq);
+        },
+        { includeTrailing: true },
+      );
+    } catch (error) {
+      if (!isMissing(error)) throw error;
+    }
+    return lastSeq;
   }
 
   private getState(processId: string): Promise<ProcessFileState> {
@@ -175,13 +208,9 @@ export class RuntimeEventStore {
     if (!state) {
       state = (async () => {
         await this.initialize();
-        const records = [
-          ...(await this.readPath(this.rotatedPath(processId))),
-          ...(await this.readPath(this.currentPath(processId))),
-        ];
-        const lastSeq = records.reduce(
-          (max, record) => Math.max(max, record.seq),
-          0,
+        const lastSeq = Math.max(
+          await this.lastSeqIn(this.rotatedPath(processId)),
+          await this.lastSeqIn(this.currentPath(processId)),
         );
         const currentSize = await stat(this.currentPath(processId))
           .then((value) => value.size)
@@ -246,33 +275,41 @@ export class RuntimeEventStore {
       throw new Error(
         "Session history replay requires sessionId without processId or afterSeq",
       );
+    const types = options.types?.length ? new Set(options.types) : undefined;
+    const { sessionId, processId } = options;
+    if (!sessionId && processId === undefined && !types)
+      throw new Error("Runtime replay requires sessionId, processId or types");
     await this.initialize();
-    const processId =
-      options.processId ??
-      (options.sessionId && !options.allProcesses
-        ? await this.findLatestProcessIdForSession(options.sessionId)
-        : undefined);
-    const processIds = options.allProcesses
-      ? await this.findProcessIdsForSession(options.sessionId)
-      : processId
-        ? [processId]
-        : options.sessionId
-          ? []
-          : await this.findProcessIdsForSession(undefined);
+
+    let files: string[];
+    if (sessionId || processId !== undefined) {
+      const targetProcessId =
+        processId ??
+        (sessionId && !options.allProcesses
+          ? await this.findLatestProcessIdForSession(sessionId)
+          : undefined);
+      const processIds =
+        options.allProcesses && sessionId
+          ? await this.findProcessIdsForSession(sessionId)
+          : targetProcessId !== undefined
+            ? [targetProcessId]
+            : [];
+      files = processIds.flatMap((id) => [
+        this.rotatedPath(id),
+        this.currentPath(id),
+      ]);
+    } else {
+      files = types ? await this.sessionIndex.filesWithTypes(types) : [];
+    }
+
+    const afterSeq = options.afterSeq ?? 0;
+    const accept = (identity: RecordIdentity) =>
+      (!sessionId || identity.sessionId === sessionId) &&
+      identity.seq > afterSeq &&
+      (!types || types.has(identity.type));
     const records = (
-      await Promise.all(
-        processIds.map(async (id) => [
-          ...(await this.readPath(this.rotatedPath(id))),
-          ...(await this.readPath(this.currentPath(id))),
-        ]),
-      )
-    )
-      .flat()
-      .filter(
-        (record) =>
-          (!options.sessionId || record.sessionId === options.sessionId) &&
-          record.seq > (options.afterSeq ?? 0),
-      );
+      await Promise.all(files.map((file) => this.readPath(file, accept)))
+    ).flat();
 
     return records.sort((left, right) => {
       if (left.processId === right.processId) return left.seq - right.seq;
@@ -288,12 +325,8 @@ export class RuntimeEventStore {
     return this.sessionIndex.latestProcessIdForSession(sessionId);
   }
 
-  private findProcessIdsForSession(
-    sessionId: string | undefined,
-  ): Promise<string[]> {
-    return sessionId === undefined
-      ? this.sessionIndex.allProcessIds()
-      : this.sessionIndex.processIdsForSession(sessionId);
+  private findProcessIdsForSession(sessionId: string): Promise<string[]> {
+    return this.sessionIndex.processIdsForSession(sessionId);
   }
 
   async flush(): Promise<void> {

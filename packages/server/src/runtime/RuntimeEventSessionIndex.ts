@@ -1,5 +1,6 @@
-import { open, readdir, stat } from "node:fs/promises";
+import { readdir, stat } from "node:fs/promises";
 import path from "node:path";
+import { forEachJournalLine } from "./journal-lines.js";
 import type { RuntimeEventRecord } from "./types.js";
 
 /** Latest record a journal file holds for one (session, process) pair. */
@@ -13,6 +14,8 @@ interface FileSummary {
   /** Bytes consumed so far; always ends on a complete line. */
   offset: number;
   sessions: Map<string, Map<string, RuntimeEventPosition>>;
+  /** Record types present in the consumed part of the file. */
+  types: Set<string>;
 }
 
 export type RuntimeEventIndexSnapshot = ReadonlyMap<
@@ -20,10 +23,7 @@ export type RuntimeEventIndexSnapshot = ReadonlyMap<
   ReadonlyMap<string, RuntimeEventPosition>
 >;
 
-const NEWLINE = 0x0a;
 const CLOSE_BRACE = 0x7d;
-/** Bounded read size so one large rotated segment does not allocate twice. */
-const READ_CHUNK_BYTES = 1024 * 1024;
 /**
  * `RuntimeEventStore.append` serializes records with these keys first, so the
  * identity fields sit before the (potentially huge) `data` payload. Matching
@@ -37,13 +37,14 @@ const RECORD_PREFIX_BYTES = 1024;
  */
 const RECORD_START = Buffer.from('{"seq":');
 const RECORD_PREFIX =
-  /^\{"seq":(\d+),"timestamp":("(?:[^"\\]|\\.)*"),"processId":("(?:[^"\\]|\\.)*"),"sessionId":("(?:[^"\\]|\\.)*"),"type":/;
+  /^\{"seq":(\d+),"timestamp":("(?:[^"\\]|\\.)*"),"processId":("(?:[^"\\]|\\.)*"),"sessionId":("(?:[^"\\]|\\.)*"),"type":("(?:[^"\\]|\\.)*")/;
 
-interface RecordIdentity {
+export interface RecordIdentity {
   seq: number;
   timestamp: string;
   processId: string;
   sessionId: string;
+  type: string;
 }
 
 function validIdentity(
@@ -53,7 +54,8 @@ function validIdentity(
     Number.isSafeInteger(value.seq) &&
     typeof value.timestamp === "string" &&
     typeof value.processId === "string" &&
-    typeof value.sessionId === "string"
+    typeof value.sessionId === "string" &&
+    typeof value.type === "string"
   );
 }
 
@@ -71,6 +73,7 @@ export function parseIdentity(line: Buffer): RecordIdentity | null {
         timestamp: JSON.parse(match[2] as string),
         processId: JSON.parse(match[3] as string),
         sessionId: JSON.parse(match[4] as string),
+        type: JSON.parse(match[5] as string),
       };
       if (validIdentity(value)) return value;
     } catch {
@@ -87,6 +90,7 @@ export function parseIdentity(line: Buffer): RecordIdentity | null {
           timestamp: value.timestamp,
           processId: value.processId,
           sessionId: value.sessionId,
+          type: value.type,
         }
       : null;
   } catch {
@@ -171,6 +175,21 @@ export class RuntimeEventSessionIndex {
     return [...ids];
   }
 
+  /** Journal files holding at least one record of the given types. */
+  async filesWithTypes(types: ReadonlySet<string>): Promise<string[]> {
+    await this.snapshot();
+    const files: string[] = [];
+    for (const [filePath, summary] of this.files) {
+      for (const type of types) {
+        if (summary.types.has(type)) {
+          files.push(filePath);
+          break;
+        }
+      }
+    }
+    return files;
+  }
+
   async latestProcessIdForSession(
     sessionId: string,
   ): Promise<string | undefined> {
@@ -218,7 +237,12 @@ export class RuntimeEventSessionIndex {
     }
     let summary = this.files.get(filePath);
     if (!summary || summary.ino !== info.ino || info.size < summary.offset) {
-      summary = { ino: info.ino, offset: 0, sessions: new Map() };
+      summary = {
+        ino: info.ino,
+        offset: 0,
+        sessions: new Map(),
+        types: new Set(),
+      };
       this.files.set(filePath, summary);
     }
     if (info.size === summary.offset) return;
@@ -231,47 +255,25 @@ export class RuntimeEventSessionIndex {
     summary: FileSummary,
     size: number,
   ): Promise<void> {
-    let handle: Awaited<ReturnType<typeof open>>;
     try {
-      handle = await open(filePath, "r");
+      // Only complete lines advance `offset`.
+      summary.offset = await forEachJournalLine(
+        filePath,
+        (line) => this.indexLine(summary, line),
+        {
+          start: summary.offset,
+          end: size,
+          onBytesRead: (bytes) => {
+            this.scannedBytes += bytes;
+          },
+        },
+      );
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") {
         this.files.delete(filePath);
         return;
       }
       throw error;
-    }
-    try {
-      // `pending` holds bytes after the last newline; `pendingStart` is the
-      // file offset of its first byte. Only complete lines advance `offset`.
-      let pending: Buffer = Buffer.alloc(0);
-      let pendingStart = summary.offset;
-      let position = summary.offset;
-      while (position < size) {
-        const length = Math.min(READ_CHUNK_BYTES, size - position);
-        const buffer = Buffer.allocUnsafe(length);
-        const { bytesRead } = await handle.read(buffer, 0, length, position);
-        if (bytesRead === 0) break;
-        position += bytesRead;
-        this.scannedBytes += bytesRead;
-        const fresh = buffer.subarray(0, bytesRead);
-        const chunk =
-          pending.length > 0 ? Buffer.concat([pending, fresh]) : fresh;
-        let start = 0;
-        for (
-          let newline = chunk.indexOf(NEWLINE, start);
-          newline !== -1;
-          newline = chunk.indexOf(NEWLINE, start)
-        ) {
-          this.indexLine(summary, chunk.subarray(start, newline));
-          start = newline + 1;
-        }
-        summary.offset = pendingStart + start;
-        pendingStart = summary.offset;
-        pending = Buffer.from(chunk.subarray(start));
-      }
-    } finally {
-      await handle.close();
     }
   }
 
@@ -281,6 +283,7 @@ export class RuntimeEventSessionIndex {
     if (line[line.length - 1] !== CLOSE_BRACE) return;
     const record = parseIdentity(line);
     if (!record) return;
+    summary.types.add(record.type);
     let processes = summary.sessions.get(record.sessionId);
     if (!processes) {
       processes = new Map();

@@ -263,26 +263,52 @@ describe("HttpRuntimeController", () => {
     );
   });
 
-  it("lets model-bound runtime requests run without a deadline", async () => {
-    let signal: AbortSignal | null | undefined;
-    let respond: ((response: Response) => void) | undefined;
+  it("keeps heartbeating model-bound requests alive past the request timeout", async () => {
+    const encoder = new TextEncoder();
     const controller = new HttpRuntimeController({
       baseUrl: "http://runtime.test",
       token: "runtime-test-token",
-      fetch: (_input, init) => {
-        signal = init?.signal;
-        return new Promise((resolve) => {
-          respond = resolve;
+      fetch: async () => {
+        const body = new ReadableStream<Uint8Array>({
+          async start(stream) {
+            stream.enqueue(encoder.encode(": accepted\n\n"));
+            for (let beat = 0; beat < 4; beat++) {
+              await new Promise((resolve) => setTimeout(resolve, 20));
+              stream.enqueue(encoder.encode(": heartbeat\n\n"));
+            }
+            stream.enqueue(
+              encoder.encode(
+                `data: ${JSON.stringify({ status: 200, body: { success: true } })}\n\n`,
+              ),
+            );
+            stream.close();
+          },
+        });
+        return new Response(body, {
+          headers: { "content-type": "text/event-stream" },
         });
       },
       requestTimeoutMs: 20,
       slowRequestTimeoutMs: 20,
+      streamIdleTimeoutMs: 50,
     });
-    const compacting = controller.compact("process-1");
-    await new Promise((resolve) => setTimeout(resolve, 60));
-    expect(signal ?? undefined).toBeUndefined();
-    respond?.(Response.json({ success: true }));
-    await expect(compacting).resolves.toEqual({ success: true });
+    await expect(controller.compact("process-1")).resolves.toEqual({
+      success: true,
+    });
+  });
+
+  it("fails a model-bound request once the runtime stops heartbeating", async () => {
+    const controller = new HttpRuntimeController({
+      baseUrl: "http://runtime.test",
+      token: "runtime-test-token",
+      fetch: async () =>
+        new Response(new ReadableStream<Uint8Array>(), {
+          headers: { "content-type": "text/event-stream" },
+        }),
+      requestTimeoutMs: 20,
+      streamIdleTimeoutMs: 50,
+    });
+    await expect(controller.compact("process-1")).rejects.toThrow(/silent/);
   });
 
   it("round-trips exact provider approval decisions across the runtime boundary", async () => {
@@ -583,6 +609,31 @@ describe("HttpRuntimeController", () => {
         (event) => event.processId,
       ),
     ).toEqual(["new"]);
+  });
+
+  it("carries the replay type filter across the HTTP runtime boundary", async () => {
+    const eventsDir = path.join(tmpdir(), `http-runtime-types-${randomUUID()}`);
+    eventDirs.push(eventsDir);
+    const eventStore = new RuntimeEventStore({ eventsDir });
+    await eventStore.append({
+      processId: "busy",
+      sessionId: "session",
+      type: "message",
+      data: { uuid: "m" },
+    });
+    await eventStore.append({
+      processId: "remap",
+      sessionId: "temp",
+      type: "session-id-changed",
+      data: { oldSessionId: "temp", newSessionId: "session" },
+    });
+    const { controller } = createHarness({ eventStore });
+    expect(
+      (await controller.replay({ types: ["session-id-changed"] })).map(
+        (event) => [event.processId, event.type],
+      ),
+    ).toEqual([["remap", "session-id-changed"]]);
+    await expect(controller.replay({})).rejects.toThrow();
   });
 
   it("matches embedded bounded replay for an offline result, error and completion", async () => {
