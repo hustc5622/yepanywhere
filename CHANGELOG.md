@@ -23,6 +23,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - runtime 卡住或重启时主服务照常启动并提供会话列表和历史，在后台退避重连 runtime，不再因连不上 runtime 而反复退出、整个页面打不开。runtime 的会话事件流新增心跳，主服务对两条事件流都做空闲检测（60 秒无数据即重连）并限制建连等待；runtime 重启后已打开的会话页会自动重新订阅，不再停在已断开的流上。
 - 修复两处可锁死事件循环的同步死循环：Cursor `store.db` 中的 protobuf 长度字段第 5 字节溢出为负数时读取位置回退并原地空转（损坏或格式变化的 blob 即可触发）；Codex 推理流的 `summaryIndex`/`contentIndex` 为超大整数时同步填充数十亿个空槽。流式内容块索引统一限制在 10000 以内。
 - 主服务调用 codex-bridge（4510）的控制请求限时 10 秒（取用量时 30 秒），bridge 无响应时会话列表、收件箱不再挂 300 秒；bridge 事件流增加空闲检测。runtime 与 bridge、bridge 与上游 app-server 的 WebSocket 握手限时 10 秒。
+- 关闭 Cursor/Gemini/MiniMax Code（ACP）和 Pi 进程时结束整个进程组并在 3 秒后升级为 SIGKILL，Cursor 的 `worker-server` 等子进程不再成为孤儿进程。
 - 修复同时使用三种 Cursor 模型后 runtime 卡死、页面打不开的问题：Cursor 预热池满了要淘汰最早的空闲进程时，默认模型的键是空字符串，被误判为「没有可淘汰的进程」而什么都没删，外层循环因此永远不结束，runtime 进程占满一个 CPU 核且不再响应任何请求，主服务调用 runtime 全部超时。现在按条目而不是键判断，淘汰不掉时也会立即退出循环。
 - 修复 `GET /api/sessions/:sessionId/locate` 无法定位 DeepSeek Harness（dsh）和 MiniMax Code（mcode）会话的问题：最后一步「逐个 provider 扫描」没有传入这两个 provider 的 reader，因此只拿会话 ID 的跳转和 agent 永远返回「Session not found」。
 - 修复设置了反向代理前缀（如 `/yep`）时登录鉴权的路径豁免失效的问题：鉴权中间件拿带前缀的完整路径去匹配 `/api/auth/*`、`/health`，导致开启密码登录后登录接口本身也要求已登录。现在会先去掉前缀再匹配。

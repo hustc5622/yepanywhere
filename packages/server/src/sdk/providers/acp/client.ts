@@ -29,6 +29,12 @@ import {
   ndJsonStream,
 } from "@agentclientprotocol/sdk";
 import { getLogger } from "../../../logging/logger.js";
+import {
+  OWN_PROCESS_GROUP,
+  terminateProcessTree,
+} from "../../../utils/processTree.js";
+
+const ACP_CLOSE_GRACE_MS = 3_000;
 
 /**
  * Configuration for spawning an ACP agent.
@@ -171,6 +177,8 @@ export class ACPClient {
       stdio: ["pipe", "pipe", "pipe"],
       env: { ...process.env, ...config.env },
       shell: process.platform === "win32",
+      // Cursor's agent forks a worker-server; closing must reach it too.
+      detached: OWN_PROCESS_GROUP,
     });
 
     this.process.stderr?.on("data", (data: Buffer) => {
@@ -505,7 +513,9 @@ export class ACPClient {
   close(): void {
     if (this.process && !this.process.killed) {
       this.log.debug("Closing ACP client");
-      this.process.kill("SIGTERM");
+      // An agent that ignores SIGTERM would otherwise keep its pending
+      // requests (settled only by stdout EOF) and its helpers alive.
+      void terminateProcessTree(this.process, ACP_CLOSE_GRACE_MS);
     }
     this.process = null;
     this.connection = null;

@@ -44,6 +44,10 @@ import {
 } from "../../sessions/pi-tools.js";
 import { PI_SIDE_COMMAND, PiSideChannel } from "../../side-conversations/pi.js";
 import { SideConversationSession } from "../../side-conversations/session.js";
+import {
+  OWN_PROCESS_GROUP,
+  terminateProcessTree,
+} from "../../utils/processTree.js";
 import { findPiCliPath } from "../cli-detection.js";
 import {
   MessageQueue,
@@ -90,6 +94,7 @@ const PI_PARTIAL_OUTPUT_LIMIT = 16_000;
 // many tool calls cannot grow the map without limit.
 const PI_PARTIAL_OUTPUT_OWNERS_LIMIT = 64;
 const PI_MODEL_CATALOG_TTL_MS = 60_000;
+const PI_CLOSE_GRACE_MS = 3_000;
 const PI_THINKING_LEVELS = new Set([
   "off",
   "minimal",
@@ -720,6 +725,8 @@ class PiRpcClient {
       cwd,
       env,
       stdio: ["pipe", "pipe", "pipe"],
+      // Tool commands Pi runs must end with it, not outlive a close.
+      detached: OWN_PROCESS_GROUP,
     });
     this.child = child;
     child.stdout.setEncoding("utf8");
@@ -807,7 +814,8 @@ class PiRpcClient {
     const child = this.child;
     if (!child) return;
     if (child.stdin.writable) child.stdin.end();
-    if (child.exitCode === null && !child.killed) child.kill("SIGTERM");
+    if (child.exitCode === null && !child.killed)
+      void terminateProcessTree(child, PI_CLOSE_GRACE_MS);
   }
 
   private acceptStdout(chunk: string): void {

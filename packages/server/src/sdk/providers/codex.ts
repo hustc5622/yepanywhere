@@ -106,6 +106,7 @@ import {
   UploadManager,
 } from "../../uploads/index.js";
 import { AsyncQueue } from "../../utils/async-queue.js";
+import { terminateProcessTree } from "../../utils/processTree.js";
 import { findCodexCliPath, whichCommand } from "../cli-detection.js";
 import { logSDKMessage } from "../messageLogger.js";
 import { MessageQueue, getUserPromptProjection } from "../messageQueue.js";
@@ -487,43 +488,11 @@ function formatCodexGoal(goal: CodexThreadGoal | null): string {
   return lines.join("\n");
 }
 
-async function terminateChildProcess(
+function terminateChildProcess(
   child: ChildProcess | null | undefined,
   graceMs = APP_SERVER_SHUTDOWN_GRACE_MS,
 ): Promise<void> {
-  if (!child?.pid || child.exitCode !== null || child.signalCode !== null) {
-    return;
-  }
-
-  const exited = new Promise<void>((resolve) => {
-    child.once("exit", () => resolve());
-  });
-
-  const killTarget =
-    process.platform !== "win32" && child.pid > 0 ? -child.pid : child.pid;
-
-  try {
-    process.kill(killTarget, "SIGTERM");
-  } catch {
-    return;
-  }
-
-  const timer = setTimeout(() => {
-    if (child.exitCode !== null || child.signalCode !== null) {
-      return;
-    }
-    try {
-      process.kill(killTarget, "SIGKILL");
-    } catch {
-      // Ignore escalation failures during shutdown.
-    }
-  }, graceMs);
-
-  try {
-    await exited;
-  } finally {
-    clearTimeout(timer);
-  }
+  return terminateProcessTree(child, graceMs);
 }
 
 type NormalizedThreadItem =
