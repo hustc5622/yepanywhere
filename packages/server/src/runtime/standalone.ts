@@ -2,6 +2,7 @@ import path from "node:path";
 import { pathToFileURL } from "node:url";
 import { serve } from "@hono/node-server";
 import { loadConfig } from "../config.js";
+import { startEventLoopWatchdog } from "../maintenance/event-loop-watchdog.js";
 import {
   codexProvider,
   configureClaudeRemoteExecutors,
@@ -58,6 +59,8 @@ export async function runAgentRuntimeOnly(
   if (!isLoopbackHost(host)) {
     throw new Error(`Agent runtime must bind to loopback, received: ${host}`);
   }
+  if (options.installSignalHandlers !== false)
+    startEventLoopWatchdog("runtime");
 
   const configuredPort = Number.parseInt(
     process.env.YEP_RUNTIME_PORT ?? "",

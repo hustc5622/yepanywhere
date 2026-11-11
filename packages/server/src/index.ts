@@ -46,6 +46,7 @@ import {
   initLogger,
   interceptConsole,
 } from "./logging/index.js";
+import { startEventLoopWatchdog } from "./maintenance/event-loop-watchdog.js";
 import {
   setDebugContext,
   startMaintenanceServer,
@@ -271,6 +272,7 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
 // Register shutdown handlers early
 process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
 process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+startEventLoopWatchdog("server");
 process.on("uncaughtException", (error) => {
   if (isRecoverablePipeError(error)) {
     console.warn(

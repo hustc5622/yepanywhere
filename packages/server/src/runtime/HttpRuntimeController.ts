@@ -48,7 +48,20 @@ export interface HttpRuntimeControllerOptions {
   token?: string;
   tokenFile?: string;
   fetch?: RuntimeFetch;
+  requestTimeoutMs?: number;
+  slowRequestTimeoutMs?: number;
 }
+
+/**
+ * "slow" covers calls that may start or authenticate a provider process.
+ * "none" is for calls that wait on model work (side questions, compaction,
+ * native controls); a hung runtime still fails them once the event-loop
+ * watchdog kills it.
+ */
+type RuntimeRequestTimeout = "default" | "slow" | "none";
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
+const SLOW_REQUEST_TIMEOUT_MS = 120_000;
 
 class RuntimeHttpError extends Error {
   constructor(
@@ -71,10 +84,16 @@ export class HttpRuntimeController implements RuntimeController {
   private token: string | undefined;
   private readonly tokenFile: string | undefined;
   private readonly subscriptionControllers = new Set<AbortController>();
+  private readonly requestTimeoutMs: number;
+  private readonly slowRequestTimeoutMs: number;
 
   constructor(options: HttpRuntimeControllerOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, "");
     this.fetchFn = options.fetch ?? globalThis.fetch.bind(globalThis);
+    this.requestTimeoutMs =
+      options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.slowRequestTimeoutMs =
+      options.slowRequestTimeoutMs ?? SLOW_REQUEST_TIMEOUT_MS;
     this.token = options.token;
     this.tokenFile = options.tokenFile;
     if (!this.token && !this.tokenFile) {
@@ -91,6 +110,7 @@ export class HttpRuntimeController implements RuntimeController {
   private async request<T>(
     pathname: string,
     init: RequestInit = {},
+    timeout: RuntimeRequestTimeout = "default",
   ): Promise<T> {
     const token = await this.getToken();
     const headers = new Headers(init.headers);
@@ -98,20 +118,44 @@ export class HttpRuntimeController implements RuntimeController {
     if (init.body !== undefined)
       headers.set("content-type", "application/json");
 
-    const response = await this.fetchFn(`${this.baseUrl}${pathname}`, {
-      ...init,
-      headers,
-    });
-    if (!response.ok) {
-      const payload = (await response.json().catch(() => null)) as {
-        error?: string;
-      } | null;
-      throw new RuntimeHttpError(
-        response.status,
-        payload?.error ?? `Runtime request failed (${response.status})`,
-      );
+    const timeoutMs =
+      timeout === "none"
+        ? undefined
+        : timeout === "slow"
+          ? this.slowRequestTimeoutMs
+          : this.requestTimeoutMs;
+    const timeoutSignal =
+      timeoutMs === undefined ? undefined : AbortSignal.timeout(timeoutMs);
+    const signal =
+      timeoutSignal && init.signal
+        ? AbortSignal.any([init.signal, timeoutSignal])
+        : (timeoutSignal ?? init.signal);
+
+    try {
+      const response = await this.fetchFn(`${this.baseUrl}${pathname}`, {
+        ...init,
+        headers,
+        signal,
+      });
+      if (!response.ok) {
+        const payload = (await response.json().catch(() => null)) as {
+          error?: string;
+        } | null;
+        throw new RuntimeHttpError(
+          response.status,
+          payload?.error ?? `Runtime request failed (${response.status})`,
+        );
+      }
+      return (await response.json()) as T;
+    } catch (error) {
+      if (timeoutSignal?.aborted) {
+        throw new Error(
+          `Agent runtime did not answer ${init.method ?? "GET"} ${pathname} within ${timeoutMs}ms`,
+          { cause: error },
+        );
+      }
+      throw error;
     }
-    return (await response.json()) as T;
   }
 
   async start(): Promise<void> {
@@ -136,10 +180,14 @@ export class HttpRuntimeController implements RuntimeController {
     for (const controller of this.subscriptionControllers) controller.abort();
     this.subscriptionControllers.clear();
     if (options.abortActive) {
-      await this.request<{ shuttingDown: boolean }>("/shutdown", {
-        method: "POST",
-        body: JSON.stringify({ abortActive: true }),
-      });
+      await this.request<{ shuttingDown: boolean }>(
+        "/shutdown",
+        {
+          method: "POST",
+          body: JSON.stringify({ abortActive: true }),
+        },
+        "slow",
+      );
     }
   }
 
@@ -206,29 +254,41 @@ export class HttpRuntimeController implements RuntimeController {
   async startSession(
     input: StartRuntimeSessionRequest,
   ): Promise<RuntimeSessionStartResponse> {
-    return this.request("/sessions", {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
+    return this.request(
+      "/sessions",
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+      "slow",
+    );
   }
 
   async createSession(
     input: CreateRuntimeSessionRequest,
   ): Promise<RuntimeSessionStartResponse> {
-    return this.request("/sessions", {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
+    return this.request(
+      "/sessions",
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+      "slow",
+    );
   }
 
   async resumeSession(
     input: ResumeRuntimeSessionRequest,
   ): Promise<RuntimeSessionStartResponse> {
     const { sessionId, ...body } = input;
-    return this.request(`/sessions/${encode(sessionId)}/resume`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    return this.request(
+      `/sessions/${encode(sessionId)}/resume`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+      "slow",
+    );
   }
 
   async prepareCursorSession(input: {
@@ -236,10 +296,14 @@ export class HttpRuntimeController implements RuntimeController {
     model?: string;
     permissionMode?: PermissionMode;
   }): Promise<void> {
-    await this.request("/cursor/prepare", {
-      method: "POST",
-      body: JSON.stringify(input),
-    });
+    await this.request(
+      "/cursor/prepare",
+      {
+        method: "POST",
+        body: JSON.stringify(input),
+      },
+      "slow",
+    );
   }
 
   async discardCursorPrepare(input: {
@@ -253,20 +317,28 @@ export class HttpRuntimeController implements RuntimeController {
   }
 
   async warmCursorAuth(model?: string): Promise<void> {
-    await this.request("/cursor/warm", {
-      method: "POST",
-      body: JSON.stringify({ model }),
-    });
+    await this.request(
+      "/cursor/warm",
+      {
+        method: "POST",
+        body: JSON.stringify({ model }),
+      },
+      "slow",
+    );
   }
 
   async queueMessage(
     input: QueueRuntimeMessageRequest,
   ): Promise<RuntimeQueueMessageResponse> {
     const { sessionId, ...body } = input;
-    return this.request(`/sessions/${encode(sessionId)}/messages`, {
-      method: "POST",
-      body: JSON.stringify(body),
-    });
+    return this.request(
+      `/sessions/${encode(sessionId)}/messages`,
+      {
+        method: "POST",
+        body: JSON.stringify(body),
+      },
+      "slow",
+    );
   }
 
   async abortProcess(processId: string): Promise<{ aborted: boolean }> {
@@ -337,6 +409,7 @@ export class HttpRuntimeController implements RuntimeController {
       return await this.request(
         `/sessions/${encode(sessionId)}/side-conversation`,
         { method: "POST", body: JSON.stringify(request) },
+        "none",
       );
     } catch (error) {
       if (error instanceof RuntimeHttpError && error.status === 404)
@@ -355,6 +428,7 @@ export class HttpRuntimeController implements RuntimeController {
         method: "POST",
         body: JSON.stringify(body),
       },
+      "none",
     );
   }
 
@@ -411,39 +485,55 @@ export class HttpRuntimeController implements RuntimeController {
     processId: string,
     model?: string,
   ): Promise<{ success: boolean }> {
-    return this.request(`/processes/${encode(processId)}/model`, {
-      method: "POST",
-      body: JSON.stringify({ model }),
-    });
+    return this.request(
+      `/processes/${encode(processId)}/model`,
+      {
+        method: "POST",
+        body: JSON.stringify({ model }),
+      },
+      "slow",
+    );
   }
 
   async compact(
     processId: string,
     options?: CompactOptions,
   ): Promise<{ success: boolean }> {
-    return this.request(`/processes/${encode(processId)}/compact`, {
-      method: "POST",
-      body: JSON.stringify(options ?? {}),
-    });
+    return this.request(
+      `/processes/${encode(processId)}/compact`,
+      {
+        method: "POST",
+        body: JSON.stringify(options ?? {}),
+      },
+      "none",
+    );
   }
 
   async setReasoningEffort(
     processId: string,
     effort: string,
   ): Promise<{ success: boolean }> {
-    return this.request(`/processes/${encode(processId)}/reasoning-effort`, {
-      method: "POST",
-      body: JSON.stringify({ effort }),
-    });
+    return this.request(
+      `/processes/${encode(processId)}/reasoning-effort`,
+      {
+        method: "POST",
+        body: JSON.stringify({ effort }),
+      },
+      "slow",
+    );
   }
 
   async getGoal(
     processId: string,
   ): Promise<import("@yep-anywhere/shared").ProviderGoalState | null> {
-    return this.request(`/processes/${encode(processId)}/goal`, {
-      method: "POST",
-      body: JSON.stringify({ action: "show" }),
-    });
+    return this.request(
+      `/processes/${encode(processId)}/goal`,
+      {
+        method: "POST",
+        body: JSON.stringify({ action: "show" }),
+      },
+      "slow",
+    );
   }
 
   async goalAction(
@@ -451,10 +541,14 @@ export class HttpRuntimeController implements RuntimeController {
     action: import("@yep-anywhere/shared").ProviderGoalAction,
     objective?: string,
   ): Promise<import("@yep-anywhere/shared").ProviderGoalState | null> {
-    return this.request(`/processes/${encode(processId)}/goal`, {
-      method: "POST",
-      body: JSON.stringify({ action, objective }),
-    });
+    return this.request(
+      `/processes/${encode(processId)}/goal`,
+      {
+        method: "POST",
+        body: JSON.stringify({ action, objective }),
+      },
+      "slow",
+    );
   }
 
   async getContextUsage(

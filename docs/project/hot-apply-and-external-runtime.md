@@ -167,3 +167,12 @@ YEP_BUNDLE_OUTPUT_DIR=dist/deploy-benchmark /usr/bin/time -p pnpm build:bundle
 - `scripts/install-launchagents.sh`：runtime LaunchAgent 与 external 接线。
 - `scripts/redeploy-server.sh`：`--restart-runtime`，以及默认保留 runtime 的重启流程。
 - `docs/tasks/2026-07-10-runtime-hot-reload-refactor-plan.md`：runtime 分层的原始设计文档。
+
+## 卡死自动恢复
+
+launchd 只在进程退出时重启它；进程活着但主线程卡在同步代码里时，launchd 不会介入。为此 runtime（`--runtime-only`）和主服务进程各启动一个事件循环看门狗（`packages/server/src/maintenance/event-loop-watchdog.ts`）：主线程每秒在共享内存里打一次心跳，独立的 worker 线程发现心跳超过阈值没动，就通过 inspector 暂停主线程、把调用栈写到 stderr，然后 `SIGKILL` 本进程，由 launchd（`KeepAlive.SuccessfulExit=false`）在 `ThrottleInterval` 内拉起。
+
+- 阈值：`YEP_EVENT_LOOP_WATCHDOG_MS`，默认 30000，只在 `NODE_ENV=production` 下默认启用；设为 `0` 关闭。开发模式没有 launchd 兜底，默认不启用。
+- 排查：在 `~/.yep-anywhere/logs/runtime-launchd.err.log` / `server-launchd.err.log` 里搜 `[EventLoopWatchdog]`，`main thread stack` 下面就是卡住的位置。
+- 代价：被杀进程上正在进行的回合会中断；卡死时它们本来也不会推进，会话文件在磁盘上，重启后可继续。
+- 主服务调用独立 runtime 的普通请求 30 秒超时，可能拉起或认证 provider 的请求 120 秒超时，等待模型完成的请求（side conversation、compact、Codex 原生控制）不设超时，由看门狗兜底。

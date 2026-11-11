@@ -241,6 +241,50 @@ describe("HttpRuntimeController", () => {
     );
   });
 
+  it("fails a control request when the runtime stops answering", async () => {
+    const hangingFetch: RuntimeFetch = (_input, init) =>
+      new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener("abort", () =>
+          reject(init.signal?.reason),
+        );
+      });
+    const controller = new HttpRuntimeController({
+      baseUrl: "http://runtime.test",
+      token: "runtime-test-token",
+      fetch: hangingFetch,
+      requestTimeoutMs: 20,
+      slowRequestTimeoutMs: 40,
+    });
+    await expect(controller.getStatus()).rejects.toThrow(
+      "Agent runtime did not answer GET /status within 20ms",
+    );
+    await expect(controller.warmCursorAuth("auto")).rejects.toThrow(
+      "Agent runtime did not answer POST /cursor/warm within 40ms",
+    );
+  });
+
+  it("lets model-bound runtime requests run without a deadline", async () => {
+    let signal: AbortSignal | null | undefined;
+    let respond: ((response: Response) => void) | undefined;
+    const controller = new HttpRuntimeController({
+      baseUrl: "http://runtime.test",
+      token: "runtime-test-token",
+      fetch: (_input, init) => {
+        signal = init?.signal;
+        return new Promise((resolve) => {
+          respond = resolve;
+        });
+      },
+      requestTimeoutMs: 20,
+      slowRequestTimeoutMs: 20,
+    });
+    const compacting = controller.compact("process-1");
+    await new Promise((resolve) => setTimeout(resolve, 60));
+    expect(signal ?? undefined).toBeUndefined();
+    respond?.(Response.json({ success: true }));
+    await expect(compacting).resolves.toEqual({ success: true });
+  });
+
   it("round-trips exact provider approval decisions across the runtime boundary", async () => {
     const respondToInput = vi.fn(async () => ({ accepted: true }));
     const app = createRuntimeControlApp({
