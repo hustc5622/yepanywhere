@@ -591,6 +591,16 @@ describe("Cursor ACP lifecycle", () => {
     expect(ACPClient.prototype.newSession).toHaveBeenCalledWith("/test");
   });
 
+  it("evicts the default-model idle process when warming a third model", async () => {
+    await warmCursorAuth();
+    await warmCursorAuth("auto");
+    await warmCursorAuth("gpt-5");
+    expect(ACPClient.prototype.connect).toHaveBeenCalledTimes(3);
+    await vi.waitFor(() =>
+      expect(ACPClient.prototype.close).toHaveBeenCalledTimes(1),
+    );
+  });
+
   it("returns the cached model list without waiting for a cold catalog", async () => {
     let resolveCatalog: (models: ModelInfo[]) => void = () => {};
     vi.mocked(loadCursorModelCatalog).mockImplementation(

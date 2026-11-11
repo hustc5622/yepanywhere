@@ -148,19 +148,17 @@ function sweepExpired(): void {
   }
 }
 
-function evictOldestIdle(): void {
-  let oldestKey: string | null = null;
-  let oldestAt = Number.POSITIVE_INFINITY;
-  for (const [key, idle] of idleClients) {
-    if (idle.at < oldestAt) {
-      oldestAt = idle.at;
-      oldestKey = key;
-    }
+/** The default model is keyed by "", so never test the key for truthiness. */
+function evictOldestIdle(): boolean {
+  let oldest: [string, IdleClient] | undefined;
+  for (const entry of idleClients) {
+    if (!oldest || entry[1].at < oldest[1].at) oldest = entry;
   }
-  if (!oldestKey) return;
-  const idle = idleClients.get(oldestKey);
-  idleClients.delete(oldestKey);
-  void idle?.promise.then((client) => client.close()).catch(() => undefined);
+  if (!oldest) return false;
+  const [key, idle] = oldest;
+  idleClients.delete(key);
+  void idle.promise.then((client) => client.close()).catch(() => undefined);
+  return true;
 }
 
 export async function prepareCursorSession(input: {
@@ -208,7 +206,9 @@ export function warmCursorAuth(model?: string): Promise<void> {
   const key = modelKey(model);
   const existing = idleClients.get(key);
   if (existing) return existing.promise.then(() => undefined);
-  while (idleClients.size >= MAX_IDLE_CLIENTS) evictOldestIdle();
+  while (idleClients.size >= MAX_IDLE_CLIENTS) {
+    if (!evictOldestIdle()) break;
+  }
   const promise = connectAuthenticated(model);
   idleClients.set(key, { promise, at: Date.now() });
   void promise.catch(() => {
