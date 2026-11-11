@@ -22,6 +22,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 - 修复主服务启动时反复内存溢出（`JavaScript heap out of memory`）的主要原因：外置 runtime 形态下主服务每次启动都从 runtime 拉取整个事件日志（实测 167 个文件、439 MB、约 28 万条记录，只用到其中 1 条会话 ID 变更），单进程峰值堆达 2.4 GB，日志接近 512 MB 上限时还会因超出字符串长度而启动失败。现在 `/replay` 必须指定会话、进程或记录类型（runtime 控制协议升至 7，部署时需同时重启 runtime），只读取含该类型的日志文件并逐行流式解析，启动时的这一步从约 4 秒、2.4 GB 降到 4 ms、11 MB。
 - runtime 卡住或重启时主服务照常启动并提供会话列表和历史，在后台退避重连 runtime，不再因连不上 runtime 而反复退出、整个页面打不开。runtime 的会话事件流新增心跳，主服务对两条事件流都做空闲检测（60 秒无数据即重连）并限制建连等待；runtime 重启后已打开的会话页会自动重新订阅，不再停在已断开的流上。
 - 修复两处可锁死事件循环的同步死循环：Cursor `store.db` 中的 protobuf 长度字段第 5 字节溢出为负数时读取位置回退并原地空转（损坏或格式变化的 blob 即可触发）；Codex 推理流的 `summaryIndex`/`contentIndex` 为超大整数时同步填充数十亿个空槽。流式内容块索引统一限制在 10000 以内。
+- Cursor 预热进程的认证与建会话限时 30 秒，超时即关闭进程，不再因卡在登录而让新建会话永久挂起；预热会话数上限 4 个并按 10 分钟定时过期，空闲期间已退出的预热进程不再被取用；runtime 关闭时一并关闭预热进程。
 - 主服务调用 codex-bridge（4510）的控制请求限时 10 秒（取用量时 30 秒），bridge 无响应时会话列表、收件箱不再挂 300 秒；bridge 事件流增加空闲检测。runtime 与 bridge、bridge 与上游 app-server 的 WebSocket 握手限时 10 秒。
 - Codex 回合中 app-server 超过 5 分钟没有任何事件时发一次 `thread/read` 探活，30 秒内仍无应答则关闭连接并结束回合，不再一直显示「进行中」。
 - 关闭 Cursor/Gemini/MiniMax Code（ACP）和 Pi 进程时结束整个进程组并在 3 秒后升级为 SIGKILL，Cursor 的 `worker-server` 等子进程不再成为孤儿进程。

@@ -27,6 +27,18 @@ import {
 const log = getLogger();
 const PREPARE_TTL_MS = 10 * 60 * 1000;
 const MAX_IDLE_CLIENTS = 2;
+/** Prepared chats are per (cwd, model); keep only the most recent few. */
+const MAX_PREPARED_SLOTS = 4;
+const SWEEP_INTERVAL_MS = 60 * 1000;
+/**
+ * `authenticate` can wait on an interactive login that never comes, and a
+ * pending ACP request only settles when the agent's stdout closes. This work
+ * runs before the Supervisor's session-id wait starts, so every handshake
+ * gets its own deadline that closes the agent.
+ */
+const DEFAULT_HANDSHAKE_TIMEOUT_MS = 30_000;
+let handshakeTimeoutMs = DEFAULT_HANDSHAKE_TIMEOUT_MS;
+let sweepTimer: NodeJS.Timeout | null = null;
 
 interface PreparedCursorSession {
   client: ACPClient;
@@ -65,6 +77,20 @@ function modelKey(model: string | undefined): string {
   return model ?? "";
 }
 
+/** Reject once the handshake deadline passes; the caller closes the agent. */
+function withDeadline<T>(promise: Promise<T>, what: string): Promise<T> {
+  const ms = handshakeTimeoutMs;
+  let timer: NodeJS.Timeout | undefined;
+  const deadline = new Promise<never>((_resolve, reject) => {
+    timer = setTimeout(
+      () => reject(new Error(`Cursor ${what} did not finish within ${ms}ms`)),
+      ms,
+    );
+    timer.unref?.();
+  });
+  return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
+}
+
 async function connectAuthenticated(
   model: string | undefined,
   cwd?: string,
@@ -80,13 +106,18 @@ async function connectAuthenticated(
     const args = ["acp"];
     const launchModel = cursorLaunchModel(model);
     if (launchModel) args.unshift("--model", launchModel);
-    await client.connect({
-      command: agentPath,
-      args,
-      cwd: cwd ?? homedir(),
-    });
-    await client.initialize(CURSOR_ACP_CLIENT_CAPABILITIES);
-    await client.authenticate("cursor_login");
+    await withDeadline(
+      (async () => {
+        await client.connect({
+          command: agentPath,
+          args,
+          cwd: cwd ?? homedir(),
+        });
+        await client.initialize(CURSOR_ACP_CLIENT_CAPABILITIES);
+        await client.authenticate("cursor_login");
+      })(),
+      "authentication",
+    );
     return client;
   } catch (error) {
     client.close();
@@ -101,20 +132,47 @@ async function createPrepared(input: {
 }): Promise<PreparedCursorSession> {
   const cwd = canonicalizeProjectPath(input.cwd);
   const client = await connectAuthenticated(input.model, cwd);
-  let sessionId: string | null = null;
+  let sessionId: string | undefined;
   try {
-    sessionId = await client.newSession(cwd);
-    await client.setSessionMode(sessionId, toCursorMode(input.permissionMode));
-    return {
-      client,
-      sessionId,
-      permissionMode: input.permissionMode,
-    };
+    sessionId = await withDeadline(client.newSession(cwd), "newSession");
+    await withDeadline(
+      client.setSessionMode(sessionId, toCursorMode(input.permissionMode)),
+      "setSessionMode",
+    );
+    return { client, sessionId, permissionMode: input.permissionMode };
   } catch (error) {
     client.close();
     if (sessionId) await deleteUnpromptedCursorSession(sessionId);
     throw error;
   }
+}
+
+function closePrepared(slot: PrepareSlot): Promise<void> {
+  return slot.promise
+    .then(async (prepared) => {
+      prepared.client.close();
+      await deleteUnpromptedCursorSession(prepared.sessionId);
+    })
+    .catch(() => undefined);
+}
+
+function closeIdle(idle: IdleClient): Promise<void> {
+  return idle.promise.then((client) => client.close()).catch(() => undefined);
+}
+
+/** Expiry must not depend on another prepare call ever arriving. */
+function ensureSweepTimer(): void {
+  if (sweepTimer) return;
+  sweepTimer = setInterval(() => {
+    sweepExpired();
+    if (slots.size === 0 && idleClients.size === 0) stopSweepTimer();
+  }, SWEEP_INTERVAL_MS);
+  sweepTimer.unref?.();
+}
+
+function stopSweepTimer(): void {
+  if (sweepTimer) clearInterval(sweepTimer);
+  sweepTimer = null;
 }
 
 async function applyMode(
@@ -134,31 +192,38 @@ function sweepExpired(): void {
   for (const [id, slot] of slots) {
     if (now - slot.at < PREPARE_TTL_MS) continue;
     slots.delete(id);
-    void slot.promise
-      .then(async (prepared) => {
-        prepared.client.close();
-        await deleteUnpromptedCursorSession(prepared.sessionId);
-      })
-      .catch(() => undefined);
+    void closePrepared(slot);
   }
   for (const [key, idle] of idleClients) {
     if (now - idle.at < PREPARE_TTL_MS) continue;
     idleClients.delete(key);
-    void idle.promise.then((client) => client.close()).catch(() => undefined);
+    void closeIdle(idle);
   }
 }
 
-/** The default model is keyed by "", so never test the key for truthiness. */
-function evictOldestIdle(): boolean {
-  let oldest: [string, IdleClient] | undefined;
-  for (const entry of idleClients) {
+/**
+ * Remove the oldest entry of `entries` and return it, or undefined when the
+ * map is empty. Keys may be "" (the default model), so callers must test the
+ * returned entry, never a key, for presence.
+ */
+function takeOldest<T extends { at: number }>(
+  entries: Map<string, T>,
+): T | undefined {
+  let oldest: [string, T] | undefined;
+  for (const entry of entries) {
     if (!oldest || entry[1].at < oldest[1].at) oldest = entry;
   }
-  if (!oldest) return false;
-  const [key, idle] = oldest;
-  idleClients.delete(key);
-  void idle.promise.then((client) => client.close()).catch(() => undefined);
-  return true;
+  if (!oldest) return undefined;
+  entries.delete(oldest[0]);
+  return oldest[1];
+}
+
+/** A pooled agent can exit on its own (crash, logout) while it waits. */
+function usableClient(client: ACPClient, what: string): ACPClient | null {
+  if (client.isAlive()) return client;
+  log.warn(`Cursor ${what} process exited while idle; starting a fresh one`);
+  client.close();
+  return null;
 }
 
 export async function prepareCursorSession(input: {
@@ -175,8 +240,14 @@ export async function prepareCursorSession(input: {
     );
     return;
   }
+  while (slots.size >= MAX_PREPARED_SLOTS) {
+    const evicted = takeOldest(slots);
+    if (!evicted) break;
+    void closePrepared(evicted);
+  }
   const promise = createPrepared(input);
   slots.set(id, { promise, at: Date.now() });
+  ensureSweepTimer();
   try {
     await promise;
   } catch (error) {
@@ -189,9 +260,10 @@ export async function discardCursorPrepare(input: {
   cwd: string;
   model?: string;
 }): Promise<void> {
-  const slot = slots.get(prepareKey(input.cwd, input.model));
+  const id = prepareKey(input.cwd, input.model);
+  const slot = slots.get(id);
   if (!slot) return;
-  slots.delete(prepareKey(input.cwd, input.model));
+  slots.delete(id);
   try {
     const prepared = await slot.promise;
     prepared.client.close();
@@ -207,14 +279,23 @@ export function warmCursorAuth(model?: string): Promise<void> {
   const existing = idleClients.get(key);
   if (existing) return existing.promise.then(() => undefined);
   while (idleClients.size >= MAX_IDLE_CLIENTS) {
-    if (!evictOldestIdle()) break;
+    const evicted = takeOldest(idleClients);
+    if (!evicted) break;
+    void closeIdle(evicted);
   }
   const promise = connectAuthenticated(model);
   idleClients.set(key, { promise, at: Date.now() });
+  ensureSweepTimer();
   void promise.catch(() => {
     if (idleClients.get(key)?.promise === promise) idleClients.delete(key);
   });
   return promise.then(() => undefined);
+}
+
+function rewarm(model: string | undefined): void {
+  void warmCursorAuth(model).catch((error) => {
+    log.warn({ err: error }, "Cursor auth warm failed");
+  });
 }
 
 async function claimIdleClient(
@@ -225,10 +306,8 @@ async function claimIdleClient(
   if (!idle) return null;
   idleClients.delete(key);
   try {
-    const client = await idle.promise;
-    void warmCursorAuth(model).catch((error) => {
-      log.warn({ err: error }, "Cursor auth warm failed");
-    });
+    const client = usableClient(await idle.promise, "warm");
+    rewarm(model);
     return client;
   } catch (error) {
     log.warn({ err: error }, "Cursor warm claim failed");
@@ -249,11 +328,12 @@ export async function claimCursorPrepare(input: {
       slots.delete(id);
       try {
         const prepared = await slot.promise;
-        await applyMode(prepared, input.permissionMode);
-        void warmCursorAuth(input.model).catch((error) => {
-          log.warn({ err: error }, "Cursor auth warm failed");
-        });
-        return { client: prepared.client, sessionId: prepared.sessionId };
+        if (usableClient(prepared.client, "prepared")) {
+          await applyMode(prepared, input.permissionMode);
+          rewarm(input.model);
+          return { client: prepared.client, sessionId: prepared.sessionId };
+        }
+        await deleteUnpromptedCursorSession(prepared.sessionId);
       } catch (error) {
         log.warn({ err: error }, "Cursor prepare claim failed");
         await slot.promise
@@ -265,6 +345,16 @@ export async function claimCursorPrepare(input: {
 
   const client = await claimIdleClient(input.model);
   return client ? { client } : null;
+}
+
+/** Close every prepared and idle agent; the runtime calls this on shutdown. */
+export async function closeAllCursorPrepares(): Promise<void> {
+  const pending = [...slots.values()];
+  const idle = [...idleClients.values()];
+  slots.clear();
+  idleClients.clear();
+  stopSweepTimer();
+  await Promise.all([...pending.map(closePrepared), ...idle.map(closeIdle)]);
 }
 
 /**
@@ -293,25 +383,11 @@ export async function deleteUnpromptedCursorSession(
   await rm(dir, { recursive: true, force: true });
 }
 
+export function setCursorHandshakeTimeoutForTests(ms?: number): void {
+  handshakeTimeoutMs = ms ?? DEFAULT_HANDSHAKE_TIMEOUT_MS;
+}
+
 export async function resetCursorPrepareStateForTests(): Promise<void> {
-  const pending = [...slots.values()];
-  const idle = [...idleClients.values()];
-  slots.clear();
-  idleClients.clear();
-  await Promise.all([
-    ...pending.map(async (slot) => {
-      try {
-        (await slot.promise).client.close();
-      } catch {
-        // Failed prepares have nothing to close.
-      }
-    }),
-    ...idle.map(async (entry) => {
-      try {
-        (await entry.promise).close();
-      } catch {
-        // Failed warms have nothing to close.
-      }
-    }),
-  ]);
+  setCursorHandshakeTimeoutForTests();
+  await closeAllCursorPrepares();
 }

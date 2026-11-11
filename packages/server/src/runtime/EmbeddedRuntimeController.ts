@@ -11,6 +11,7 @@ import {
   codexControlFailure,
 } from "../sdk/providers/codex-controls.js";
 import {
+  closeAllCursorPrepares,
   discardCursorPrepare as discardCursorPrepareState,
   prepareCursorSession as prepareCursorSessionState,
   warmCursorAuth as warmCursorAuthState,
@@ -192,6 +193,7 @@ export class EmbeddedRuntimeController implements RuntimeController {
     }
 
     await this.supervisor.shutdown();
+    await closeAllCursorPrepares();
     await codexProvider.disposeBridgeSideConversations();
     for (const cleanup of this.journalSubscriptions.values()) cleanup();
     this.journalSubscriptions.clear();

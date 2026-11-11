@@ -9,6 +9,7 @@ import { loadCursorModelCatalog } from "../../../src/sdk/providers/cursor-models
 import {
   prepareCursorSession,
   resetCursorPrepareStateForTests,
+  setCursorHandshakeTimeoutForTests,
   warmCursorAuth,
 } from "../../../src/sdk/providers/cursor-prepare.js";
 import {
@@ -38,6 +39,7 @@ const processes: Process[] = [];
 
 beforeEach(() => {
   vi.spyOn(ACPClient.prototype, "connect").mockResolvedValue();
+  vi.spyOn(ACPClient.prototype, "isAlive").mockReturnValue(true);
   vi.spyOn(ACPClient.prototype, "initialize").mockResolvedValue({
     protocolVersion: 1,
     agentCapabilities: {},
@@ -589,6 +591,53 @@ describe("Cursor ACP lifecycle", () => {
     );
     expect(ACPClient.prototype.newSession).toHaveBeenCalledTimes(1);
     expect(ACPClient.prototype.newSession).toHaveBeenCalledWith("/test");
+  });
+
+  it("closes an agent that never finishes authenticating", async () => {
+    setCursorHandshakeTimeoutForTests(20);
+    vi.mocked(ACPClient.prototype.authenticate).mockImplementation(
+      () => new Promise<void>(() => {}),
+    );
+    await expect(warmCursorAuth("auto")).rejects.toThrow(
+      /authentication did not finish within 20ms/,
+    );
+    expect(ACPClient.prototype.close).toHaveBeenCalledTimes(1);
+    // The failed warm leaves no entry behind, so the next warm retries.
+    vi.mocked(ACPClient.prototype.authenticate).mockResolvedValue();
+    await warmCursorAuth("auto");
+    expect(ACPClient.prototype.connect).toHaveBeenCalledTimes(2);
+  });
+
+  it("bounds prepared chats and never hangs on a stuck newSession", async () => {
+    setCursorHandshakeTimeoutForTests(20);
+    vi.mocked(ACPClient.prototype.newSession).mockImplementationOnce(
+      () => new Promise<string>(() => {}),
+    );
+    await expect(
+      prepareCursorSession({ cwd: "/stuck", model: "auto" }),
+    ).rejects.toThrow(/newSession did not finish within 20ms/);
+    for (const cwd of ["/a", "/b", "/c", "/d", "/e"])
+      await prepareCursorSession({ cwd, model: "auto" });
+    // Four slots fit; the fifth evicts (and closes) the oldest.
+    await vi.waitFor(() =>
+      expect(ACPClient.prototype.close).toHaveBeenCalledTimes(2),
+    );
+  });
+
+  it("does not hand out a warm agent that exited while idle", async () => {
+    vi.spyOn(ACPClient.prototype, "prompt").mockResolvedValue({
+      stopReason: "end_turn",
+    });
+    await warmCursorAuth("auto");
+    vi.mocked(ACPClient.prototype.isAlive).mockReturnValueOnce(false);
+    vi.mocked(ACPClient.prototype.connect).mockClear();
+    const session = await start({ model: "auto" });
+    await session.iterator.next();
+    // The dead warm client is closed and the session spawns its own agent.
+    expect(ACPClient.prototype.close).toHaveBeenCalled();
+    expect(ACPClient.prototype.connect).toHaveBeenCalledWith(
+      expect.objectContaining({ cwd: "/test" }),
+    );
   });
 
   it("evicts the default-model idle process when warming a third model", async () => {
