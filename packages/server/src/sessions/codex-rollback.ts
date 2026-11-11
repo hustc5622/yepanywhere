@@ -126,9 +126,13 @@ function buildPathToNode(
   tipId: string | null,
 ): CodexBranchNode[] {
   const path: CodexBranchNode[] = [];
+  // Ids come from entry anchors; a repeated anchor could make a node its own
+  // ancestor, so walks stop at a node they have already visited.
+  const visited = new Set<string>();
   let cursor = tipId;
 
-  while (cursor) {
+  while (cursor && !visited.has(cursor)) {
+    visited.add(cursor);
     const node = nodesById.get(cursor);
     if (!node) break;
     path.push(node);
@@ -148,9 +152,11 @@ function findLatestTipUnderNode(
 
   let best = root;
   const stack = [...root.children];
+  const visited = new Set<string>([root.id]);
   while (stack.length > 0) {
     const id = stack.pop();
-    if (!id) continue;
+    if (!id || visited.has(id)) continue;
+    visited.add(id);
     const node = nodesById.get(id);
     if (!node) continue;
     if (

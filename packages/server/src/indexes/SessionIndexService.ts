@@ -26,6 +26,7 @@ import { isRetiredProviderName } from "../sdk/providers/policy.js";
 import { cursorSessionIdFromWatchPath } from "../sessions/cursor-reader.js";
 import type { ISessionReader, SessionFileEntry } from "../sessions/types.js";
 import type { SessionSummary } from "../supervisor/types.js";
+import { withDirLock } from "../utils/dirLock.js";
 import type { EventBus, FileChangeEvent } from "../watcher/index.js";
 import type {
   GetSessionsWithCacheOptions,
@@ -496,66 +497,19 @@ export class SessionIndexService implements ISessionIndexService {
     }
   }
 
-  private async withWriteLock<T>(
+  private withWriteLock<T>(
     lockPath: string,
     callback: () => Promise<T>,
   ): Promise<T> {
-    await this.acquireWriteLock(lockPath);
-    try {
-      return await callback();
-    } finally {
-      await fs.rm(lockPath, { recursive: true, force: true }).catch(() => {
-        // Best-effort lock cleanup.
-      });
-    }
-  }
-
-  private async acquireWriteLock(lockPath: string): Promise<void> {
-    const start = Date.now();
-    while (true) {
-      try {
-        await fs.mkdir(lockPath);
-        return;
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code !== "EEXIST") {
-          throw error;
-        }
-
-        const stale = await this.isLockStale(lockPath);
-        if (stale) {
-          await fs.rm(lockPath, { recursive: true, force: true }).catch(() => {
-            // Best-effort stale lock cleanup.
-          });
-          continue;
-        }
-
-        if (Date.now() - start >= this.writeLockTimeoutMs) {
-          throw new Error(
-            `Timed out acquiring session index write lock: ${lockPath}`,
-          );
-        }
-
-        await this.sleep(25);
-      }
-    }
-  }
-
-  private async isLockStale(lockPath: string): Promise<boolean> {
-    try {
-      const stats = await fs.stat(lockPath);
-      return Date.now() - stats.mtimeMs > this.writeLockStaleMs;
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ENOENT") {
-        return false;
-      }
-      throw error;
-    }
-  }
-
-  private async sleep(ms: number): Promise<void> {
-    await new Promise((resolve) => setTimeout(resolve, ms));
+    return withDirLock(
+      lockPath,
+      {
+        timeoutMs: this.writeLockTimeoutMs,
+        staleMs: this.writeLockStaleMs,
+        label: "session index write lock",
+      },
+      callback,
+    );
   }
 
   private getScopedLoadKey(

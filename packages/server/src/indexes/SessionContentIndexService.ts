@@ -26,6 +26,7 @@ import { getLogger } from "../logging/logger.js";
 import { isRetiredProviderName } from "../sdk/providers/policy.js";
 import type { ISessionReader, SessionFileEntry } from "../sessions/types.js";
 import type { Message } from "../supervisor/types.js";
+import { withDirLock } from "../utils/dirLock.js";
 import type { EventBus, FileChangeEvent } from "../watcher/index.js";
 import {
   type IndexedMessage,
@@ -297,58 +298,19 @@ export class SessionContentIndexService {
     }
   }
 
-  private async withWriteLock<T>(
+  private withWriteLock<T>(
     lockPath: string,
     callback: () => Promise<T>,
   ): Promise<T> {
-    await this.acquireWriteLock(lockPath);
-    try {
-      return await callback();
-    } finally {
-      await fs.rm(lockPath, { recursive: true, force: true }).catch(() => {});
-    }
-  }
-
-  private async acquireWriteLock(lockPath: string): Promise<void> {
-    const start = Date.now();
-    while (true) {
-      try {
-        await fs.mkdir(lockPath);
-        return;
-      } catch (error) {
-        const code = (error as NodeJS.ErrnoException).code;
-        if (code !== "EEXIST") throw error;
-
-        if (await this.isLockStale(lockPath)) {
-          await fs
-            .rm(lockPath, { recursive: true, force: true })
-            .catch(() => {});
-          continue;
-        }
-
-        if (Date.now() - start >= this.writeLockTimeoutMs) {
-          throw new Error(
-            `Timed out acquiring content index write lock: ${lockPath}`,
-          );
-        }
-
-        await this.sleep(25);
-      }
-    }
-  }
-
-  private async isLockStale(lockPath: string): Promise<boolean> {
-    try {
-      const stats = await fs.stat(lockPath);
-      return Date.now() - stats.mtimeMs > this.writeLockStaleMs;
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-      throw error;
-    }
-  }
-
-  private sleep(ms: number): Promise<void> {
-    return new Promise((resolve) => setTimeout(resolve, ms));
+    return withDirLock(
+      lockPath,
+      {
+        timeoutMs: this.writeLockTimeoutMs,
+        staleMs: this.writeLockStaleMs,
+        label: "content index write lock",
+      },
+      callback,
+    );
   }
 
   private markSessionDirty(

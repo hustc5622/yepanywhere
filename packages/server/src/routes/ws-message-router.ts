@@ -15,6 +15,8 @@ import type {
   WsUploadState,
 } from "./ws-handlers.js";
 
+const MAX_INFLATED_JSON_FRAME_BYTES = 32 * 1024 * 1024;
+
 interface DecodeFrameDeps {
   uploads: Map<string, WsUploadState>;
   send: SendFn;
@@ -84,7 +86,11 @@ export async function decodeFrameToParsedMessage(
       if (format === BinaryFormat.COMPRESSED_JSON) {
         connState.useCompressedJsonFrames = true;
         const compressedPayload = decodeCompressedJsonFrame(bytes);
-        const json = gunzipSync(compressedPayload).toString("utf-8");
+        // Bounded so a small hostile frame cannot inflate into a long
+        // synchronous decompression or an out-of-memory crash.
+        const json = gunzipSync(compressedPayload, {
+          maxOutputLength: MAX_INFLATED_JSON_FRAME_BYTES,
+        }).toString("utf-8");
         return JSON.parse(json);
       }
 

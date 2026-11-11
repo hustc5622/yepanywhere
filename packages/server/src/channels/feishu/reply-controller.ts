@@ -1449,7 +1449,9 @@ function extractSafeToolName(message: Record<string, unknown>): string | null {
   return name || null;
 }
 
-function findSafeSplitIndex(text: string, limit: number): number {
+/** Always at least 1, so every split loop consumes text. */
+function findSafeSplitIndex(text: string, rawLimit: number): number {
+  const limit = Math.max(1, Math.floor(rawLimit));
   if (text.length <= limit) return text.length;
   const paragraph = text.lastIndexOf("\n\n", limit);
   if (paragraph >= Math.floor(limit * 0.5)) return paragraph + 2;
@@ -1458,7 +1460,8 @@ function findSafeSplitIndex(text: string, limit: number): number {
   return limit;
 }
 
-function splitText(text: string, limit: number): string[] {
+function splitText(text: string, rawLimit: number): string[] {
+  const limit = Math.max(1, Math.floor(rawLimit));
   const chunks: string[] = [];
   let remaining = text;
   while (remaining.length > limit) {
