@@ -11,7 +11,9 @@ import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { WebSocket, WebSocketServer } from "ws";
 import {
   configArguments,
+  describeLaunchFailure,
   isolateProtocolStdio,
+  launch,
   readLaunchContext,
   routedArguments,
 } from "../../resources/codex-model-proxy/launcher.mjs";
@@ -328,6 +330,22 @@ describe("Codex routing configuration", () => {
         directEnvironment(process.env),
       ),
     ).rejects.toThrow("probe exited");
+  });
+  it("reports which launch stage failed, without proxy credentials", async () => {
+    const error = await launch("/nonexistent/yep-codex-test", [], {
+      ...process.env,
+      YEP_CODEX_MODEL_PROXY_URL: "http://user:secret@127.0.0.1:9",
+    }).catch((caught) => caught);
+    expect(describeLaunchFailure(error)).toMatch(
+      /^Codex model routing failed during configuration probe \(Error: Codex routing configuration probe exited\)/,
+    );
+    const relayError = Object.assign(
+      new Error("connect ECONNREFUSED http://user:secret@proxy.invalid:8080"),
+      { code: "ECONNREFUSED", launchStage: "model relay start" },
+    );
+    const described = describeLaunchFailure(relayError);
+    expect(described).toContain("model relay start (Error ECONNREFUSED");
+    expect(described).not.toContain("secret");
   });
   it("retains the builtin provider and auth-specific endpoint without rewriting custom gateways", () => {
     expect(selectOpenAiBase({}, { type: "chatgpt" }).href).toBe(

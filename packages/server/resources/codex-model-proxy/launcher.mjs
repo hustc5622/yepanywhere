@@ -10,6 +10,9 @@ import {
   startModelRelay,
 } from "./relay.mjs";
 
+const PROBE_REQUEST_TIMEOUT_MS = 20_000;
+const PROBE_TOTAL_TIMEOUT_MS = 25_000;
+
 /**
  * fd 0/1 are the Codex JSON-RPC channel, inherited by the real app-server.
  * Node initializes process.stdin/stdout lazily, and that init sets O_NONBLOCK
@@ -103,6 +106,9 @@ export async function readLaunchContext(command, args, env) {
   child.on("error", rejectPending);
   child.on("exit", rejectPending);
   child.stdin.on("error", rejectPending);
+  // One budget for the whole probe: three sequential 20s waits could outlast
+  // the caller's own 30s startup wait.
+  const deadline = Date.now() + PROBE_TOTAL_TIMEOUT_MS;
   async function request(method, params) {
     if (closed) throw new Error("Codex routing configuration probe exited");
     const id = ++nextId;
@@ -111,8 +117,15 @@ export async function readLaunchContext(command, args, env) {
       return await new Promise((resolve, reject) => {
         timer = setTimeout(
           () =>
-            reject(new Error("Codex routing configuration probe timed out")),
-          20_000,
+            reject(
+              new Error(
+                `Codex routing configuration probe timed out (${method})`,
+              ),
+            ),
+          Math.max(
+            1,
+            Math.min(PROBE_REQUEST_TIMEOUT_MS, deadline - Date.now()),
+          ),
         );
         pending.set(id, { resolve, reject });
         child.stdin.write(`${JSON.stringify({ id, method, params })}\n`);
@@ -159,22 +172,40 @@ export function routedArguments(args, baseUrl) {
   ];
 }
 
+/**
+ * One-line failure report: the stage that failed and the error's name, code
+ * and message, with URL credentials removed (the proxy URL may carry them).
+ */
+export function describeLaunchFailure(error) {
+  const stage = error?.launchStage ?? "launch";
+  const name = error?.name ?? "Error";
+  const code = typeof error?.code === "string" ? ` ${error.code}` : "";
+  const message = String(error?.message ?? error ?? "")
+    .replace(/\/\/[^/@\s]*@/g, "//***@")
+    .slice(0, 300);
+  return `Codex model routing failed during ${stage} (${name}${code}: ${message}); no direct model fallback was attempted.`;
+}
+
 export async function launch(command, args, environment = process.env) {
   const env = directEnvironment(environment);
   let relay;
+  let stage = "configuration probe";
   try {
     if (
       environment.YEP_CODEX_MODEL_PROXY_URL &&
       !args.some((arg) => ["--version", "-V", "--help", "-h"].includes(arg))
     ) {
       const { config, account } = await readLaunchContext(command, args, env);
+      stage = "upstream selection";
       const base = selectOpenAiBase(config, account);
       if (base) {
+        stage = "CA certificate read";
         const caPath =
           environment.CODEX_CA_CERTIFICATE || environment.SSL_CERT_FILE;
         const ca = caPath
           ? [...rootCertificates, await readFile(caPath, "utf8")]
           : undefined;
+        stage = "model relay start";
         relay = await startModelRelay({
           upstreamBase: base,
           proxyUrl: environment.YEP_CODEX_MODEL_PROXY_URL,
@@ -182,6 +213,7 @@ export async function launch(command, args, environment = process.env) {
         });
       }
     }
+    stage = "Codex start";
     const child = spawn(command, routedArguments(args, relay?.baseUrl), {
       env,
       stdio: "inherit",
@@ -201,6 +233,10 @@ export async function launch(command, args, environment = process.env) {
     } finally {
       for (const [signal, handler] of signals) process.off(signal, handler);
     }
+  } catch (error) {
+    if (error && typeof error === "object" && !("launchStage" in error))
+      error.launchStage = stage;
+    throw error;
   } finally {
     await relay?.close();
   }
@@ -217,10 +253,8 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   } else {
     try {
       process.exitCode = await launch(command, args);
-    } catch {
-      console.error(
-        "Codex model routing failed; no direct model fallback was attempted.",
-      );
+    } catch (error) {
+      console.error(describeLaunchFailure(error));
       process.exitCode = 1;
     }
   }
