@@ -170,6 +170,7 @@ import type {
   TurnStartParams,
   TurnStartResponse,
 } from "./codex-protocol/index.js";
+import { nextTurnEvent } from "./codex-turn-liveness.js";
 import type {
   AgentProvider,
   AgentSession,
@@ -3990,8 +3991,17 @@ export class CodexProvider implements AgentProvider {
         let turnComplete =
           turnResult !== undefined && turnResult.turn.status !== "inProgress";
         let emittedTurnError = false;
+        const turnServer = appServer;
         while (!turnComplete && !signal.aborted) {
-          const rawNotification = await nextNotification();
+          const rawNotification = await nextTurnEvent(
+            nextNotification,
+            () =>
+              turnServer.request<ThreadReadResponse>("thread/read", {
+                threadId: sessionId,
+                includeTurns: false,
+              }),
+            () => turnServer.close(),
+          );
           // A synthetic transport error is terminal for the input consumer,
           // unlike a failed model turn on an otherwise healthy connection.
           if (appServer.isClosed) queue.close();
