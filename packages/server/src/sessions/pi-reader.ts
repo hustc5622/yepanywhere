@@ -15,6 +15,7 @@ import {
 } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
 import type { SessionSummary } from "../supervisor/types.js";
+import { BudgetedCache, SharedByteBudget } from "../utils/budgetedCache.js";
 import {
   type CopiedPrefixMessage,
   buildCopiedPrefixForkBranchView,
@@ -57,6 +58,13 @@ interface ParsedPiSessionCacheEntry {
   deferThinking: boolean;
 }
 
+/**
+ * Parsed sessions across every project reader, charged by JSONL file size
+ * (the parsed form is a few times larger). Readers are cached per project,
+ * so a per-reader limit would still grow with the number of projects.
+ */
+const PI_PARSED_BUDGET = new SharedByteBudget(96 * 1024 * 1024);
+
 function isPiMessageEntry(entry: PiSessionEntry): entry is PiMessageEntry {
   return (
     entry.type === "message" &&
@@ -92,7 +100,9 @@ export class PiSessionReader implements ISessionReader {
   private readonly projectPath?: string;
   private readonly getContextWindow?: PiSessionReaderOptions["getContextWindow"];
   private cache: { records: PiSessionFileRecord[]; at: number } | null = null;
-  private readonly parsedCache = new Map<string, ParsedPiSessionCacheEntry>();
+  private readonly parsedCache = new BudgetedCache<ParsedPiSessionCacheEntry>(
+    PI_PARSED_BUDGET,
+  );
   private readonly parsedInFlight = new Map<
     string,
     Promise<PiSessionContent | null>
@@ -509,15 +519,19 @@ export class PiSessionReader implements ISessionReader {
           fileGeneration ===
             (this.parsedFileGenerations.get(resolvedFilePath) ?? 0);
         if (parsed && canCache) {
-          this.parsedCache.set(cacheKey, {
-            sessionId: record.sessionId,
-            content: parsed,
-            mtime: record.mtime,
-            size: record.size,
-            filePath: record.filePath,
-            deferMedia,
-            deferThinking,
-          });
+          this.parsedCache.set(
+            cacheKey,
+            {
+              sessionId: record.sessionId,
+              content: parsed,
+              mtime: record.mtime,
+              size: record.size,
+              filePath: record.filePath,
+              deferMedia,
+              deferThinking,
+            },
+            record.size,
+          );
         } else if (!parsed && canCache) {
           this.parsedCache.delete(cacheKey);
         }

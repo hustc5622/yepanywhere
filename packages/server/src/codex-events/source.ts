@@ -35,7 +35,11 @@ export class CodexEventSourceAdmissionError extends Error {
  */
 export interface CodexEventStoreSource {
   id: string;
-  createStore: () => CodexEventStore;
+  /**
+   * Readers pass the session they serve; a source may then hand out a view
+   * holding only that session's events.
+   */
+  createStore: (sessionId?: string) => CodexEventStore;
   /** Old 4510 canonical capture; explicit compatibility reads only. */
   legacyBridgeFull?: boolean;
 }
@@ -117,7 +121,7 @@ async function selectFreshestSourceStore(
     freshnessMs: number;
   } | null = null;
   for (const source of sources) {
-    const store = source.createStore();
+    const store = source.createStore(sessionId);
     const storageBytes = await store.getStorageBytes?.();
     if (
       storageBytes !== undefined &&

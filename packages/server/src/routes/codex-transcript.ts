@@ -18,6 +18,7 @@ const MIN_MAX_EXPORT_BYTES = 2 * 1024;
 const DEFAULT_MAX_EVENTS = 100_000;
 const MAX_SESSION_ID_LENGTH = 256;
 const SAFE_SESSION_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]*$/;
+const MAX_SESSION_STORES_PER_SOURCE = 8;
 
 export type CodexTranscriptFormat = "json" | "markdown";
 
@@ -237,19 +238,33 @@ function jsonlSource(
   filePath: string,
   options: { legacyBridgeFull?: boolean } = {},
 ): CodexTranscriptStoreSource {
-  // Share a single long-lived store instance per file path so that the
-  // incremental file refresh (stat + tail read) works across requests.
-  // The store hydrates once and then only reads new appended bytes on each
-  // subsequent replay, avoiding a full-file read on every session refresh.
+  // Long-lived store instances keep the incremental refresh (stat + tail
+  // read) working across requests. Reads are per session: a store that
+  // hydrated the whole journal retained every session's events (270 MB of
+  // heap for a 190 MB journal), so each recently read session gets its own
+  // session-scoped view instead.
   let store: JsonlCodexEventStore | null = null;
+  const sessionStores = new Map<string, JsonlCodexEventStore>();
   return {
     id,
     ...(options.legacyBridgeFull ? { legacyBridgeFull: true } : {}),
-    createStore: () => {
-      if (!store) {
-        store = new JsonlCodexEventStore({ filePath });
+    createStore: (sessionId) => {
+      if (sessionId === undefined) {
+        store ??= new JsonlCodexEventStore({ filePath });
+        return store;
       }
-      return store;
+      let scoped = sessionStores.get(sessionId);
+      if (scoped) {
+        sessionStores.delete(sessionId);
+      } else {
+        scoped = new JsonlCodexEventStore({ filePath, sessionId });
+      }
+      sessionStores.set(sessionId, scoped);
+      for (const key of sessionStores.keys()) {
+        if (sessionStores.size <= MAX_SESSION_STORES_PER_SOURCE) break;
+        sessionStores.delete(key);
+      }
+      return scoped;
     },
   };
 }

@@ -218,6 +218,13 @@ export interface JsonlCodexEventStoreOptions {
    * read path cannot silently attach to a writer.
    */
   appendOnly?: boolean;
+  /**
+   * Read-only view of one session. Lines that cannot belong to it are
+   * skipped before JSON.parse and nothing else is retained, so serving one
+   * session no longer holds every session's events in memory. `append` is
+   * rejected: writers need the whole index.
+   */
+  sessionId?: string;
   /** Called for a malformed historical line. No raw line is exposed. */
   onCorruptLine?: (details: { lineNumber: number; reason: string }) => void;
   /** Full-load read chunk size in bytes. Overridable for tests. */
@@ -345,6 +352,7 @@ export class JsonlCodexEventStore implements CodexEventStore {
   private lastKnownMtimeMs = 0;
   private lastKnownFileIdentity: string | null = null;
   private readonly appendOnly: boolean;
+  private readonly sessionScope?: { sessionId: string; marker: string };
 
   constructor(options: JsonlCodexEventStoreOptions) {
     if (!options.filePath.trim()) {
@@ -366,9 +374,27 @@ export class JsonlCodexEventStore implements CodexEventStore {
     this.onRotate = options.onRotate;
     this.onJournalGaps = options.onJournalGaps;
     this.appendOnly = options.appendOnly ?? false;
+    if (options.sessionId !== undefined) {
+      if (this.appendOnly)
+        throw new Error("A session-scoped Codex event store is read-only");
+      // Envelopes are written with JSON.stringify, so this exact text is
+      // present in every line of the session (other lines may match too and
+      // are rejected after parsing).
+      this.sessionScope = {
+        sessionId: options.sessionId,
+        marker: `"sessionId":${JSON.stringify(options.sessionId)}`,
+      };
+    }
+  }
+
+  /** False for a line that cannot hold an event of the scoped session. */
+  private inScope(line: string): boolean {
+    return !this.sessionScope || line.includes(this.sessionScope.marker);
   }
 
   async append(event: CodexEventDraft): Promise<CodexEventAppendResult> {
+    if (this.sessionScope)
+      throw new Error("A session-scoped Codex event store is read-only");
     await this.ensureLoaded();
     return await this.withAppendLock(async () => {
       // A different process or store instance may have appended or replaced
@@ -648,7 +674,7 @@ export class JsonlCodexEventStore implements CodexEventStore {
     const touchedSessions = new Set<string>();
     for (let index = 0; index < lines.length; index += 1) {
       const line = lines[index]?.trim();
-      if (!line) continue;
+      if (!line || !this.inScope(line)) continue;
       let parsed: unknown;
       try {
         parsed = JSON.parse(line) as unknown;
@@ -668,6 +694,8 @@ export class JsonlCodexEventStore implements CodexEventStore {
         this.onCorruptLine?.({ lineNumber: -1, reason: "invalid_envelope" });
         continue;
       }
+      if (this.sessionScope && parsed.sessionId !== this.sessionScope.sessionId)
+        continue;
       const existing = this.findExisting(parsed);
       if (!existing) {
         this.index(parsed);
@@ -976,6 +1004,7 @@ export class JsonlCodexEventStore implements CodexEventStore {
 
   /** Index one loaded line; returns its sessionId when the line was indexed. */
   private indexLoadedLine(rawLine: string, lineNumber: number): string | null {
+    if (!this.inScope(rawLine)) return null;
     const line = rawLine.trim();
     if (!line) return null;
     let parsed: unknown;
@@ -998,6 +1027,8 @@ export class JsonlCodexEventStore implements CodexEventStore {
       });
       return null;
     }
+    if (this.sessionScope && parsed.sessionId !== this.sessionScope.sessionId)
+      return null;
     const existing = this.findExisting(parsed);
     if (!existing) this.index(parsed);
     return parsed.sessionId;

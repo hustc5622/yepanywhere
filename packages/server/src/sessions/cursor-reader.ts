@@ -13,6 +13,7 @@ import type { SessionSummary } from "../supervisor/types.js";
 import {
   getCursorSessionFileStats,
   readCursorSessionDir,
+  readCursorSessionMeta,
 } from "./cursor-store.js";
 import type {
   GetSessionOptions,
@@ -132,6 +133,11 @@ export class CursorSessionReader implements ISessionReader {
     const files: SessionFileEntry[] = [];
     for (const sessionId of entries) {
       try {
+        // Every project scope shares one sessions directory. Listing only
+        // this project's sessions keeps each scope from opening every other
+        // project's store.db and from being dirtied by their writes.
+        if (!(await this.metaMatchesProject(join(sessionDir, sessionId))))
+          continue;
         const info = await getCursorSessionFileStats(
           join(sessionDir, sessionId),
         );
@@ -155,11 +161,18 @@ export class CursorSessionReader implements ISessionReader {
   }
 
   private async loadOne(sessionId: string) {
-    const session = await readCursorSessionDir(
-      join(this.sessionsDir, sessionId),
-    );
+    const sessionDir = join(this.sessionsDir, sessionId);
+    if (!(await this.metaMatchesProject(sessionDir))) return null;
+    const session = await readCursorSessionDir(sessionDir);
     if (!session || !this.matchesProject(session.cwd)) return null;
     return session;
+  }
+
+  /** Project check from meta.json alone, before any store.db is opened. */
+  private async metaMatchesProject(sessionDir: string): Promise<boolean> {
+    if (!this.projectPath) return true;
+    const meta = await readCursorSessionMeta(sessionDir);
+    return meta !== null && this.matchesProject(meta.cwd);
   }
 
   private async loadProjectSessions() {

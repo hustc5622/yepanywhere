@@ -45,4 +45,29 @@ describe("Codex manifest scan worker", () => {
     const p95 = lags[Math.floor(lags.length * 0.95)] ?? 0;
     expect(p95).toBeLessThanOrEqual(20);
   });
+
+  it("re-reads only changed files and stops a first line at its newline", async () => {
+    const root = await mkdtemp(join(tmpdir(), "session-scan-incremental-"));
+    roots.push(root);
+    const longMeta = JSON.stringify({ meta: "x".repeat(40_000) });
+    await writeFile(
+      join(root, "long.jsonl"),
+      `${longMeta}\n${"y".repeat(500_000)}\n`,
+    );
+    await writeFile(
+      join(root, "stable.jsonl"),
+      `${JSON.stringify({ id: 1 })}\n`,
+    );
+
+    const first = await scanCodexManifestHeadersInWorker(root, 1024 * 1024);
+    const byName = (rows: typeof first, name: string) =>
+      rows?.find((row) => row.filePath.endsWith(name));
+    expect(byName(first, "long.jsonl")?.firstLine).toBe(longMeta);
+
+    await writeFile(join(root, "long.jsonl"), `${JSON.stringify({ id: 2 })}\n`);
+    const second = await scanCodexManifestHeadersInWorker(root, 1024 * 1024);
+    expect(byName(second, "long.jsonl")?.firstLine).toBe('{"id":2}');
+    // The unchanged file comes back as the same cached header object.
+    expect(byName(second, "stable.jsonl")).toBe(byName(first, "stable.jsonl"));
+  });
 });

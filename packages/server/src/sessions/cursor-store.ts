@@ -91,40 +91,107 @@ export function parseCursorMetaJson(raw: string): CursorSessionDiskMeta | null {
   }
 }
 
-export async function readCursorSessionDir(
+export async function readCursorSessionMeta(
   sessionDir: string,
-): Promise<CursorStoredSession | null> {
-  const sessionId = sessionDir.split("/").at(-1) ?? "";
-  let meta: CursorSessionDiskMeta | null = null;
+): Promise<CursorSessionDiskMeta | null> {
   try {
-    meta = parseCursorMetaJson(
+    return parseCursorMetaJson(
       await readFile(join(sessionDir, "meta.json"), "utf8"),
     );
   } catch {
     return null;
   }
+}
+
+/**
+ * Parsed sessions keyed by directory and validated by file stats. Reading a
+ * store loads every blob synchronously (tens of MB for long chats), and the
+ * same session is read by listing, display polling and search; the budget
+ * bounds retained transcript text, not entry count.
+ */
+const PARSED_CACHE_MAX_CHARS = 32 * 1024 * 1024;
+const parsedCache = new Map<
+  string,
+  { mtime: number; size: number; chars: number; session: CursorStoredSession }
+>();
+let parsedCacheChars = 0;
+
+function transcriptChars(messages: CursorTranscriptMessage[]): number {
+  let chars = 0;
+  for (const message of messages) {
+    chars += message.text.length;
+    for (const block of message.blocks ?? [])
+      chars += JSON.stringify(block).length;
+  }
+  return chars;
+}
+
+function forgetParsed(sessionDir: string): void {
+  const entry = parsedCache.get(sessionDir);
+  if (!entry) return;
+  parsedCache.delete(sessionDir);
+  parsedCacheChars -= entry.chars;
+}
+
+function rememberParsed(
+  sessionDir: string,
+  stats: { mtime: number; size: number },
+  session: CursorStoredSession,
+): void {
+  forgetParsed(sessionDir);
+  const chars = transcriptChars(session.messages);
+  if (chars > PARSED_CACHE_MAX_CHARS / 4) return;
+  parsedCache.set(sessionDir, { ...stats, chars, session });
+  parsedCacheChars += chars;
+  for (const key of parsedCache.keys()) {
+    if (parsedCacheChars <= PARSED_CACHE_MAX_CHARS) break;
+    forgetParsed(key);
+  }
+}
+
+export function resetCursorParsedCacheForTests(): void {
+  parsedCache.clear();
+  parsedCacheChars = 0;
+}
+
+export async function readCursorSessionDir(
+  sessionDir: string,
+): Promise<CursorStoredSession | null> {
+  const sessionId = sessionDir.split("/").at(-1) ?? "";
+  const meta = await readCursorSessionMeta(sessionDir);
   if (!meta || !sessionId) return null;
+
+  const stats = await getCursorSessionFileStats(sessionDir);
+  const cached = parsedCache.get(sessionDir);
+  if (cached && stats?.mtime === cached.mtime && stats.size === cached.size) {
+    parsedCache.delete(sessionDir);
+    parsedCache.set(sessionDir, cached);
+    return {
+      ...cached.session,
+      cwd: meta.cwd,
+      title: meta.title ?? cached.session.title,
+      messages: cached.session.messages.slice(),
+    };
+  }
 
   const dbPath = join(sessionDir, "store.db");
   const stored = await withSqliteDatabase(dbPath, null, (db) => readStore(db));
-  if (!stored) return null;
-  let updatedAt = stored.createdAt;
-  try {
-    const stats = await getCursorSessionFileStats(sessionDir);
-    if (stats) updatedAt = new Date(stats.mtime).toISOString();
-  } catch {
-    // Keep the store's createdAt when the file disappears mid-read.
+  if (!stored) {
+    forgetParsed(sessionDir);
+    return null;
   }
-
-  return {
+  const session: CursorStoredSession = {
     sessionId,
     cwd: meta.cwd,
     title: meta.title ?? stored.name,
     createdAt: stored.createdAt,
-    updatedAt,
+    // Keep the store's createdAt when the files disappear mid-read.
+    updatedAt: stats ? new Date(stats.mtime).toISOString() : stored.createdAt,
     messages: stored.messages,
     contextUsage: stored.contextUsage,
   };
+  if (stats) rememberParsed(sessionDir, stats, session);
+  return { ...session, messages: session.messages.slice() };
 }
 
 interface StoreRead {

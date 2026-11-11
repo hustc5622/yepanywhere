@@ -81,7 +81,7 @@ export class FileWatcher {
 
       if (this.periodicRescanMs > 0) {
         this.periodicRescanTimer = setInterval(() => {
-          this.rescanAndEmit();
+          void this.rescanAndEmit();
         }, this.periodicRescanMs);
         getLogger().info(
           `[FileWatcher] Periodic rescan enabled (${this.periodicRescanMs}ms) for ${this.watchDir}`,
@@ -134,6 +134,39 @@ export class FileWatcher {
     this.knownFiles = new Set(this.knownFileMtimes.keys());
   }
 
+  /**
+   * Rescan without blocking the event loop. Periodic rescans walk whole
+   * provider trees (hundreds of files) every few seconds, which as sync IO
+   * cost hundreds of milliseconds of main-thread time per minute.
+   */
+  private async scanDirAsync(
+    dir: string,
+    index: Map<string, number>,
+  ): Promise<void> {
+    let entries: fs.Dirent[];
+    try {
+      entries = await fs.promises.readdir(dir, { withFileTypes: true });
+    } catch {
+      return; // Ignore errors (e.g., permission denied)
+    }
+    const subdirs: string[] = [];
+    await Promise.all(
+      entries.map(async (entry) => {
+        const fullPath = path.join(dir, entry.name);
+        if (entry.isDirectory()) {
+          subdirs.push(fullPath);
+          return;
+        }
+        try {
+          index.set(fullPath, (await fs.promises.stat(fullPath)).mtimeMs);
+        } catch {
+          // File may have disappeared between readdir/stat
+        }
+      }),
+    );
+    for (const subdir of subdirs) await this.scanDirAsync(subdir, index);
+  }
+
   private scanDir(dir: string, index: Map<string, number>): void {
     try {
       const entries = fs.readdirSync(dir, { withFileTypes: true });
@@ -170,18 +203,28 @@ export class FileWatcher {
 
     const timer = setTimeout(() => {
       this.debounceTimers.delete(fullPath);
-      this.emitEvent(fullPath, eventType);
+      void this.emitEvent(fullPath);
     }, this.debounceMs);
 
     this.debounceTimers.set(fullPath, timer);
   }
 
-  private emitEvent(fullPath: string, _eventType: string): void {
+  private async emitEvent(fullPath: string): Promise<void> {
+    let mtimeMs: number | null;
+    try {
+      mtimeMs = (await fs.promises.stat(fullPath)).mtimeMs;
+    } catch {
+      mtimeMs = null;
+    }
+    if (this.watcher) this.emitChange(fullPath, mtimeMs);
+  }
+
+  /** Emit for a file whose current mtime is known; null means it is gone. */
+  private emitChange(fullPath: string, mtimeMs: number | null): void {
     // Determine change type
     let changeType: FileChangeType;
-    const fileExists = fs.existsSync(fullPath);
 
-    if (!fileExists) {
+    if (mtimeMs === null) {
       if (this.knownFiles.has(fullPath)) {
         changeType = "delete";
         this.knownFiles.delete(fullPath);
@@ -191,14 +234,6 @@ export class FileWatcher {
         return;
       }
     } else {
-      let mtimeMs = Date.now();
-      try {
-        mtimeMs = fs.statSync(fullPath).mtimeMs;
-      } catch {
-        // File disappeared between existsSync and statSync
-        return;
-      }
-
       if (this.knownFiles.has(fullPath)) {
         const previousMtime = this.knownFileMtimes.get(fullPath);
         if (previousMtime === mtimeMs) {
@@ -248,37 +283,40 @@ export class FileWatcher {
     this.rescanTimer = setTimeout(
       () => {
         this.rescanTimer = null;
-        this.rescanAndEmit();
+        void this.rescanAndEmit();
       },
       Math.max(this.debounceMs * 2, 400),
     );
   }
 
-  private rescanAndEmit(): void {
+  private async rescanAndEmit(): Promise<void> {
     if (this.rescanInProgress) {
       return;
     }
     this.rescanInProgress = true;
+    const watcher = this.watcher;
 
     try {
       getLogger().debug(
         `[FileWatcher] Running fallback rescan provider=${this.provider}`,
       );
       const current = new Map<string, number>();
-      this.scanDir(this.watchDir, current);
+      await this.scanDirAsync(this.watchDir, current);
+      // Stopped (or restarted) while scanning: the result is stale.
+      if (!watcher || this.watcher !== watcher) return;
 
       // Create/modify events
       for (const [fullPath, mtimeMs] of current.entries()) {
         const prevMtime = this.knownFileMtimes.get(fullPath);
         if (prevMtime === undefined || prevMtime !== mtimeMs) {
-          this.emitEvent(fullPath, "change");
+          this.emitChange(fullPath, mtimeMs);
         }
       }
 
       // Delete events
-      for (const fullPath of this.knownFileMtimes.keys()) {
+      for (const fullPath of [...this.knownFileMtimes.keys()]) {
         if (!current.has(fullPath)) {
-          this.emitEvent(fullPath, "rename");
+          this.emitChange(fullPath, null);
         }
       }
 
