@@ -1794,6 +1794,22 @@ h2 {
 
 .session-inspector-provider-row .provider-badge {
   max-width: 100%;
+  flex-wrap: wrap;
+  align-items: center;
+  row-gap: 2px;
+}
+
+.session-inspector-provider-row .provider-badge-label,
+.session-inspector-provider-row .provider-badge-dot-inline {
+  flex-shrink: 0;
+}
+
+.session-inspector-provider-row .provider-badge-model {
+  flex: 1 1 auto;
+  white-space: normal;
+  overflow: visible;
+  overflow-wrap: break-word;
+  text-overflow: unset;
 }
 
 .session-inspector-channel-summary {

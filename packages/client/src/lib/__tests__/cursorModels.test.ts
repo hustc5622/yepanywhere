@@ -5,6 +5,7 @@ import {
   buildCursorModelValue,
   getCursorModelSelection,
   getPreferredCursorModelId,
+  parseCursorModelBadge,
 } from "../cursorModels";
 
 const models: ModelInfo[] = catalog.models.map((model) => ({
@@ -35,6 +36,30 @@ describe("Cursor model expressions", () => {
     expect(buildCursorModelValue(selection.model, selection.parameters)).toBe(
       value,
     );
+  });
+  it("reads Fast, context, and reasoning out of a stored expression", () => {
+    expect(
+      parseCursorModelBadge(
+        "grok-4.7[context=500k,reasoning_effort=high,fast=false]",
+      ),
+    ).toEqual({
+      context: "500K",
+      reasoning: "high",
+      fast: "false",
+    });
+    expect(
+      parseCursorModelBadge(
+        "claude-opus-5[thinking=false,context=1m,effort=max,fast=true]",
+      ),
+    ).toEqual({
+      context: "1M",
+      thinking: "false",
+      reasoning: "max",
+      fast: "true",
+    });
+    expect(parseCursorModelBadge("gpt-5.6-sol-high-fast")).toBeNull();
+    expect(parseCursorModelBadge("auto")).toBeNull();
+    expect(parseCursorModelBadge("grok-4.7[unknown=true]")).toBeNull();
   });
   it.each([
     "gpt-5.6-sol-high-fast",

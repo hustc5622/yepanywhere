@@ -7,6 +7,8 @@
   "cursorModelThinkingOn": "Thinking: on",
   "cursorModelEffortMinimal": "Minimal",
   "cursorModelFastDescription": "Faster responses with higher Cursor usage. Availability depends on the model.",
+  "cursorModelFastOn": "Fast",
+  "cursorModelFastOff": "Fast off",
   "cursorModelSavedSelection": "Using your saved model selection. Select a model above to configure its individual options.",
   "cursorAccountTitle": "Cursor usage & account",
   "cursorAccountHeading": "Cursor account",

@@ -1,6 +1,7 @@
 import type { LiveProviderName, ProviderName } from "@yep-anywhere/shared";
 import { resolveModelDisplayLabel } from "@yep-anywhere/shared";
 import { useOptionalI18n } from "../i18n";
+import { parseCursorModelBadge } from "../lib/cursorModels";
 
 const PROVIDER_COLORS: Record<LiveProviderName, string> = {
   claude: "var(--provider-claude)", // Claude orange
@@ -114,11 +115,67 @@ export function ProviderBadge({
     return normalized;
   };
 
+  const labelOr = (
+    key: Parameters<NonNullable<typeof i18n>["t"]>[0],
+    fallback: string,
+  ) => i18n?.t(key) ?? fallback;
+
+  const getCursorThinkingLabel = (value: string | undefined): string | null => {
+    if (value === "true")
+      return labelOr("cursorModelThinkingOn", "Thinking: on");
+    if (value === "false")
+      return labelOr("newSessionThinkingOff", "Thinking: off");
+    return normalizeConfigLabel(value);
+  };
+
+  const getCursorReasoningLabel = (
+    value: string | undefined,
+  ): string | null => {
+    switch (value) {
+      case undefined:
+      case "":
+        return null;
+      case "none":
+        return labelOr("newSessionThinkingOff", "Thinking: off");
+      case "minimal":
+        return labelOr("cursorModelEffortMinimal", "Minimal");
+      case "low":
+        return labelOr("newSessionEffortLow", "Low");
+      case "medium":
+        return labelOr("newSessionEffortMedium", "Medium");
+      case "high":
+        return labelOr("newSessionEffortHigh", "High");
+      case "xhigh":
+      case "extra-high":
+        return labelOr("newSessionEffortXHigh", "Extra high");
+      case "max":
+        return labelOr("newSessionEffortMax", "Max");
+      default:
+        return value;
+    }
+  };
+
+  const getCursorFastLabel = (value: string | undefined): string | null => {
+    if (value === "true") return labelOr("cursorModelFastOn", "Fast");
+    if (value === "false") return labelOr("cursorModelFastOff", "Fast off");
+    return normalizeConfigLabel(value);
+  };
+
+  const cursorBadge =
+    provider === "cursor" ? parseCursorModelBadge(model) : null;
+  const cursorReasoningCovered = Boolean(
+    cursorBadge?.reasoning || cursorBadge?.thinking,
+  );
+
   const modelLabel = getModelLabel(model);
   const configLabel = [
     modelLabel,
-    getReasoningEffortLabel(reasoningEffort),
+    cursorBadge?.context,
+    getCursorThinkingLabel(cursorBadge?.thinking),
+    getCursorReasoningLabel(cursorBadge?.reasoning),
+    cursorReasoningCovered ? null : getReasoningEffortLabel(reasoningEffort),
     getServiceTierLabel(),
+    getCursorFastLabel(cursorBadge?.fast),
   ]
     .filter((value): value is string => Boolean(value))
     .join(" · ");
@@ -146,6 +203,7 @@ export function ProviderBadge({
     <span
       className={`provider-badge${configLabel ? " provider-badge--mobile-config-only" : ""} ${className}`}
       style={{ borderColor: color, color }}
+      title={configLabel ? `${label} · ${configLabel}` : label}
     >
       <span className={dotClass} style={dotStyle} />
       <span className="provider-badge-label">{label}</span>

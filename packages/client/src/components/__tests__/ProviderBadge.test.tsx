@@ -73,3 +73,48 @@ describe("Codex service tier badge", () => {
     expect(container.textContent).not.toContain("Fast");
   });
 });
+
+describe("Cursor model parameter badge", () => {
+  it.each([
+    ["en", "Fast off", "High"],
+    ["zh-CN", "Fast 关", "高"],
+  ])("shows Fast off for %s", async (locale, fastLabel, effortLabel) => {
+    localStorage.setItem(UI_KEYS.locale, locale);
+    render(
+      <I18nProvider>
+        <ProviderBadge
+          provider="cursor"
+          model="grok-4.7[context=500k,reasoning_effort=high,fast=false]"
+        />
+      </I18nProvider>,
+    );
+    await waitFor(() => {
+      expect(
+        screen.getByText(`Grok-4.7 · 500K · ${effortLabel} · ${fastLabel}`),
+      ).toBeTruthy();
+    });
+  });
+
+  it("shows Fast when the expression turns it on", async () => {
+    localStorage.setItem(UI_KEYS.locale, "en");
+    render(
+      <I18nProvider>
+        <ProviderBadge
+          provider="cursor"
+          model="grok-4.7[context=500k,reasoning_effort=high,fast=true]"
+        />
+      </I18nProvider>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("Grok-4.7 · 500K · High · Fast")).toBeTruthy();
+    });
+  });
+
+  it("leaves variant slugs without a Fast label", () => {
+    const { container } = render(
+      <ProviderBadge provider="cursor" model="gpt-5.6-sol-high-fast" />,
+    );
+    expect(container.textContent).toContain("Gpt-5.6-sol-high-fast");
+    expect(container.textContent).not.toContain("Fast");
+  });
+});

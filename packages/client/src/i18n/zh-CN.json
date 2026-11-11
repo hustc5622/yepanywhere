@@ -7,6 +7,8 @@
   "cursorModelThinkingOn": "思考：开启",
   "cursorModelEffortMinimal": "最低",
   "cursorModelFastDescription": "响应更快，但消耗更多 Cursor 用量；是否可用取决于模型。",
+  "cursorModelFastOn": "Fast",
+  "cursorModelFastOff": "Fast 关",
   "cursorModelSavedSelection": "正在使用已保存的模型配置。选择上方模型后，可单独调整各项选项。",
   "cursorAccountTitle": "Cursor 用量与账号",
   "cursorAccountHeading": "Cursor 账号",
