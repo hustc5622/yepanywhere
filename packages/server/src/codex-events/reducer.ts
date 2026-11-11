@@ -1,3 +1,4 @@
+import { streamBlockIndex } from "../utils/streamBlockIndex.js";
 import { classifyCodexNotification } from "./classification.js";
 import type { CodexEventStore } from "./store.js";
 import {
@@ -811,10 +812,7 @@ function fillThrough(values: string[], index: number): void {
 }
 
 function readIndex(payload: SafeJsonObject | undefined, key: string): number {
-  const value = readNumber(payload, key);
-  return value !== undefined && Number.isInteger(value) && value >= 0
-    ? value
-    : 0;
+  return streamBlockIndex(readNumber(payload, key));
 }
 
 function normalizeTurnStatus(

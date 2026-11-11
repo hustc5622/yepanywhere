@@ -19,6 +19,7 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 
 ### Fixed
 - runtime 或主服务卡死后能自动恢复，不再一直打不开页面。之前进程活着但主线程被同步代码锁死时，launchd 认为它还在运行、不会重启，主服务调 runtime 的请求要等 Node 默认的 300 秒才失败，表现为页面一直转圈或连不上。现在 runtime 和主服务各带一个事件循环看门狗（独立 worker 线程）：主线程超过 30 秒没有转动时，先把卡住的 JS 调用栈写进 err 日志（`[EventLoopWatchdog] … main thread stack`），再结束进程，由 launchd 在 10 秒内拉起。阈值由 `YEP_EVENT_LOOP_WATCHDOG_MS` 控制，默认只在 `NODE_ENV=production` 下启用，设为 `0` 关闭。主服务调用独立 runtime 的普通请求 30 秒超时，新建/恢复会话、Cursor 预热、发送消息、切换模型等 120 秒超时，超时报错写明是哪个请求；`/btw`、压缩和 Codex 原生控制这类要等模型完成的请求不设超时。
+- 修复两处可锁死事件循环的同步死循环：Cursor `store.db` 中的 protobuf 长度字段第 5 字节溢出为负数时读取位置回退并原地空转（损坏或格式变化的 blob 即可触发）；Codex 推理流的 `summaryIndex`/`contentIndex` 为超大整数时同步填充数十亿个空槽。流式内容块索引统一限制在 10000 以内。
 - 修复同时使用三种 Cursor 模型后 runtime 卡死、页面打不开的问题：Cursor 预热池满了要淘汰最早的空闲进程时，默认模型的键是空字符串，被误判为「没有可淘汰的进程」而什么都没删，外层循环因此永远不结束，runtime 进程占满一个 CPU 核且不再响应任何请求，主服务调用 runtime 全部超时。现在按条目而不是键判断，淘汰不掉时也会立即退出循环。
 - 修复 `GET /api/sessions/:sessionId/locate` 无法定位 DeepSeek Harness（dsh）和 MiniMax Code（mcode）会话的问题：最后一步「逐个 provider 扫描」没有传入这两个 provider 的 reader，因此只拿会话 ID 的跳转和 agent 永远返回「Session not found」。
 - 修复设置了反向代理前缀（如 `/yep`）时登录鉴权的路径豁免失效的问题：鉴权中间件拿带前缀的完整路径去匹配 `/api/auth/*`、`/health`，导致开启密码登录后登录接口本身也要求已登录。现在会先去掉前缀再匹配。

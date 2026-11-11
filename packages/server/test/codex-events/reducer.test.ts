@@ -104,6 +104,31 @@ describe("canonical Codex event reducer", () => {
     );
   });
 
+  it("ignores a reasoning index too large to fill densely", () => {
+    const state = reduceCodexEvents(
+      createCanonicalCodexSessionState("session-1"),
+      [
+        testEvent(1, "item/reasoning/summaryPartAdded", {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "reasoning-1",
+          summaryIndex: 1e9,
+        }),
+        testEvent(2, "item/reasoning/textDelta", {
+          threadId: "thread-1",
+          turnId: "turn-1",
+          itemId: "reasoning-1",
+          contentIndex: 2 ** 40,
+          delta: "detail",
+        }),
+      ],
+    );
+    const stream =
+      state.threads["thread-1"]?.turns["turn-1"]?.items["reasoning-1"]?.stream;
+    expect(stream?.reasoningSummary).toEqual([""]);
+    expect(stream?.reasoningContent).toEqual(["detail"]);
+  });
+
   it("keeps indexed reasoning, command, patch, MCP, and safe terminal streams", () => {
     const events = [
       testEvent(1, "item/reasoning/summaryPartAdded", {

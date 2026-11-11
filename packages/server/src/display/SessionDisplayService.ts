@@ -28,6 +28,7 @@ import {
 } from "../sessions/display-projection.js";
 import { augmentPersistedSessionMessages } from "../sessions/persisted-augments.js";
 import type { Message } from "../supervisor/types.js";
+import { streamBlockIndex } from "../utils/streamBlockIndex.js";
 import {
   SessionDisplayReducer,
   type SessionDisplayReducerOptions,
@@ -1290,13 +1291,7 @@ export class SessionDisplayService {
         )
           return;
         if (!previous || start) this.stopStreaming(entry, { exceptId: id });
-        const index =
-          typeof event?.index === "number" &&
-          Number.isSafeInteger(event.index) &&
-          event.index >= 0 &&
-          event.index < 10_000
-            ? event.index
-            : 0;
+        const index = streamBlockIndex(event?.index);
         const content = messageContent(previous ?? {});
         const blocks: RecordValue[] = Array.isArray(content)
           ? content.map((b) => ({ ...asRecord(b) }))

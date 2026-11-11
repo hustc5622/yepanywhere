@@ -1,3 +1,5 @@
+import { streamBlockIndex } from "../utils/streamBlockIndex.js";
+
 type RecordValue = Record<string, unknown>;
 function record(value: unknown): RecordValue | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -134,13 +136,7 @@ export class StreamingTextAccumulator {
     if (typeof text !== "string") return;
     if (this.id === id && !this.streaming && !start) return;
     this.begin(id, message);
-    const index =
-      typeof event.index === "number" &&
-      Number.isSafeInteger(event.index) &&
-      event.index >= 0 &&
-      event.index < 10_000
-        ? event.index
-        : 0;
+    const index = streamBlockIndex(event.index);
     while (this.blocks.length <= index)
       this.blocks.push({ type: "text", text: "" });
     const previous = this.blocks[index]?.text ?? "";

@@ -384,7 +384,7 @@ function protobufDigestFields(
     const tag = readVarint(data, offset);
     if (!tag) break;
     offset = tag.next;
-    const wire = tag.value & 7;
+    const wire = tag.value % 8;
     if (wire === 0) {
       const value = readVarint(data, offset);
       if (!value) break;
@@ -403,8 +403,10 @@ function protobufDigestFields(
     const length = readVarint(data, offset);
     if (!length) break;
     offset = length.next;
+    // Lengths are unsigned, so this keeps `end` inside the blob and ahead of
+    // `offset`: every iteration moves forward.
+    if (length.value > data.length - offset) break;
     const end = offset + length.value;
-    if (end > data.length) break;
     const chunk = data.subarray(offset, end);
     if (chunk.length === 32)
       children.push({
@@ -416,20 +418,22 @@ function protobufDigestFields(
   return children;
 }
 
+/**
+ * Unsigned varint as a safe integer, or null when truncated or wider than
+ * 2^53. Bitwise shifts would wrap the fifth byte into a negative int32.
+ */
 function readVarint(
   data: Buffer,
   offset: number,
 ): { value: number; next: number } | null {
   let value = 0;
-  let shift = 0;
-  let index = offset;
-  while (index < data.length && shift <= 28) {
-    const byte = data[index];
-    if (byte === undefined) return null;
-    index += 1;
-    value |= (byte & 0x7f) << shift;
-    if ((byte & 0x80) === 0) return { value, next: index };
-    shift += 7;
+  let scale = 1;
+  for (let index = offset; index < data.length && index < offset + 8; index++) {
+    const byte = data[index] as number;
+    value += (byte & 0x7f) * scale;
+    if ((byte & 0x80) === 0)
+      return Number.isSafeInteger(value) ? { value, next: index + 1 } : null;
+    scale *= 0x80;
   }
   return null;
 }
