@@ -1,3 +1,5 @@
+import { once } from "node:events";
+import type { AddressInfo } from "node:net";
 import { afterAll, beforeAll, describe, expect, it } from "vitest";
 import {
   startMaintenanceServer,
@@ -5,11 +7,19 @@ import {
 } from "../../src/maintenance/server.js";
 
 describe("Maintenance Server", () => {
-  const port = 13401; // Use high port to avoid conflicts
+  let port = 0;
   let server: ReturnType<typeof startMaintenanceServer>;
 
-  beforeAll(() => {
-    server = startMaintenanceServer({ port, mainServerPort: 3400 });
+  beforeAll(async () => {
+    // An OS-assigned port cannot collide with parallel test files, and the
+    // first request must wait until the socket is actually listening.
+    server = startMaintenanceServer({
+      port: 0,
+      host: "127.0.0.1",
+      mainServerPort: 3400,
+    });
+    if (!server.server.listening) await once(server.server, "listening");
+    port = (server.server.address() as AddressInfo).port;
   });
 
   afterAll(() => {
@@ -20,7 +30,7 @@ describe("Maintenance Server", () => {
     path: string,
     options?: RequestInit,
   ): Promise<Response> => {
-    return globalThis.fetch(`http://localhost:${port}${path}`, options);
+    return globalThis.fetch(`http://127.0.0.1:${port}${path}`, options);
   };
 
   describe("GET /health", () => {
