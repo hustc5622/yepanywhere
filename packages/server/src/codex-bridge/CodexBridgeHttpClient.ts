@@ -107,8 +107,11 @@ export class CodexBridgeHttpClient
   async getUsage(
     options: CodexUsageRequestOptions = {},
   ): Promise<CodexUsageResponse> {
+    // A fresh read waits on the upstream usage API (20s budget there).
     const data = await this.fetchJson<CodexUsageResponse>(
       options.fresh ? "/usage?fresh=1" : "/usage",
+      undefined,
+      options.fresh ? 30_000 : undefined,
     );
     return (
       data ?? {

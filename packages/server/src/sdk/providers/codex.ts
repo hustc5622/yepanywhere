@@ -235,6 +235,7 @@ const MODEL_CACHE_TTL_MS = 5 * 60 * 1000;
 // Codex app-server cold start can take a few seconds; give model/list enough
 // time so we use the live list instead of silently dropping to the fallback.
 const MODEL_LIST_TIMEOUT_MS = 15000;
+const BRIDGE_WEBSOCKET_HANDSHAKE_TIMEOUT_MS = 10_000;
 const APP_SERVER_INIT_REQUEST_ID = 1;
 const APP_SERVER_MODEL_LIST_REQUEST_ID = 2;
 const APP_SERVER_SHUTDOWN_GRACE_MS = 1500;
@@ -908,7 +909,10 @@ export class CodexAppServerClient {
   private async connectWebSocket(
     transport: CodexAppServerWebSocketTransport,
   ): Promise<void> {
+    // Bridge side conversations open this socket outside the Supervisor's
+    // session wait, so the handshake needs its own bound.
     const socket = new WebSocket(transport.url, {
+      handshakeTimeout: BRIDGE_WEBSOCKET_HANDSHAKE_TIMEOUT_MS,
       ...(transport.headers ? { headers: transport.headers } : {}),
     });
     this.socket = socket;

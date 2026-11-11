@@ -1,4 +1,5 @@
 import { type Config, loadConfig } from "../config.js";
+import { startEventLoopWatchdog } from "../maintenance/event-loop-watchdog.js";
 import type { BridgeStatusBase, MaybePromise } from "./types.js";
 
 interface SidecarBridge<TStatus extends BridgeStatusBase> {
@@ -20,6 +21,9 @@ export async function runBridgeSidecar<
   describe?(status: TStatus): string;
 }): Promise<void> {
   const config = loadConfig();
+  // The shell's session lists and inbox call this sidecar; a wedged sidecar
+  // is killed and restarted by launchd instead of stalling them.
+  startEventLoopWatchdog(options.name);
   const bridge = options.create(config);
 
   let shuttingDown = false;

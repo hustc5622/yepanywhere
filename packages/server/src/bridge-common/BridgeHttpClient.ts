@@ -9,6 +9,7 @@ import type {
 } from "@yep-anywhere/shared";
 import { ensureRuntimeToken } from "../runtime/token.js";
 import type { SessionSummary } from "../supervisor/types.js";
+import { fetchEventStream, readSseFrames } from "../utils/sse.js";
 import type { EventBus } from "../watcher/index.js";
 import {
   bridgeOwnership,
@@ -32,6 +33,8 @@ export interface BridgeHttpClientOptions {
   authToken?: string;
   /** Existing runtime token file used when no explicit bearer is configured. */
   authTokenFile?: string;
+  requestTimeoutMs?: number;
+  eventStreamIdleTimeoutMs?: number;
 }
 
 /** State remembered between polls to diff lifecycle changes per session. */
@@ -71,6 +74,14 @@ export type BridgePollReason =
 
 const DEFAULT_POLL_INTERVAL_MS = 1_000;
 const EVENT_STREAM_RETRY_MS = 5_000;
+/**
+ * Control calls answer from sidecar memory. Without a bound, a sidecar that
+ * accepts connections but never replies holds every session list, inbox and
+ * poll cycle for undici's 300s default.
+ */
+const DEFAULT_REQUEST_TIMEOUT_MS = 10_000;
+/** Sidecars send a keepalive every 25s; two missed ones mean a lost stream. */
+const DEFAULT_EVENT_STREAM_IDLE_TIMEOUT_MS = 60_000;
 /**
  * Floor between poll cycles. Sidecars debounce their push signal to ~20/s, and
  * each poll costs the sidecar a `/session-views` request plus its upstream
@@ -122,6 +133,8 @@ export abstract class BridgeHttpClient<
   private readonly authTokenFile?: string;
   private authTokenPromise?: Promise<string>;
   private readonly pollIntervalMs: number;
+  private readonly requestTimeoutMs: number;
+  private readonly eventStreamIdleTimeoutMs: number;
   private pollTimer: NodeJS.Timeout | null = null;
   private polling = false;
   private pollQueued = false;
@@ -148,6 +161,10 @@ export abstract class BridgeHttpClient<
     this.authToken = options.authToken?.trim() || undefined;
     this.authTokenFile = options.authTokenFile;
     this.pollIntervalMs = options.pollIntervalMs ?? DEFAULT_POLL_INTERVAL_MS;
+    this.requestTimeoutMs =
+      options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
+    this.eventStreamIdleTimeoutMs =
+      options.eventStreamIdleTimeoutMs ?? DEFAULT_EVENT_STREAM_IDLE_TIMEOUT_MS;
   }
 
   setOwnershipResolver(
@@ -229,32 +246,30 @@ export abstract class BridgeHttpClient<
       while (!abort.signal.aborted) {
         try {
           const authorization = await this.authorizationHeader();
-          const response = await fetch(`${this.baseUrl}/events`, {
-            headers: {
-              accept: "text/event-stream",
-              ...(authorization ? { authorization } : {}),
+          const response = await fetchEventStream(
+            fetch,
+            `${this.baseUrl}/events`,
+            {
+              headers: {
+                accept: "text/event-stream",
+                ...(authorization ? { authorization } : {}),
+              },
+              signal: abort.signal,
             },
-            signal: abort.signal,
-          });
+            this.requestTimeoutMs,
+          );
           if (response.ok && response.body) {
-            const reader = response.body.getReader();
-            const decoder = new TextDecoder();
-            let buffer = "";
-            while (!abort.signal.aborted) {
-              const { done, value } = await reader.read();
-              if (done) break;
-              buffer += decoder
-                .decode(value, { stream: true })
-                .replaceAll("\r\n", "\n");
-              let frameEnd = buffer.indexOf("\n\n");
-              while (frameEnd >= 0) {
-                const frame = buffer.slice(0, frameEnd);
-                buffer = buffer.slice(frameEnd + 2);
+            await readSseFrames(
+              response,
+              abort.signal,
+              (frame) => {
                 const parsed = parseBridgeSseFrame(frame);
                 if (parsed) this.queueChangeSignal(parsed);
-                frameEnd = buffer.indexOf("\n\n");
-              }
-            }
+              },
+              this.eventStreamIdleTimeoutMs,
+            );
+          } else {
+            await response.body?.cancel().catch(() => {});
           }
         } catch {
           // Connection failure - fall through to retry.
@@ -384,14 +399,16 @@ export abstract class BridgeHttpClient<
   protected async fetchJson<T>(
     path: string,
     init?: RequestInit,
+    timeoutMs?: number,
   ): Promise<T | null> {
-    const response = await this.fetchJsonResponse<T>(path, init);
+    const response = await this.fetchJsonResponse<T>(path, init, timeoutMs);
     return response?.data ?? null;
   }
 
   protected async fetchJsonResponse<T>(
     path: string,
     init?: RequestInit,
+    timeoutMs = this.requestTimeoutMs,
   ): Promise<{
     status: number;
     data: T | null;
@@ -400,8 +417,12 @@ export abstract class BridgeHttpClient<
   } | null> {
     try {
       const authorization = await this.authorizationHeader();
+      const timeout = AbortSignal.timeout(timeoutMs);
       const response = await fetch(`${this.baseUrl}${path}`, {
         ...init,
+        signal: init?.signal
+          ? AbortSignal.any([init.signal, timeout])
+          : timeout,
         headers: {
           "content-type": "application/json",
           // Marks main-server traffic so sidecars can avoid proxying failed

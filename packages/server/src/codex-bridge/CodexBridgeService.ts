@@ -301,6 +301,7 @@ const MAX_RESOLVED_SERVER_REQUEST_IDS = 1_000;
 const MAX_COMPLETED_TURN_IDS = 256;
 const CODEX_USAGE_CACHE_TTL_MS = 30_000;
 const INTERNAL_REQUEST_TIMEOUT_MS = 10_000;
+const UPSTREAM_HANDSHAKE_TIMEOUT_MS = 10_000;
 const JOURNAL_SHUTDOWN_FLUSH_TIMEOUT_MS = 2_000;
 const PERSISTED_SESSION_STATE_VERSION = 2;
 
@@ -1312,7 +1313,11 @@ export class CodexBridgeService implements CodexBridgeController {
     ].find((state) => state.url === upstreamUrl);
 
     await new Promise<void>((resolve, reject) => {
-      const upstream = new WebSocket(upstreamUrl);
+      // Bounded so `requestUpstream`, which awaits this before its own
+      // timer starts, cannot hang on a wedged app-server.
+      const upstream = new WebSocket(upstreamUrl, {
+        handshakeTimeout: UPSTREAM_HANDSHAKE_TIMEOUT_MS,
+      });
       connection.upstream = upstream;
 
       upstream.on("open", () => {

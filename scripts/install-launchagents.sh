@@ -500,6 +500,8 @@ write_bridge_plist() {
 
   write_header "$plist" "$BRIDGE_LABEL" "$LOG_DIR/codex-bridge-launchd.out.log" "$LOG_DIR/codex-bridge-launchd.err.log"
   append_env "$plist" "${env_args[@]}"
+  # The sidecar's event-loop watchdog exits by SIGKILL; launchd must restart it.
+  append_server_recovery_policy "$plist"
   append_program_arguments "$plist" "$NODE_BIN" "$CLI_JS" "--codex-bridge-only"
   echo "$plist"
 }
