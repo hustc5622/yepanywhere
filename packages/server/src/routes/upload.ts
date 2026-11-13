@@ -7,8 +7,12 @@ import {
   type UploadErrorMessage,
   type UploadProgressMessage,
   type UploadServerMessage,
+  type UploadSource,
   isSafeGeneratedArtifactFileName,
+  isSafeManagedUploadFileName,
+  isSafeUploadSessionId,
   isUrlProjectId,
+  parseManagedUploadRef,
 } from "@yep-anywhere/shared";
 import type { Context } from "hono";
 import { Hono } from "hono";
@@ -18,8 +22,13 @@ import type { ProjectScanner } from "../projects/scanner.js";
 import {
   GeneratedArtifactAccessError,
   UPLOADS_DIR,
+  UploadCatalog,
+  type UploadCatalogFilter,
   UploadManager,
+  type UploadPage,
   isGeneratedArtifactStorageFilename,
+  mimeTypeForUploadFileName,
+  toPublicUpload,
 } from "../uploads/index.js";
 
 /** Progress update interval in bytes (64KB) */
@@ -37,7 +46,40 @@ export interface UploadDeps {
   /** Test/embedding override; must refer to the same root as uploadManager. */
   uploadsDir?: string;
   uploadManager?: UploadManager;
-  now?: () => number;
+  uploadCatalog?: UploadCatalog;
+}
+
+const UPLOAD_SOURCES = new Set<UploadSource>(["web", "feishu", "generated"]);
+
+/** Parse list filters; `null` means a filter value was malformed. */
+function parseUploadFilter(query: (name: string) => string | undefined): {
+  filter: UploadCatalogFilter;
+  page: UploadPage;
+} | null {
+  const projectId = query("projectId") || undefined;
+  const sessionId = query("sessionId") || undefined;
+  const source = query("source") || undefined;
+  const limit = query("limit");
+  if (
+    (projectId && !isUrlProjectId(projectId)) ||
+    (sessionId && (!projectId || !isSafeUploadSessionId(sessionId))) ||
+    (source && !UPLOAD_SOURCES.has(source as UploadSource)) ||
+    (limit && !/^\d{1,4}$/.test(limit))
+  ) {
+    return null;
+  }
+  return {
+    filter: {
+      projectId,
+      sessionId,
+      source: source as UploadSource | undefined,
+      query: query("q")?.slice(0, 200),
+    },
+    page: {
+      limit: limit ? Number(limit) : undefined,
+      cursor: query("cursor"),
+    },
+  };
 }
 
 export function createUploadRoutes(deps: UploadDeps): Hono {
@@ -49,7 +91,55 @@ export function createUploadRoutes(deps: UploadDeps): Hono {
       uploadsDir,
       maxUploadSizeBytes: deps.maxUploadSizeBytes,
     });
-  const now = deps.now ?? Date.now;
+  const uploadCatalog =
+    deps.uploadCatalog ?? new UploadCatalog({ uploadsDir, uploadManager });
+
+  routes.get("/uploads", async (c) => {
+    const parsed = parseUploadFilter((name) => c.req.query(name));
+    if (!parsed) return c.json({ error: "Invalid upload filter" }, 400);
+    return c.json(await uploadCatalog.list(parsed.filter, parsed.page));
+  });
+
+  routes.get("/uploads/sessions", async (c) => {
+    const parsed = parseUploadFilter((name) => c.req.query(name));
+    if (!parsed || parsed.filter.sessionId) {
+      return c.json({ error: "Invalid upload filter" }, 400);
+    }
+    return c.json(await uploadCatalog.listSessions(parsed.filter, parsed.page));
+  });
+
+  routes.get("/uploads/entry", async (c) => {
+    const ref = c.req.query("ref");
+    if (!parseManagedUploadRef(ref)) {
+      return c.json({ error: "Invalid upload reference" }, 400);
+    }
+    const entry = await uploadCatalog.get(ref as string);
+    if (!entry) return c.json({ error: "Upload not found" }, 404);
+    return c.json({ entry });
+  });
+
+  routes.delete("/uploads", async (c) => {
+    const body = (await c.req.json().catch(() => null)) as {
+      ref?: unknown;
+      confirmed?: unknown;
+    } | null;
+    if (!parseManagedUploadRef(body?.ref)) {
+      return c.json({ error: "Invalid upload reference" }, 400);
+    }
+    const result = await uploadCatalog.remove(body?.ref as string, {
+      confirmed: body?.confirmed === true,
+    });
+    if (result.status === "not_found") {
+      return c.json({ error: "Upload not found" }, 404);
+    }
+    if (result.status === "needs_confirmation") {
+      return c.json(
+        { error: "Upload was sent by a session", entry: result.entry },
+        409,
+      );
+    }
+    return c.json({ removed: true, entry: result.entry });
+  });
 
   const sendMessage = (ws: WSContext, msg: UploadServerMessage) => {
     ws.send(JSON.stringify(msg));
@@ -192,7 +282,7 @@ export function createUploadRoutes(deps: UploadDeps): Hono {
                 const file = await uploadManager.completeUpload(uploadId);
                 const complete: UploadCompleteMessage = {
                   type: "complete",
-                  file,
+                  file: toPublicUpload(file),
                 };
                 sendMessage(ws, complete);
                 currentUploadId = null;
@@ -313,7 +403,7 @@ export function createUploadRoutes(deps: UploadDeps): Hono {
       const fileName = c.req.param("filename") as string;
       if (
         !isUrlProjectId(projectId) ||
-        !isSafeUploadPathSegment(sessionId) ||
+        !isSafeUploadSessionId(sessionId) ||
         !/^ga_[a-f0-9]{32}$/.test(artifactId) ||
         !/^[a-f0-9]{64}$/.test(sha256) ||
         !isSafeGeneratedArtifactFileName(fileName)
@@ -328,7 +418,6 @@ export function createUploadRoutes(deps: UploadDeps): Hono {
             sha256: `sha256:${sha256}`,
             fileName,
           },
-          now(),
         );
         c.header("Content-Type", result.record.mimeType);
         c.header("Content-Length", result.record.sizeBytes.toString());
@@ -350,9 +439,6 @@ export function createUploadRoutes(deps: UploadDeps): Hono {
         return c.body(responseBytes);
       } catch (error) {
         if (error instanceof GeneratedArtifactAccessError) {
-          if (error.code === "EXPIRED") {
-            return c.json({ error: "Artifact expired" }, 410);
-          }
           if (error.code === "INTEGRITY") {
             return c.json({ error: "Artifact integrity check failed" }, 409);
           }
@@ -377,12 +463,12 @@ export function createUploadRoutes(deps: UploadDeps): Hono {
         return c.json({ error: "Invalid project ID" }, 400);
       }
 
-      if (!isSafeUploadPathSegment(sessionId)) {
+      if (!isSafeUploadSessionId(sessionId)) {
         return c.json({ error: "Invalid session ID" }, 400);
       }
 
       // Validate filename - must have UUID prefix format
-      if (!isSafeManagedUploadFilename(filename)) {
+      if (!isSafeManagedUploadFileName(filename)) {
         return c.json({ error: "Invalid filename" }, 400);
       }
       if (isGeneratedArtifactStorageFilename(filename)) {
@@ -445,26 +531,13 @@ export function createUploadRoutes(deps: UploadDeps): Hono {
           await handle.close();
         }
 
-        // Determine content type from filename extension
-        const ext = filename.split(".").pop()?.toLowerCase() ?? "";
-        const mimeTypes: Record<string, string> = {
-          png: "image/png",
-          jpg: "image/jpeg",
-          jpeg: "image/jpeg",
-          gif: "image/gif",
-          webp: "image/webp",
-          pdf: "application/pdf",
-          txt: "text/plain; charset=utf-8",
-          md: "text/markdown; charset=utf-8",
-          csv: "text/csv; charset=utf-8",
-          json: "application/json",
-          docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-          xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-          pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
-          mp4: "video/mp4",
-        };
-        const contentType = mimeTypes[ext] ?? "application/octet-stream";
-        const canPreview = ["png", "jpg", "jpeg", "gif", "webp"].includes(ext);
+        const contentType = mimeTypeForUploadFileName(filename);
+        const canPreview = [
+          "image/png",
+          "image/jpeg",
+          "image/gif",
+          "image/webp",
+        ].includes(contentType);
 
         c.header("Content-Type", contentType);
         c.header("Content-Length", opened.size.toString());
@@ -509,43 +582,6 @@ export function createUploadRoutes(deps: UploadDeps): Hono {
   );
 
   return routes;
-}
-
-function isSafeUploadPathSegment(value: string): boolean {
-  return (
-    value.length > 0 &&
-    value.length <= 256 &&
-    value !== "." &&
-    value !== ".." &&
-    /^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(value)
-  );
-}
-
-function isSafeManagedUploadFilename(value: string): boolean {
-  return (
-    value.length <= 280 &&
-    /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}_/.test(
-      value,
-    ) &&
-    !hasUnsafeUploadPathCharacter(value.slice(37)) &&
-    !value.includes("..")
-  );
-}
-
-function hasUnsafeUploadPathCharacter(value: string): boolean {
-  if (!value) return true;
-  for (const character of value) {
-    const code = character.charCodeAt(0);
-    if (
-      code <= 0x1f ||
-      code === 0x7f ||
-      character === "/" ||
-      character === "\\"
-    ) {
-      return true;
-    }
-  }
-  return false;
 }
 
 function isContainedUploadPath(root: string, candidate: string): boolean {

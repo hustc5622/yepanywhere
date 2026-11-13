@@ -3659,7 +3659,6 @@ process.stdin.on("data", (chunk) => {
             mimeType: artifact.mimeType,
             sizeBytes: artifact.sizeBytes,
             sha256: artifact.sha256,
-            expiresAtMs: Date.parse(artifact.retention.expiresAt),
           },
         );
         expect(Buffer.from(restored.bytes)).toEqual(bytes);

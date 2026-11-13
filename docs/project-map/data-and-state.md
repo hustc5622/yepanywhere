@@ -35,7 +35,8 @@
 | `<dataDir>/codex-events/events.jsonl`，可环境覆盖 | Codex provider 的 `CodexEventIngress` → `CodexEventStore` | canonical projection/transcript；journal mode 决定保留内容，不保证包含所有 delta 或完整前缀 |
 | `<dataDir>/codex-bridge/codex-events.jsonl` 等 bridge 数据 | `CodexBridgeJournal` / `CodexBridgeService` | legacy full journal 可成为 canonical 读取来源；bridge 自身持久化还包括会话观测信息。不要把不同 journal 的 sequence 全局排序 |
 | `<dataDir>/interactions/operations.json` | `InteractionBroker` | 持久化 CAS 状态/操作身份；provider resolver 回调只在内存。重启对 open/answering 的恢复采用 fail closed 处理 |
-| `<dataDir>/uploads/<project>/<session>/...` | `UploadManager`；浏览器上传、Feishu 媒体和生成物走相应入口 | provider prompt 引用、客户端预览；校验路径 containment、大小与上传状态 |
+| `<dataDir>/uploads/<project>/<session>/...` | `UploadManager`；浏览器上传、Feishu 媒体和生成物走相应入口 | 附件身份是受管引用（[upload.ts](../../packages/shared/src/upload.ts) `managedUploadRef`），客户端只持有引用，发送时 `resolveManagedUpload` 再解析成路径；跨会话直接引用原文件，不复制。来源由 `.retention/`（飞书）与 `.generated/`（生成物）判断。所有文件都不自动删除，删除会话也不清理，只能在「文件」页删除 |
+| `<dataDir>/uploads/.usage.jsonl` | `UploadCatalog.recordUse`（发送成功路径） | 「文件」页的「被哪些会话发送过」；只追加、不随回滚减少。文件以目录扫描为准，记录指向已删除的文件时忽略；首行 `since` 之前的旧文件视为被所属会话发送过 |
 | `<dataDir>/session-file-snapshots/` | `SessionFileLifecycle` + `SessionFileStore` | 执行边界 before/after/checkpoint、record 和内容 hash；有 full/partial coverage；不宣称进程级文件归因 |
 | `<dataDir>/session-file-operations/` | provider 文件事件、历史导入 → `SessionFileOperationStore` | 工具操作索引、diff、详情；display 的历史导入也会写派生记录，多来源需要去重 |
 | `<dataDir>/archive/manifest.json` 与归档内容 | `SessionArchiveService.archiveSession/restoreSession` | 文件 provider 移动文件，SQLite provider 更新原库状态；另有 metadata 的 archived 字段，需要协调 |

@@ -232,7 +232,6 @@ export class FeishuReplyManager {
                   mimeType: artifact.mimeType,
                   sizeBytes: artifact.sizeBytes,
                   sha256: artifact.sha256,
-                  expiresAtMs: Date.parse(artifact.retention.expiresAt),
                 },
               );
               const maxBytes =

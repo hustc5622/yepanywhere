@@ -76,6 +76,76 @@ describe("managed upload HTTP delivery", () => {
   });
 });
 
+describe("uploads catalog HTTP API", () => {
+  it("lists uploads, summarizes sessions and looks up one entry", async () => {
+    const context = await createContext();
+    const upload = await context.uploadManager.ingest({
+      projectId: context.projectId,
+      sessionId: context.sessionId,
+      originalName: "shot.png",
+      mimeType: "image/png",
+      stream: chunks(Buffer.from("png")),
+    });
+
+    const list = await context.routes.request(
+      `/uploads?projectId=${context.projectId}&sessionId=${context.sessionId}`,
+    );
+    expect(list.status).toBe(200);
+    expect(await list.json()).toMatchObject({
+      entries: [{ ref: upload.ref, originalName: "shot.png" }],
+      totals: { count: 1 },
+    });
+
+    const sessions = await context.routes.request("/uploads/sessions");
+    expect(await sessions.json()).toMatchObject({
+      sessions: [{ sessionId: context.sessionId, count: 1 }],
+    });
+
+    const entry = await context.routes.request(
+      `/uploads/entry?ref=${encodeURIComponent(upload.ref)}`,
+    );
+    expect(await entry.json()).toMatchObject({ entry: { id: upload.id } });
+  });
+
+  it("rejects malformed filters and references", async () => {
+    const context = await createContext();
+    for (const path of [
+      "/uploads?projectId=..%2F",
+      `/uploads?sessionId=${context.sessionId}`,
+      "/uploads?source=disk",
+      "/uploads/entry?ref=%2Fetc%2Fpasswd",
+    ]) {
+      expect((await context.routes.request(path)).status).toBe(400);
+    }
+  });
+
+  it("asks for confirmation before deleting a sent upload", async () => {
+    const context = await createContext();
+    const upload = await context.uploadManager.ingest({
+      projectId: context.projectId,
+      sessionId: context.sessionId,
+      originalName: "sent.png",
+      mimeType: "image/png",
+      stream: chunks(Buffer.from("png")),
+    });
+    const remove = (confirmed: boolean) =>
+      context.routes.request("/uploads", {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ ref: upload.ref, confirmed }),
+      });
+
+    const pending = await remove(false);
+    expect(pending.status).toBe(409);
+    expect(await pending.json()).toMatchObject({
+      entry: { usedBy: [{ sessionId: context.sessionId }] },
+    });
+    expect((await remove(true)).status).toBe(200);
+    expect((await requestUpload(context, upload.name)).status).toBe(404);
+    expect((await remove(true)).status).toBe(404);
+  });
+});
+
 async function createContext() {
   const root = await mkdtemp(join(tmpdir(), "yep-upload-http-"));
   roots.push(root);

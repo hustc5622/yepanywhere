@@ -42,6 +42,11 @@ const ArchivePage = lazy(() =>
 const FilePage = lazy(() =>
   import("./pages/FilePage").then((module) => ({ default: module.FilePage })),
 );
+const UploadsPage = lazy(() =>
+  import("./pages/UploadsPage").then((module) => ({
+    default: module.UploadsPage,
+  })),
+);
 const GlobalSessionsPage = lazy(() =>
   import("./pages/GlobalSessionsPage").then((module) => ({
     default: module.GlobalSessionsPage,
@@ -178,6 +183,7 @@ const appRoot = (
                   <Route path="/projects" element={<ProjectsPage />} />
                   <Route path="/sessions" element={<GlobalSessionsPage />} />
                   <Route path="/archive" element={<ArchivePage />} />
+                  <Route path="/uploads" element={<UploadsPage />} />
                   <Route path="/search" element={<SearchPage />} />
                   <Route path="/reports" element={<ReportsPage />} />
                   <Route path="/curl" element={<CurlPage />} />

@@ -23,9 +23,25 @@ export interface GeneratedArtifactSource {
   itemId: string;
 }
 
-export interface GeneratedArtifactRetention {
-  policy: "temporary";
-  expiresAt: string;
+/**
+ * Artifacts are kept until the user deletes them. `temporary` only appears in
+ * manifests journaled before expiry was removed; it is no longer enforced.
+ */
+export type GeneratedArtifactRetention =
+  | { policy: "persistent" }
+  | { policy: "temporary"; expiresAt: string };
+
+export function isGeneratedArtifactRetention(
+  value: unknown,
+): value is GeneratedArtifactRetention {
+  if (!value || typeof value !== "object") return false;
+  const retention = value as { policy?: unknown; expiresAt?: unknown };
+  return (
+    retention.policy === "persistent" ||
+    (retention.policy === "temporary" &&
+      typeof retention.expiresAt === "string" &&
+      Number.isFinite(Date.parse(retention.expiresAt)))
+  );
 }
 
 export interface GeneratedArtifactManifest {
@@ -68,6 +84,23 @@ export type GeneratedArtifactBlockReason =
 export interface GeneratedArtifactWarning {
   sourceId: string;
   reason: GeneratedArtifactBlockReason;
+}
+
+/** The canonical, hash-bound route for one registered artifact. */
+export function generatedArtifactDownloadUrl(artifact: {
+  projectId: string;
+  sessionId: string;
+  artifactId: string;
+  sha256: string;
+  fileName: string;
+}): string {
+  return `/api/projects/${encodeURIComponent(
+    artifact.projectId,
+  )}/sessions/${encodeURIComponent(
+    artifact.sessionId,
+  )}/generated-artifact/${artifact.artifactId}/${artifact.sha256.slice(
+    "sha256:".length,
+  )}/${encodeURIComponent(artifact.fileName)}`;
 }
 
 /** Validate the canonical, relative Yep route carried by public manifests. */

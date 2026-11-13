@@ -2804,6 +2804,7 @@ function SessionPageContent({
             editRewindActive={Boolean(editRewind)}
             attachments={attachments}
             onAttach={uploads.attach}
+            onAttachExisting={uploads.attachExisting}
             onRemoveAttachment={(id) => uploads.remove([id])}
             onRestoreAttachment={uploads.restoreFile}
             attachmentOrder={uploads.orderRef.current}

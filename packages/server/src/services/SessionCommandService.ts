@@ -16,8 +16,8 @@ import {
   type ProviderName,
   type SessionCreatedBy,
   type SessionOriginChannel,
+  type StoredUpload,
   type ThinkingOption,
-  type UploadedFile,
   type UrlProjectId,
   isUrlProjectId,
   thinkingOptionToConfig,
@@ -92,6 +92,12 @@ import type {
 } from "../supervisor/Supervisor.js";
 import type { QueuedResponse } from "../supervisor/WorkerQueue.js";
 import type { Project, SessionSummary } from "../supervisor/types.js";
+import { UploadCatalog } from "../uploads/catalog.js";
+import {
+  type ManagedUploadInput,
+  ManagedUploadResolutionError,
+  resolveManagedUpload,
+} from "../uploads/manager.js";
 import {
   isValidSshHostAlias,
   normalizeSshHostAlias,
@@ -122,6 +128,8 @@ export interface SessionCommandServiceDeps {
   mcodeReaderFactory?: (projectPath: string) => McodeSessionReader;
   dshReaderFactory?: (projectPath: string) => DshSessionReader;
   enabledProviders?: readonly string[];
+  /** Uploads root that attachment references resolve against. */
+  uploadsDir?: string;
 }
 
 export interface StartSessionCommandInput {
@@ -209,13 +217,19 @@ export interface SessionCommandOrigin {
   codexEventAccountId?: string;
   /** Trusted, channel-issued MCP configuration; never accepted from a request body. */
   feishuMcpConfig?: FeishuMcpConfig;
+  /**
+   * Attachments a channel adapter produced itself (including derived and
+   * staged copies outside the uploads root). Replaces `body.attachments`.
+   */
+  serverAttachments?: StoredUpload[];
 }
 
 export interface StartSessionBody {
   message: string;
   images?: string[];
   documents?: string[];
-  attachments?: UploadedFile[];
+  /** Managed upload references; the server resolves each to its file. */
+  attachments?: ManagedUploadInput[];
   /** Ordered native Codex skill/mention input items. */
   codexInputs?: CodexStructuredUserInput[];
   mode?: PermissionMode;
@@ -819,6 +833,8 @@ export function normalizeReasoningEffortForProvider(
  * so every caller shares one durable broker and one provider-resolution path.
  */
 export class SessionCommandService {
+  private uploadCatalog: UploadCatalog | undefined;
+
   constructor(private readonly deps: SessionCommandServiceDeps) {}
 
   async start(
@@ -872,6 +888,11 @@ export class SessionCommandService {
     }
     const codexInputsError = validateOptionalCodexInputs(body.codexInputs);
     if (codexInputsError) return commandFailure(codexInputsError, 400);
+    const resolvedAttachments = await this.resolveAttachments(
+      body,
+      input.origin,
+    );
+    if (!resolvedAttachments.ok) return resolvedAttachments.result;
 
     const prepared = this.prepareNewSession(project, body);
     if (!prepared.ok) return prepared.result;
@@ -896,7 +917,7 @@ export class SessionCommandService {
 
     const result = await this.deps.runtimeController.startSession({
       projectPath: project.path,
-      message: this.toUserMessage(body),
+      message: this.toUserMessage(body, resolvedAttachments.attachments),
       permissionMode: body.mode,
       modelSettings: {
         ...prepared.modelSettings,
@@ -922,6 +943,11 @@ export class SessionCommandService {
     });
     await this.persistNewSessionMetadata(result, prepared, body.provider);
     await this.recordSessionOrigin(result.sessionId, project, input.origin);
+    await this.recordAttachmentUse(
+      resolvedAttachments.attachments,
+      project.id,
+      result.sessionId,
+    );
 
     return commandSuccess({
       sessionId: result.sessionId,
@@ -1053,6 +1079,11 @@ export class SessionCommandService {
     }
     const codexInputsError = validateOptionalCodexInputs(body.codexInputs);
     if (codexInputsError) return commandFailure(codexInputsError, 400);
+    const resolvedAttachments = await this.resolveAttachments(
+      body,
+      input.origin,
+    );
+    if (!resolvedAttachments.ok) return resolvedAttachments.result;
     if (body.mode !== undefined && !this.isPermissionMode(body.mode)) {
       return commandFailure("Invalid permission mode", 400);
     }
@@ -1314,7 +1345,13 @@ export class SessionCommandService {
       projectPath: project.path,
       ...(controlAfterResume
         ? {}
-        : { message: this.toUserMessage(body, effectivePermissionMode) }),
+        : {
+            message: this.toUserMessage(
+              body,
+              resolvedAttachments.attachments,
+              effectivePermissionMode,
+            ),
+          }),
       permissionMode: effectivePermissionMode,
       requireImmediate:
         input.requireImmediate ||
@@ -1517,6 +1554,11 @@ export class SessionCommandService {
       sessionId: actualSessionId,
       limits: llmGatewayConfig?.limits,
     });
+    await this.recordAttachmentUse(
+      resolvedAttachments.attachments,
+      resolvedProjectId,
+      actualSessionId,
+    );
     getLogger().info(
       {
         event: "session_resume_process_started",
@@ -1780,12 +1822,26 @@ export class SessionCommandService {
       return commandFailure(parsedReasoningEffort.error, 400);
     }
 
-    const userMessage = this.toUserMessage(body, effectivePermissionMode);
+    const resolvedAttachments = await this.resolveAttachments(
+      body,
+      input.origin,
+    );
+    if (!resolvedAttachments.ok) return resolvedAttachments.result;
+    const userMessage = this.toUserMessage(
+      body,
+      resolvedAttachments.attachments,
+      effectivePermissionMode,
+    );
     if (process.state === "terminated") {
       return commandFailure("Process terminated", 410, {
         reason: process.terminationReason,
       });
     }
+    await this.recordAttachmentUse(
+      resolvedAttachments.attachments,
+      encodeProjectId(process.projectPath),
+      sessionId,
+    );
     if (body.deferred) {
       const deferred = await this.deps.runtimeController.deferMessage(
         sessionId,
@@ -2404,15 +2460,74 @@ export class SessionCommandService {
     };
   }
 
+  /** Attachments are references; resolve them before any process sees one. */
+  private async resolveAttachments(
+    body: StartSessionBody,
+    origin: SessionCommandOrigin | undefined,
+  ): Promise<
+    | { ok: true; attachments: StoredUpload[] | undefined }
+    | { ok: false; result: SessionCommandResult<never> }
+  > {
+    if (origin?.serverAttachments) {
+      return { ok: true, attachments: origin.serverAttachments };
+    }
+    if (body.attachments === undefined) {
+      return { ok: true, attachments: undefined };
+    }
+    if (!Array.isArray(body.attachments)) {
+      return {
+        ok: false,
+        result: commandFailure("Attachments must be an array", 400),
+      };
+    }
+    try {
+      const attachments = await Promise.all(
+        body.attachments.map((attachment) =>
+          resolveManagedUpload(attachment ?? {}, this.deps.uploadsDir),
+        ),
+      );
+      return { ok: true, attachments };
+    } catch (error) {
+      if (error instanceof ManagedUploadResolutionError) {
+        return { ok: false, result: commandFailure(error.message, 400) };
+      }
+      throw error;
+    }
+  }
+
+  /** Feeds the uploads page; a failed record must not fail the send. */
+  private async recordAttachmentUse(
+    attachments: StoredUpload[] | undefined,
+    projectId: string,
+    sessionId: string,
+  ): Promise<void> {
+    if (!attachments?.length) return;
+    this.uploadCatalog ??= new UploadCatalog({
+      uploadsDir: this.deps.uploadsDir,
+    });
+    try {
+      await this.uploadCatalog.recordUse(
+        attachments.map((attachment) => attachment.ref),
+        { projectId, sessionId },
+      );
+    } catch (error) {
+      getLogger().warn(
+        { event: "upload_usage_record_failed", sessionId, err: error },
+        "Failed to record which session sent an upload",
+      );
+    }
+  }
+
   private toUserMessage(
     body: StartSessionBody,
+    attachments: StoredUpload[] | undefined,
     permissionMode: PermissionMode | undefined = body.mode,
   ): UserMessage {
     return {
       text: body.message,
       images: body.images,
       documents: body.documents,
-      attachments: body.attachments,
+      attachments,
       codexInputs: body.codexInputs?.map((input) => ({ ...input })),
       mode: permissionMode,
       tempId: body.tempId,

@@ -156,6 +156,7 @@ export function SideConversationPanel({
       ),
     disabled: ended,
     onAttach: uploads.attach,
+    onAttachExisting: uploads.attachExisting,
     onRemove: uploads.remove,
     onRestore: uploads.restore,
     commandConfigs: NO_COMMANDS,
@@ -231,7 +232,7 @@ export function SideConversationPanel({
     const text = composer.takeText().trim();
     if (!text) return;
     const images = uploads.attachments.map((file) => ({
-      path: file.path,
+      ref: file.ref,
       name: file.originalName,
       mimeType: file.mimeType,
     }));

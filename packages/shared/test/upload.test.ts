@@ -1,5 +1,45 @@
 import { describe, expect, it } from "vitest";
-import { isManagedUploadDownloadUrl } from "../src/upload.js";
+import {
+  isManagedUploadDownloadUrl,
+  managedUploadRef,
+  managedUploadRefFromLegacyPath,
+  parseManagedUploadRef,
+} from "../src/upload.js";
+
+const FILE = "123e4567-e89b-12d3-a456-426614174000_截图.png";
+
+describe("managed upload references", () => {
+  it("round-trips a location through its reference", () => {
+    const location = {
+      projectId: "cHJvamVjdA",
+      sessionId: "session-1",
+      fileName: FILE,
+    };
+    expect(parseManagedUploadRef(managedUploadRef(location))).toEqual(location);
+  });
+
+  it("rejects dot-directory session segments", () => {
+    expect(
+      parseManagedUploadRef(
+        `/api/projects/cHJvamVjdA/sessions/.derived/upload/${encodeURIComponent(FILE)}`,
+      ),
+    ).toBeNull();
+  });
+
+  it("maps legacy absolute upload paths and nothing else", () => {
+    expect(
+      managedUploadRefFromLegacyPath(
+        `/Users/me/.yep-anywhere/uploads/cHJvamVjdA/session-1/${FILE}`,
+      ),
+    ).toBe(
+      `/api/projects/cHJvamVjdA/sessions/session-1/upload/${encodeURIComponent(FILE)}`,
+    );
+    expect(managedUploadRefFromLegacyPath("/etc/passwd")).toBeNull();
+    expect(
+      managedUploadRefFromLegacyPath("relative/uploads/p/s/file.png"),
+    ).toBeNull();
+  });
+});
 
 describe("isManagedUploadDownloadUrl", () => {
   it("accepts a canonical relative managed upload route", () => {

@@ -1,3 +1,4 @@
+import type { UploadedFile } from "@yep-anywhere/shared";
 import {
   type ChangeEvent,
   type ClipboardEvent,
@@ -26,7 +27,12 @@ import {
   readClipboardUserInput,
   writeClipboardUserInput,
 } from "../lib/clipboard";
+import { adoptManagedUpload } from "../lib/managedUploads";
 import { useConnection } from "./useConnection";
+
+function uploadCandidate(upload: UploadedFile): AttachmentCandidate {
+  return { name: upload.originalName, type: upload.mimeType };
+}
 
 interface Options<T> {
   value: string;
@@ -35,6 +41,14 @@ interface Options<T> {
   describeAttachment: (attachment: T) => ComposerAttachment;
   onTextChange: (value: string, cursor: number) => void;
   onAttach?: (files: File[], beforeAttachmentId?: string) => void;
+  /**
+   * Takes uploads already on the server. With it, a pasted Yep copy reuses
+   * each referenced upload; without it, the bytes are read and uploaded again.
+   */
+  onAttachExisting?: (
+    uploads: UploadedFile[],
+    beforeAttachmentId?: string,
+  ) => void;
   onRemove?: (ids: string[]) => void;
   onRestore?: (ids: string[]) => void;
   disabled?: boolean;
@@ -44,9 +58,12 @@ interface Options<T> {
   /** Reads a managed upload referenced by a pasted Yep copy (`/api/...`). */
   fetchClipboardReference?: (apiPath: string) => Promise<Blob>;
   /** Files this composer can take; others are dropped before any token is inserted. */
-  acceptFile?: (file: File) => boolean;
-  onRejectFiles?: (files: File[]) => void;
+  acceptFile?: (file: AttachmentCandidate) => boolean;
+  onRejectFiles?: (files: AttachmentCandidate[]) => void;
 }
+
+/** What `acceptFile` sees of a local file or an existing upload. */
+export type AttachmentCandidate = Pick<File, "name" | "type">;
 
 /**
  * Shared editing rules for new sessions, replies and restored historical
@@ -60,6 +77,7 @@ export function useComposerDocument<T>({
   describeAttachment,
   onTextChange,
   onAttach,
+  onAttachExisting,
   onRemove,
   onRestore,
   disabled = false,
@@ -109,10 +127,22 @@ export function useComposerDocument<T>({
     onTextChange(event.target.value, event.target.selectionStart);
   };
 
-  const attachFiles = (incoming: File[], pastedText = "") => {
+  const attachFiles = (
+    incoming: File[],
+    pastedText = "",
+    incomingUploads: UploadedFile[] = [],
+  ) => {
     if (disabled || !canAttach || !onAttach) return;
     const files = acceptFile ? incoming.filter(acceptFile) : incoming;
-    const rejected = incoming.filter((file) => !files.includes(file));
+    const uploads = acceptFile
+      ? incomingUploads.filter((upload) => acceptFile(uploadCandidate(upload)))
+      : incomingUploads;
+    const rejected: AttachmentCandidate[] = [
+      ...incoming.filter((file) => !files.includes(file)),
+      ...incomingUploads
+        .filter((upload) => !uploads.includes(upload))
+        .map(uploadCandidate),
+    ];
     let copiedText = pastedText;
     if (rejected.length > 0) {
       onRejectFiles?.(rejected);
@@ -121,7 +151,7 @@ export function useComposerDocument<T>({
         copiedText = dropAttachmentTokens(copiedText, file.name, 1);
       }
     }
-    if (files.length === 0 && !copiedText) return;
+    if (files.length === 0 && uploads.length === 0 && !copiedText) return;
     const editor = editorRef.current;
     const currentValue = editor?.value ?? value;
     const start = editor?.selectionStart ?? currentValue.length;
@@ -140,17 +170,22 @@ export function useComposerDocument<T>({
       if (beforeId) onAttach(files, beforeId);
       else onAttach(files);
     }
+    if (uploads.length > 0) onAttachExisting?.(uploads, beforeId);
 
     let nextText = `${currentValue.slice(0, start)}${copiedText}${currentValue.slice(end)}`;
     let cursor = start + copiedText.length;
     const consumed = new Map<string, number>();
-    for (const file of files) {
-      const name = sanitizeAttachmentTokenName(file.name);
+    const attachedNames = [
+      ...files.map((file) => file.name),
+      ...uploads.map((upload) => upload.originalName),
+    ];
+    for (const attachedName of attachedNames) {
+      const name = sanitizeAttachmentTokenName(attachedName);
       const used = consumed.get(name) ?? 0;
       consumed.set(name, used + 1);
       // The rich clipboard's text may already carry these exact tokens.
       if (countAttachmentTokens(copiedText, name) > used) continue;
-      const inserted = insertAttachmentToken(nextText, cursor, file.name);
+      const inserted = insertAttachmentToken(nextText, cursor, attachedName);
       nextText = inserted.text;
       cursor = inserted.cursor;
     }
@@ -177,6 +212,7 @@ export function useComposerDocument<T>({
   /** Restore a Yep rich copy: every attachment, then text without orphans. */
   const restoreCopiedInput = async (copied: ClipboardUserInput) => {
     const files: File[] = [];
+    const uploads: UploadedFile[] = [];
     const failed = [...copied.missingNames];
     const fetchReference =
       fetchClipboardReference ??
@@ -187,6 +223,10 @@ export function useComposerDocument<T>({
         continue;
       }
       try {
+        if (onAttachExisting) {
+          uploads.push(await adoptManagedUpload(entry.path, entry.name));
+          continue;
+        }
         const blob = await fetchReference(entry.path);
         files.push(
           new File([blob], entry.name, { type: blob.type || entry.mimeType }),
@@ -201,15 +241,19 @@ export function useComposerDocument<T>({
       const key = sanitizeAttachmentTokenName(name);
       failedCounts.set(key, (failedCounts.get(key) ?? 0) + 1);
     }
+    const restoredNames = [
+      ...files.map((file) => file.name),
+      ...uploads.map((upload) => upload.originalName),
+    ].map(sanitizeAttachmentTokenName);
     for (const [name, count] of failedCounts) {
-      const restored = files.filter(
-        (file) => sanitizeAttachmentTokenName(file.name) === name,
+      const restored = restoredNames.filter(
+        (restoredName) => restoredName === name,
       ).length;
       const excess = countAttachmentTokens(text, name) - restored;
       if (excess > 0)
         text = dropAttachmentTokens(text, name, Math.min(excess, count));
     }
-    attachFiles(files, text);
+    attachFiles(files, text, uploads);
     reportMissing(failed, "paste");
   };
 

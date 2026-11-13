@@ -58,6 +58,10 @@ import type {
   SessionToolGroupDetailPage,
   SlashCommand,
   ThinkingOption,
+  UploadCatalogEntry,
+  UploadListResponse,
+  UploadSessionListResponse,
+  UploadSource,
   UploadedFile,
   UserQuestionAnswers,
 } from "@yep-anywhere/shared";
@@ -402,6 +406,26 @@ export type CodexStructuredUserInput =
   | { type: "mention"; name: string; path: string };
 
 export type { UploadedFile } from "@yep-anywhere/shared";
+
+export interface UploadListParams {
+  projectId?: string;
+  source?: UploadSource;
+  q?: string;
+  limit?: number;
+  cursor?: string | null;
+}
+
+function uploadListQuery(
+  params: UploadListParams & { sessionId?: string },
+): string {
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(params)) {
+    if (value !== undefined && value !== null && value !== "") {
+      query.set(key, String(value));
+    }
+  }
+  return query.toString();
+}
 
 import { API_BASE } from "../lib/apiPath";
 
@@ -1963,6 +1987,27 @@ export const api = {
 
   getArchivedSessions: () =>
     fetchJSON<ArchiveSessionsResponse>("/archive/sessions"),
+
+  /** Files stored for sessions: uploads, Feishu media and generated output. */
+  listUploads: (params: UploadListParams & { sessionId?: string }) =>
+    fetchJSON<UploadListResponse>(`/uploads?${uploadListQuery(params)}`),
+
+  listUploadSessions: (params: UploadListParams) =>
+    fetchJSON<UploadSessionListResponse>(
+      `/uploads/sessions?${uploadListQuery(params)}`,
+    ),
+
+  getUploadEntry: (ref: string) =>
+    fetchJSON<{ entry: UploadCatalogEntry }>(
+      `/uploads/entry?ref=${encodeURIComponent(ref)}`,
+    ),
+
+  /** A file some session sent is only deleted with `confirmed`. */
+  deleteUpload: (ref: string, confirmed: boolean) =>
+    fetchJSON<{ removed: true; entry: UploadCatalogEntry }>("/uploads", {
+      method: "DELETE",
+      body: JSON.stringify({ ref, confirmed }),
+    }),
 
   getArchivedSession: (sessionId: string) =>
     fetchJSON<ArchiveSessionResponse>(

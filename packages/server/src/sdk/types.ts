@@ -2,7 +2,7 @@
 
 // Re-export PermissionMode from shared
 export type { PermissionMode } from "@yep-anywhere/shared";
-import type { PermissionMode, UploadedFile } from "@yep-anywhere/shared";
+import type { PermissionMode, StoredUpload } from "@yep-anywhere/shared";
 
 export interface ContentBlock {
   type: "text" | "tool_use" | "tool_result" | "image" | "thinking";
@@ -98,7 +98,7 @@ export interface UserMessage {
   images?: string[]; // base64 or file paths
   documents?: string[];
   /** File attachments with paths for agent to access via Read tool */
-  attachments?: UploadedFile[];
+  attachments?: StoredUpload[];
   /** Ordered provider-native Codex skill/mention inputs. */
   codexInputs?: CodexStructuredUserInput[];
   mode?: PermissionMode;
@@ -124,7 +124,7 @@ export interface QueuedUserMessage {
    * MessageQueue only includes this field when explicitly configured so SDKs
    * that validate their input shape do not receive provider-specific metadata.
    */
-  attachments?: UploadedFile[];
+  attachments?: StoredUpload[];
   /** Structured Codex input items, retained only when enabled. */
   codexInputs?: CodexStructuredUserInput[];
   message: {

@@ -8,11 +8,17 @@ const identity = z.string().min(1).max(128);
 
 const SideConversationAttachmentSchema = z
   .object({
-    path: z.string().min(1).max(4096),
+    /** Managed upload reference; the server resolves it to the file. */
+    ref: z.string().min(1).max(2048).optional(),
+    /** Legacy clients sent the server path instead of a reference. */
+    path: z.string().min(1).max(4096).optional(),
     name: z.string().min(1).max(260),
     mimeType: z.string().min(1).max(128),
   })
-  .strict();
+  .strict()
+  .refine((attachment) => attachment.ref || attachment.path, {
+    message: "Attachment reference is required",
+  });
 export type SideConversationAttachment = z.infer<
   typeof SideConversationAttachmentSchema
 >;

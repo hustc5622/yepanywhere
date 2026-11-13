@@ -4,11 +4,12 @@ import { useState } from "react";
 import { beforeEach, describe, expect, it } from "vitest";
 import { useDraftAttachments } from "../useDraftAttachments";
 
+const storedName = "123e4567-e89b-12d3-a456-426614174000_shot.png";
 const file: UploadedFile = {
   id: "file-1",
+  ref: `/api/projects/cA/sessions/s/upload/${storedName}`,
   originalName: "shot.png",
-  name: "uuid_shot.png",
-  path: "/uploads/p/s/uuid_shot.png",
+  name: storedName,
   size: 10,
   mimeType: "image/png",
 };
@@ -42,6 +43,18 @@ describe("useDraftAttachments", () => {
 
     act(() => result.current[1]([]));
     expect(localStorage.getItem("draft-a")).toBeNull();
+  });
+
+  it("migrates drafts saved with a server path to a managed reference", () => {
+    const { ref: _ref, ...legacy } = file;
+    localStorage.setItem(
+      "draft-a",
+      JSON.stringify([
+        { ...legacy, path: `/home/u/.yep-anywhere/uploads/cA/s/${storedName}` },
+      ]),
+    );
+    const { result } = renderHook(() => useDraftAttachments("draft-a"));
+    expect(result.current[0]).toEqual([file]);
   });
 
   it("ignores malformed stored payloads", () => {

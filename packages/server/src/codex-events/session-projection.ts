@@ -5,6 +5,7 @@ import {
   type SessionLastTurnStatus,
   type SessionRetryStatus,
   isGeneratedArtifactDownloadUrl,
+  isGeneratedArtifactRetention,
 } from "@yep-anywhere/shared";
 import {
   type CanonicalCodexError,
@@ -49,8 +50,6 @@ export interface CanonicalCodexSessionOverlayOptions {
   maxEvents?: number;
   /** Registry-validated, path-free manifests from the selected journal only. */
   generatedArtifacts?: readonly GeneratedArtifactManifest[];
-  /** Testable expiry boundary for supplied manifests. */
-  nowMs?: number;
   /** Source id for projection cache keying. Required when projectionCache is used. */
   sourceId?: string;
   /** Optional process-level cache for incremental projection replay. */
@@ -272,7 +271,6 @@ export function overlayCanonicalCodexSessionMessages(
     projection,
     sortedEvents,
     options.generatedArtifacts ?? [],
-    options.nowMs ?? Date.now(),
     options.maxCandidateCount,
     checkBudget,
   );
@@ -475,17 +473,14 @@ function buildCanonicalMessageCandidates(
   projection: CanonicalCodexSessionState,
   events: readonly CodexEventEnvelope[],
   generatedArtifacts: readonly GeneratedArtifactManifest[],
-  nowMs: number,
   maxCandidateCount?: number,
   checkBudget?: () => void,
 ): CanonicalMessageCandidate[] {
   const eventBySequence = new Map(
     events.map((event) => [event.sequence, event] as const),
   );
-  const artifactsBySource = indexReplayableGeneratedArtifacts(
-    generatedArtifacts,
-    nowMs,
-  );
+  const artifactsBySource =
+    indexReplayableGeneratedArtifacts(generatedArtifacts);
   const candidates: CanonicalMessageCandidate[] = [];
 
   const minCandidateSequence = deriveCandidateWindowStart(
@@ -1586,13 +1581,11 @@ function attachCanonicalItem(
 
 function indexReplayableGeneratedArtifacts(
   artifacts: readonly GeneratedArtifactManifest[],
-  nowMs: number,
 ): Map<string, GeneratedArtifactManifest[]> {
-  if (!Number.isSafeInteger(nowMs)) return new Map();
   const bySource = new Map<string, GeneratedArtifactManifest[]>();
   const seenIds = new Set<string>();
   for (const artifact of artifacts) {
-    if (!isSafeReplayableGeneratedArtifact(artifact, nowMs)) continue;
+    if (!isSafeReplayableGeneratedArtifact(artifact)) continue;
     if (seenIds.has(artifact.id)) continue;
     seenIds.add(artifact.id);
     const key = generatedArtifactSourceKey(
@@ -1609,9 +1602,7 @@ function indexReplayableGeneratedArtifacts(
 
 function isSafeReplayableGeneratedArtifact(
   artifact: GeneratedArtifactManifest,
-  nowMs: number,
 ): boolean {
-  const expiresAtMs = Date.parse(artifact.retention?.expiresAt ?? "");
   return (
     artifact.schemaVersion === 1 &&
     /^ga_[a-f0-9]{32}$/.test(artifact.id) &&
@@ -1631,9 +1622,7 @@ function isSafeReplayableGeneratedArtifact(
     SAFE_IDENTITY.test(artifact.source.threadId) &&
     SAFE_IDENTITY.test(artifact.source.turnId) &&
     SAFE_IDENTITY.test(artifact.source.itemId) &&
-    artifact.retention?.policy === "temporary" &&
-    Number.isSafeInteger(expiresAtMs) &&
-    expiresAtMs > nowMs &&
+    isGeneratedArtifactRetention(artifact.retention) &&
     isGeneratedArtifactDownloadUrl(artifact.downloadUrl) &&
     (artifact.previewUrl === undefined ||
       (artifact.kind === "image" &&

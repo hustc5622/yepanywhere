@@ -156,13 +156,15 @@ export function useSideConversation(
         current = result?.conversation;
         if (!current || current.status !== "idle") return false;
       }
-      const attachmentKey = attachments.map((a) => a.path).join("\u0000");
+      const attachmentKey = attachments
+        .map((a) => a.ref ?? a.path)
+        .join("\u0000");
       if (
         !pendingSend.current ||
         pendingSend.current.id !== current.id ||
         pendingSend.current.text !== text ||
         (pendingSend.current.attachments ?? [])
-          .map((a) => a.path)
+          .map((a) => a.ref ?? a.path)
           .join("\u0000") !== attachmentKey
       )
         pendingSend.current = {

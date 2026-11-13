@@ -1,4 +1,8 @@
-import type { UploadedFile } from "@yep-anywhere/shared";
+import {
+  type UploadedFile,
+  isManagedUploadDownloadUrl,
+  managedUploadRefFromLegacyPath,
+} from "@yep-anywhere/shared";
 import {
   type Dispatch,
   type SetStateAction,
@@ -20,23 +24,42 @@ function readStored(key: string): UploadedFile[] {
     if (!raw) return [];
     const parsed: unknown = JSON.parse(raw);
     if (!Array.isArray(parsed)) return [];
-    return parsed.filter(isUploadedFile);
+    return parsed.flatMap((value) => {
+      const file = toUploadedFile(value);
+      return file ? [file] : [];
+    });
   } catch {
     return [];
   }
 }
 
-function isUploadedFile(value: unknown): value is UploadedFile {
-  if (!value || typeof value !== "object") return false;
-  const file = value as Partial<UploadedFile>;
-  return (
-    typeof file.id === "string" &&
-    typeof file.originalName === "string" &&
-    typeof file.name === "string" &&
-    typeof file.path === "string" &&
-    typeof file.size === "number" &&
-    typeof file.mimeType === "string"
-  );
+/** Drafts saved before uploads had a `ref` carry the server path instead. */
+function toUploadedFile(value: unknown): UploadedFile | null {
+  if (!value || typeof value !== "object") return null;
+  const file = value as Partial<UploadedFile> & { path?: unknown };
+  const ref = isManagedUploadDownloadUrl(file.ref)
+    ? file.ref
+    : typeof file.path === "string"
+      ? managedUploadRefFromLegacyPath(file.path)
+      : null;
+  if (
+    !ref ||
+    typeof file.id !== "string" ||
+    typeof file.originalName !== "string" ||
+    typeof file.name !== "string" ||
+    typeof file.size !== "number" ||
+    typeof file.mimeType !== "string"
+  ) {
+    return null;
+  }
+  return {
+    id: file.id,
+    ref,
+    originalName: file.originalName,
+    name: file.name,
+    size: file.size,
+    mimeType: file.mimeType,
+  };
 }
 
 function writeStored(key: string, files: UploadedFile[]): void {

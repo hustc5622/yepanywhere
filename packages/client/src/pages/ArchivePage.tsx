@@ -9,6 +9,7 @@ import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
 import { useI18n } from "../i18n";
 import { useNavigationLayout } from "../layouts";
 import { formatSmartTime } from "../lib/datetime";
+import { formatBytes } from "../lib/formatBytes";
 
 function getArchivedSessionTitle(session: ArchivedSessionRecord): string {
   return session.title ?? session.fullTitle ?? session.sessionId;
@@ -17,15 +18,6 @@ function getArchivedSessionTitle(session: ArchivedSessionRecord): string {
 function getProjectLabel(projectPath: string): string {
   const normalized = projectPath.replace(/\/+$/, "");
   return normalized.split("/").pop() || normalized || projectPath;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  if (bytes < 1024 * 1024 * 1024) {
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-  }
-  return `${(bytes / (1024 * 1024 * 1024)).toFixed(1)} GB`;
 }
 
 function getArchivedSessionSize(session: ArchivedSessionRecord): number {

@@ -52,7 +52,7 @@ beforeEach(() => {
       originalName: file.name,
       mimeType: file.type,
       size: file.size,
-      path: `/tmp/${file.name}`,
+      ref: `/api/projects/cA/sessions/s/upload/x_${file.name}`,
     }),
   );
   vi.stubGlobal(

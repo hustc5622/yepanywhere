@@ -9,6 +9,7 @@ import {
   sanitizeAttachmentTokenName,
 } from "./attachmentTokens";
 import type { Connection } from "./connection/types";
+import { adoptManagedUpload } from "./managedUploads";
 import type { UploadedFileInfo } from "./parseUserPrompt";
 import { type EditableUserPrompt, getUploadUrl } from "./userPromptContent";
 
@@ -93,17 +94,25 @@ export async function readPromptAttachment(
   throw new Error(`Attachment unavailable: ${attachment.originalName}`);
 }
 
-/** Restore a complete editable document before replacing the current draft. */
+/**
+ * Restore a complete editable document before replacing the current draft.
+ * Managed uploads are reused as they are; only provider-native images are
+ * read back and uploaded.
+ */
 export async function restorePromptAttachments(
   prompt: EditableUserPrompt,
   connection: Pick<Connection, "fetchBlob" | "upload">,
   projectId: string,
   sessionId: string,
 ): Promise<{ text: string; attachments: UploadedFile[] }> {
-  // Read every source before uploading. A missing image must fail the whole
-  // restoration, rather than let a seemingly valid text-only edit be sent.
-  const files = await Promise.all(
-    prompt.attachments.map(async (attachment) => {
+  // Resolve every source before uploading. A missing image must fail the
+  // whole restoration, rather than let a seemingly valid text-only edit be sent.
+  const sources = await Promise.all(
+    prompt.attachments.map(async (attachment): Promise<UploadedFile | File> => {
+      const managedRef = getUploadUrl(attachment.path);
+      if (managedRef) {
+        return adoptManagedUpload(managedRef, attachment.originalName);
+      }
       const blob = await readPromptAttachment(attachment, connection);
       if (
         blob.size === 0 &&
@@ -118,7 +127,11 @@ export async function restorePromptAttachments(
     }),
   );
   const attachments = await Promise.all(
-    files.map((file) => connection.upload(projectId, sessionId, file)),
+    sources.map((source) =>
+      source instanceof File
+        ? connection.upload(projectId, sessionId, source)
+        : source,
+    ),
   );
 
   let text = prompt.text;

@@ -2,12 +2,23 @@ export {
   UploadManager,
   UploadContainerError,
   GeneratedArtifactAccessError,
+  ManagedUploadResolutionError,
   isGeneratedArtifactStorageFilename,
+  mimeTypeForUploadFileName,
+  resolveManagedUpload,
   sanitizeFilename,
   getUploadDir,
+  toPublicUpload,
   UPLOADS_DIR,
 } from "./manager.js";
 export { SafeAttachmentExtractor } from "./attachment-extractor.js";
+export { UploadCatalog } from "./catalog.js";
+export type {
+  UploadCatalogFilter,
+  UploadCatalogOptions,
+  UploadPage,
+  UploadRemoveResult,
+} from "./catalog.js";
 export type {
   AttachmentArtifactWriteInput,
   AttachmentArtifactWriter,
@@ -23,7 +34,6 @@ export type {
   SafeAttachmentExtractorOptions,
 } from "./attachment-extractor.js";
 export {
-  GENERATED_ARTIFACT_RETENTION_MS,
   MAX_GENERATED_ARTIFACT_BYTES,
   MAX_GENERATED_ARTIFACTS_PER_TASK,
   MAX_INLINE_GENERATED_IMAGE_BYTES,
@@ -37,11 +47,11 @@ export type {
   GeneratedArtifactMaterializerOptions,
 } from "./generated-artifact.js";
 export type {
-  AttachmentRetentionCleanupResult,
   AttachmentStorageScope,
   DerivedUploadArtifact,
   DerivedUploadArtifactInput,
   IngestUploadInput,
+  ManagedUploadInput,
   GeneratedArtifactReadExpectation,
   GeneratedArtifactReadResult,
   GeneratedArtifactReplayEvent,

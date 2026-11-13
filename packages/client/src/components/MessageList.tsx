@@ -1189,7 +1189,7 @@ export const MessageList = memo(function MessageList({
         const deferredFiles = (row.deferred.attachments ?? []).map((file) => ({
           originalName: file.originalName,
           mimeType: file.mimeType,
-          path: file.path,
+          path: file.ref,
           size: formatFileSize(file.size),
         }));
         // Files referenced by an inline token render inside the text itself.

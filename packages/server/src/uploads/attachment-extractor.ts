@@ -1,5 +1,5 @@
 import { inflateRawSync, inflateSync } from "node:zlib";
-import type { UploadedFile } from "@yep-anywhere/shared";
+import type { StoredUpload } from "@yep-anywhere/shared";
 
 const DEFAULT_MAX_INPUT_BYTES = 64 * 1024 * 1024;
 const DEFAULT_MAX_ARTIFACT_BYTES = 2 * 1024 * 1024;
@@ -67,7 +67,7 @@ export interface AttachmentExtractionArtifact {
 export interface AttachmentArtifactWriteInput {
   projectId: string;
   sessionId: string;
-  source: UploadedFile;
+  source: StoredUpload;
   kind: AttachmentExtractionArtifact["kind"];
   label: string;
   mime: string;
@@ -92,7 +92,7 @@ export interface AttachmentArtifactWriter {
 export interface AttachmentExtractionInput {
   projectId: string;
   sessionId: string;
-  attachment: UploadedFile;
+  attachment: StoredUpload;
   localPathRef: string;
 }
 

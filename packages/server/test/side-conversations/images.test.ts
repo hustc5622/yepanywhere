@@ -18,12 +18,14 @@ describe("side conversation images", () => {
   let root: string;
   let uploads: string;
   let image: string;
+  const imageName = "123e4567-e89b-12d3-a456-426614174000_shot.png";
+  const imageRef = `/api/projects/cHJvamVjdA/sessions/session/upload/${imageName}`;
 
   beforeEach(async () => {
     root = join(tmpdir(), `side-images-${randomUUID()}`);
     uploads = join(root, "uploads");
-    await mkdir(join(uploads, "project", "session"), { recursive: true });
-    image = join(uploads, "project", "session", "shot.png");
+    await mkdir(join(uploads, "cHJvamVjdA", "session"), { recursive: true });
+    image = join(uploads, "cHJvamVjdA", "session", imageName);
     await writeFile(image, "png-bytes");
     await writeFile(join(root, "outside.png"), "secret");
   });
@@ -35,16 +37,22 @@ describe("side conversation images", () => {
   it("accepts only image uploads inside the uploads directory", async () => {
     await expect(
       resolveSideImages(
-        [{ path: image, name: "shot.png", mimeType: "IMAGE/PNG" }],
+        [{ ref: imageRef, name: "shot.png", mimeType: "IMAGE/PNG" }],
         uploads,
       ),
     ).resolves.toEqual([
       {
-        path: expect.stringContaining("shot.png"),
+        path: expect.stringContaining(imageName),
         name: "shot.png",
         mimeType: "image/png",
       },
     ]);
+    await expect(
+      resolveSideImages(
+        [{ path: image, name: "shot.png", mimeType: "image/png" }],
+        uploads,
+      ),
+    ).resolves.toHaveLength(1);
     await expect(
       resolveSideImages(
         [

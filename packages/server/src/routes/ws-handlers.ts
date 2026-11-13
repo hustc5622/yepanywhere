@@ -38,7 +38,7 @@ import type {
 } from "../services/index.js";
 import { createActivitySubscription } from "../subscriptions.js";
 import type { TerminalService } from "../terminal/TerminalService.js";
-import type { UploadManager } from "../uploads/manager.js";
+import { type UploadManager, toPublicUpload } from "../uploads/manager.js";
 import type { EventBus, FocusedSessionWatchManager } from "../watcher/index.js";
 import {
   decodeFrameToParsedMessage,
@@ -876,7 +876,7 @@ export async function handleUploadEnd(
   try {
     const file = await uploadManager.completeUpload(state.serverUploadId);
     uploads.delete(uploadId);
-    send({ type: "upload_complete", uploadId, file });
+    send({ type: "upload_complete", uploadId, file: toPublicUpload(file) });
     getLogger().debug(`[WS] Upload complete: ${uploadId} (${file.size} bytes)`);
   } catch (err) {
     const message =

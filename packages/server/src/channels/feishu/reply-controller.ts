@@ -5,7 +5,10 @@ import type {
   GeneratedArtifactManifest,
   GeneratedArtifactWarning,
 } from "@yep-anywhere/shared";
-import { isGeneratedArtifactDownloadUrl } from "@yep-anywhere/shared";
+import {
+  isGeneratedArtifactDownloadUrl,
+  isGeneratedArtifactRetention,
+} from "@yep-anywhere/shared";
 import {
   extractTextDelta,
   extractTextForFinalRender,
@@ -1509,10 +1512,6 @@ function managedArtifacts(value: unknown): GeneratedArtifactManifest[] {
     const kind = artifact?.kind;
     const sizeBytes = artifact?.sizeBytes;
     const sha256 = artifact?.sha256;
-    const expiresAtMs =
-      typeof retention?.expiresAt === "string"
-        ? Date.parse(retention.expiresAt)
-        : Number.NaN;
     if (
       artifact?.schemaVersion !== 1 ||
       typeof artifact.id !== "string" ||
@@ -1545,10 +1544,7 @@ function managedArtifacts(value: unknown): GeneratedArtifactManifest[] {
       typeof source.threadId !== "string" ||
       typeof source.turnId !== "string" ||
       typeof source.itemId !== "string" ||
-      retention?.policy !== "temporary" ||
-      typeof retention.expiresAt !== "string" ||
-      !Number.isFinite(expiresAtMs) ||
-      expiresAtMs <= Date.now() ||
+      !isGeneratedArtifactRetention(retention) ||
       typeof artifact.downloadUrl !== "string" ||
       !isGeneratedArtifactDownloadUrl(artifact.downloadUrl) ||
       !artifact.downloadUrl.endsWith(
@@ -1580,10 +1576,7 @@ function managedArtifacts(value: unknown): GeneratedArtifactManifest[] {
           turnId: source.turnId,
           itemId: source.itemId,
         },
-        retention: {
-          policy: "temporary",
-          expiresAt: retention.expiresAt,
-        },
+        retention: structuredClone(retention),
         downloadUrl: artifact.downloadUrl,
         ...(typeof artifact.previewUrl === "string"
           ? { previewUrl: artifact.previewUrl }

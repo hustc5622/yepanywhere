@@ -259,6 +259,7 @@ export const SessionComposer = memo(function SessionComposer({
   editRewindActive,
   attachments,
   onAttach,
+  onAttachExisting,
   onRemoveAttachment,
   onRestoreAttachment,
   attachmentOrder,
@@ -312,6 +313,10 @@ export const SessionComposer = memo(function SessionComposer({
   editRewindActive: boolean;
   attachments: UploadedFile[];
   onAttach?: (files: File[], beforeAttachmentId?: string) => void;
+  onAttachExisting?: (
+    files: UploadedFile[],
+    beforeAttachmentId?: string,
+  ) => void;
   onRemoveAttachment: (id: string) => void;
   onRestoreAttachment: (file: UploadedFile) => void;
   attachmentOrder: string[];
@@ -533,6 +538,7 @@ export const SessionComposer = memo(function SessionComposer({
             sessionId={sessionId}
             attachments={attachments}
             onAttach={onAttach}
+            onAttachExisting={onAttachExisting}
             onRemoveAttachment={onRemoveAttachment}
             onRestoreAttachment={onRestoreAttachment}
             attachmentOrder={attachmentOrder}

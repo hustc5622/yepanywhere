@@ -13,7 +13,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { basename, extname, join, resolve, sep } from "node:path";
-import type { UploadedFile } from "@yep-anywhere/shared";
+import type { StoredUpload } from "@yep-anywhere/shared";
 import {
   type AttachmentExtractionArtifact,
   type AttachmentExtractionFailureCode,
@@ -32,7 +32,6 @@ import type {
 
 const DEFAULT_MAX_FILE_BYTES = 30 * 1024 * 1024;
 const DEFAULT_MAX_MESSAGE_BYTES = 100 * 1024 * 1024;
-const DEFAULT_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_CLEANUP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 const DEFAULT_AUDIO_STAGING_RETENTION_MS = 24 * 60 * 60 * 1000;
 const DEFAULT_AUDIO_STAGING_DIRECTORY = "yep-feishu-audio-staging";
@@ -43,7 +42,6 @@ export interface FeishuMediaDownloaderOptions {
   extractor?: AttachmentExtractor;
   maxFileBytes?: number;
   maxMessageBytes?: number;
-  retentionMs?: number;
   /** Override only for isolated tests; production uses the process temp root. */
   audioStagingRoot?: string;
   audioStagingRetentionMs?: number;
@@ -82,7 +80,7 @@ export interface FeishuMediaDownloadFailure {
 }
 
 export interface FeishuMediaDownloadResult {
-  attachments: UploadedFile[];
+  attachments: StoredUpload[];
   manifests: FeishuAttachmentManifest[];
   failures: FeishuMediaDownloadFailure[];
 }
@@ -92,7 +90,6 @@ export class FeishuMediaDownloader {
   private readonly extractor: AttachmentExtractor;
   private readonly maxFileBytes: number;
   private readonly maxMessageBytes: number;
-  private readonly retentionMs: number;
   private readonly audioStagingRoot: string;
   private readonly audioStagingRetentionMs: number;
   private readonly audioStagingByTask = new Map<string, Map<string, number>>();
@@ -108,16 +105,12 @@ export class FeishuMediaDownloader {
       new SafeAttachmentExtractor({ artifactWriter: options.uploadManager });
     this.maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
     this.maxMessageBytes = options.maxMessageBytes ?? DEFAULT_MAX_MESSAGE_BYTES;
-    this.retentionMs = options.retentionMs ?? DEFAULT_RETENTION_MS;
     this.audioStagingRoot = resolve(
       options.audioStagingRoot ??
         join(tmpdir(), DEFAULT_AUDIO_STAGING_DIRECTORY),
     );
     this.audioStagingRetentionMs =
       options.audioStagingRetentionMs ?? DEFAULT_AUDIO_STAGING_RETENTION_MS;
-    if (!Number.isSafeInteger(this.retentionMs) || this.retentionMs <= 0) {
-      throw new Error("Invalid Feishu attachment retention duration");
-    }
     if (
       !Number.isSafeInteger(this.audioStagingRetentionMs) ||
       this.audioStagingRetentionMs <= 0
@@ -132,7 +125,7 @@ export class FeishuMediaDownloader {
     if (input.resources.length > 0) {
       await this.startRetentionCleanup();
     }
-    const attachments: UploadedFile[] = [];
+    const attachments: StoredUpload[] = [];
     const manifests: FeishuAttachmentManifest[] = [];
     const failures: FeishuMediaDownloadFailure[] = [];
     let totalBytes = 0;
@@ -261,7 +254,7 @@ export class FeishuMediaDownloader {
             );
             // The opaque refs remain the only paths serialized in the
             // canonical manifest. Absolute paths cross only the internal
-            // UploadedFile boundary so MessageQueue can give Codex a readable
+            // StoredUpload boundary so MessageQueue can give Codex a readable
             // file; they are never copied into Feishu output.
             attachments.push(forwardedAttachment, ...derivedAttachments);
           } catch {
@@ -320,7 +313,6 @@ export class FeishuMediaDownloader {
             taskId: input.taskId,
           },
           attachmentIds,
-          Date.now() + this.retentionMs,
         );
       } catch {
         await this.uploadManager
@@ -386,7 +378,6 @@ export class FeishuMediaDownloader {
     if (this.cleanupInFlight) return;
     this.cleanupInFlight = true;
     try {
-      await this.uploadManager.cleanupExpiredTaskAttachments({ limit: 100 });
       await this.cleanupExpiredAudioStaging();
     } catch {
       // A later sweep retries. Raw filesystem errors must not reach channel output.
@@ -409,8 +400,8 @@ export class FeishuMediaDownloader {
 
   private async stageAudioAttachment(
     taskId: string,
-    attachment: UploadedFile,
-  ): Promise<UploadedFile> {
+    attachment: StoredUpload,
+  ): Promise<StoredUpload> {
     const stagingRoot = await this.ensureAudioStagingRoot();
     const directory = await mkdtemp(join(stagingRoot, AUDIO_STAGING_PREFIX));
     try {
@@ -495,10 +486,10 @@ export class FeishuMediaDownloader {
 
   private async resolveDerivedAttachment(
     input: Pick<FeishuMediaDownloadInput, "projectId" | "sessionId">,
-    source: UploadedFile,
+    source: StoredUpload,
     artifact: AttachmentExtractionArtifact,
     index: number,
-  ): Promise<UploadedFile> {
+  ): Promise<StoredUpload> {
     const path = await this.uploadManager.resolveTaskPathRef(
       { projectId: input.projectId, sessionId: input.sessionId },
       artifact.pathRef,
@@ -511,6 +502,7 @@ export class FeishuMediaDownloader {
           : "archive-index.txt";
     return {
       id: `${source.id}-artifact-${index + 1}`,
+      ref: source.ref,
       originalName: `${source.originalName}.${label}`,
       name: basename(path),
       path,

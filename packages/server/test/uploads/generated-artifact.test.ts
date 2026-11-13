@@ -62,7 +62,7 @@ describe("GeneratedArtifactMaterializer", () => {
         turnId: "turn-1",
         itemId: "file-item-1",
       },
-      retention: { policy: "temporary" },
+      retention: { policy: "persistent" },
     });
     const serialized = JSON.stringify(first);
     expect(serialized).not.toContain(context.workspace);
@@ -82,7 +82,6 @@ describe("GeneratedArtifactMaterializer", () => {
         mimeType: artifact.mimeType,
         sizeBytes: artifact.sizeBytes,
         sha256: artifact.sha256,
-        expiresAtMs: Date.parse(artifact.retention.expiresAt),
       },
     );
     expect(Buffer.from(restored.bytes)).toEqual(bytes);
@@ -129,10 +128,9 @@ describe("GeneratedArtifactMaterializer", () => {
     expect(result).toEqual({ artifacts: [], warnings: [] });
   });
 
-  it("rebuilds only source-bound, unexpired, integrity-checked manifests after restart", async () => {
+  it("rebuilds only source-bound, integrity-checked manifests after restart", async () => {
     const context = await createContext({
       now: () => 1_000,
-      retentionMs: 1_000,
     });
     await writeFile(join(context.workspace, "restart.txt"), "safe restart\n");
     const live = await context.materializer.materialize(
@@ -160,7 +158,6 @@ describe("GeneratedArtifactMaterializer", () => {
           sessionId: context.grant.sessionId,
         },
         [selectedEvent],
-        1_500,
       ),
     ).resolves.toEqual(live.artifacts);
     await expect(
@@ -170,17 +167,6 @@ describe("GeneratedArtifactMaterializer", () => {
           sessionId: context.grant.sessionId,
         },
         [{ ...selectedEvent, eventId: "bridge-connection:1" }],
-        1_500,
-      ),
-    ).resolves.toEqual([]);
-    await expect(
-      reopenedManager.listReplayableGeneratedArtifacts(
-        {
-          projectId: context.grant.projectId,
-          sessionId: context.grant.sessionId,
-        },
-        [selectedEvent],
-        2_001,
       ),
     ).resolves.toEqual([]);
 
@@ -199,7 +185,6 @@ describe("GeneratedArtifactMaterializer", () => {
           sessionId: context.grant.sessionId,
         },
         [selectedEvent],
-        1_500,
       ),
     ).resolves.toEqual([]);
 
@@ -220,7 +205,6 @@ describe("GeneratedArtifactMaterializer", () => {
           sessionId: context.grant.sessionId,
         },
         [selectedEvent],
-        1_500,
       ),
     ).resolves.toEqual([]);
   });
@@ -452,10 +436,9 @@ describe("GeneratedArtifactMaterializer", () => {
     expect(result.artifacts).toHaveLength(1);
   });
 
-  it("fails closed when generated registry/retention is missing, expired, or same-size bytes change", async () => {
+  it("fails closed when generated registry/retention is missing or same-size bytes change", async () => {
     const context = await createContext({
       now: () => 1_000,
-      retentionMs: 1_000,
     });
     await writeFile(join(context.workspace, "result.txt"), "safe-output\n");
     const materialized = await context.materializer.materialize(
@@ -471,7 +454,6 @@ describe("GeneratedArtifactMaterializer", () => {
       mimeType: artifact.mimeType,
       sizeBytes: artifact.sizeBytes,
       sha256: artifact.sha256,
-      expiresAtMs: Date.parse(artifact.retention.expiresAt),
     };
 
     await expect(
@@ -481,7 +463,6 @@ describe("GeneratedArtifactMaterializer", () => {
           sessionId: context.grant.sessionId,
         },
         expectation,
-        1_500,
       ),
     ).resolves.toMatchObject({ bytes: Buffer.from("safe-output\n") });
     await expect(
@@ -491,7 +472,6 @@ describe("GeneratedArtifactMaterializer", () => {
           sessionId: context.grant.sessionId,
         },
         { ...expectation, mimeType: "application/json" },
-        1_500,
       ),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
 
@@ -510,21 +490,9 @@ describe("GeneratedArtifactMaterializer", () => {
           sessionId: context.grant.sessionId,
         },
         expectation,
-        1_500,
       ),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
     await rename(`${registryPath}.missing`, registryPath);
-
-    await expect(
-      context.uploadManager.readGeneratedArtifactBytes(
-        {
-          projectId: context.grant.projectId,
-          sessionId: context.grant.sessionId,
-        },
-        expectation,
-        2_001,
-      ),
-    ).rejects.toMatchObject({ code: "EXPIRED" });
 
     const managedPath = await context.uploadManager.resolveTaskPathRef(
       {
@@ -541,7 +509,6 @@ describe("GeneratedArtifactMaterializer", () => {
           sessionId: context.grant.sessionId,
         },
         expectation,
-        1_500,
       ),
     ).rejects.toMatchObject({ code: "INTEGRITY" });
 
@@ -562,7 +529,6 @@ describe("GeneratedArtifactMaterializer", () => {
           sessionId: context.grant.sessionId,
         },
         expectation,
-        1_500,
       ),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
   });
@@ -609,9 +575,7 @@ describe("GeneratedArtifactMaterializer", () => {
           mimeType: artifact.mimeType,
           sizeBytes: artifact.sizeBytes,
           sha256: artifact.sha256,
-          expiresAtMs: Date.parse(artifact.retention.expiresAt),
         },
-        1_500,
       ),
     ).rejects.toMatchObject({ code: "NOT_FOUND" });
   });

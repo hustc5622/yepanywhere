@@ -1062,6 +1062,35 @@ describe("SessionCommandService runtime boundary", () => {
     expect(queueMessage).not.toHaveBeenCalled();
   });
 
+  it("rejects attachments that do not name a managed upload", async () => {
+    const queueMessage = vi.fn();
+    const service = createService({
+      getProcessSnapshotForSession: vi.fn(async () => processSnapshot()),
+      queueMessage,
+    });
+
+    await expect(
+      service.queue({
+        sessionId: "session-1",
+        body: {
+          message: "read this",
+          attachments: [
+            {
+              path: "/etc/passwd",
+              originalName: "passwd",
+              mimeType: "text/plain",
+            },
+          ],
+        },
+      }),
+    ).resolves.toMatchObject({
+      ok: false,
+      status: 400,
+      body: { error: "Attachment is not a managed upload" },
+    });
+    expect(queueMessage).not.toHaveBeenCalled();
+  });
+
   it("fails closed when an external send cannot resume immediately", async () => {
     const projectPath = mkdtempSync(join(tmpdir(), "session-command-send-"));
     try {
@@ -1387,6 +1416,7 @@ describe("SessionCommandService runtime boundary", () => {
       });
       const attachment = {
         id: "123e4567-e89b-12d3-a456-426614174000",
+        ref: "/api/projects/p/sessions/s/upload/123e4567-e89b-12d3-a456-426614174000_screen.png",
         originalName: "screen.png",
         name: "screen.png",
         path: join(projectPath, "screen.png"),
@@ -1399,10 +1429,13 @@ describe("SessionCommandService runtime boundary", () => {
           projectId,
           sessionId: "thread-openai",
           excludeFailedTurn: true,
-          origin: { createdBy: "channel", originChannel: "feishu" },
+          origin: {
+            createdBy: "channel",
+            originChannel: "feishu",
+            serverAttachments: [attachment],
+          },
           body: {
             message: "Inspect this screenshot",
-            attachments: [attachment],
             provider: "codex",
             model: "deepseek-v4-flash-vision-exp",
             tempId: "feishu-source-failover",

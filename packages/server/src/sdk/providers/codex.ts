@@ -3100,14 +3100,6 @@ export class CodexProvider implements AgentProvider {
         uploadManager,
         materializer: new GeneratedArtifactMaterializer({ uploadManager }),
       };
-      await uploadManager
-        .cleanupExpiredTaskAttachments({ limit: 25 })
-        .catch(() => {
-          log.warn(
-            { sessionId: sessionId || undefined },
-            "Generated artifact retention cleanup failed safely",
-          );
-        });
       return generatedArtifactRuntime;
     };
     const logMessage = (message: SDKMessage): SDKMessage => {

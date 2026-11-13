@@ -59,7 +59,7 @@ describe("generated artifact HTTP delivery", () => {
     expect(tampered.status).toBe(409);
   });
 
-  it("fails closed for missing registry/retention and expired records", async () => {
+  it("fails closed for missing registry/retention and never expires records", async () => {
     const context = await createContext();
     await writeFile(
       join(context.workspace, "report.pdf"),
@@ -95,11 +95,11 @@ describe("generated artifact HTTP delivery", () => {
     ).toBe(404);
     await rename(`${retentionPath}.missing`, retentionPath);
 
-    context.now = 2_001;
+    expect(artifact.retention).toEqual({ policy: "persistent" });
     expect(
       (await context.routes.request(artifact.downloadUrl.slice("/api".length)))
         .status,
-    ).toBe(410);
+    ).toBe(200);
   });
 });
 
@@ -122,7 +122,6 @@ async function createContext() {
     projectId,
     sessionId,
     uploadManager,
-    now: 1_000,
     routes: undefined as unknown as ReturnType<typeof createUploadRoutes>,
   };
   context.routes = createUploadRoutes({
@@ -131,7 +130,6 @@ async function createContext() {
       c.text("upgrade required")) as never,
     uploadsDir,
     uploadManager,
-    now: () => context.now,
   });
   return context;
 }
@@ -143,7 +141,6 @@ async function materialize(
   const materializer = new GeneratedArtifactMaterializer({
     uploadManager: context.uploadManager,
     now: () => 1_000,
-    retentionMs: 1_000,
   });
   const result = await materializer.materialize(
     {

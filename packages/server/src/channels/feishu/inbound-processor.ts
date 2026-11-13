@@ -3,7 +3,7 @@ import { basename, isAbsolute, relative } from "node:path";
 import type {
   FeishuAccountConfig,
   FeishuSessionBinding,
-  UploadedFile,
+  StoredUpload,
 } from "@yep-anywhere/shared";
 import { encodeProjectId } from "../../projects/paths.js";
 import type { CodexNativeControlRequest } from "../../sdk/providers/codex-controls.js";
@@ -731,10 +731,10 @@ export class FeishuInboundProcessor {
                 : disabledFeishuMcpConfig(),
             }
           : {}),
+        ...(attachments.length > 0 ? { serverAttachments: attachments } : {}),
       };
       const body = {
         message: prompt,
-        attachments,
         mode: binding.permissionMode,
         model: binding.model,
         reasoningEffort: binding.reasoningEffort,
@@ -1376,7 +1376,7 @@ export class FeishuInboundProcessor {
     message: AcceptedMessage,
     binding: FeishuSessionBinding,
   ): Promise<{
-    attachments: UploadedFile[];
+    attachments: StoredUpload[];
     manifests: FeishuAttachmentManifest[];
     failureCodes: string[];
   }> {
@@ -1825,7 +1825,7 @@ function readSafeNumber(value: unknown): number | undefined {
 function formatMessageBatch(
   messages: AcceptedMessage[],
   downloads: Array<{
-    attachments: UploadedFile[];
+    attachments: StoredUpload[];
     manifests: FeishuAttachmentManifest[];
     failureCodes: string[];
   }>,

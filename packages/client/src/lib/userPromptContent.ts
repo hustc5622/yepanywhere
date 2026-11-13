@@ -2,6 +2,7 @@ import {
   getFileMimeType,
   getMediaPreviewKind,
   isManagedUploadDownloadUrl,
+  managedUploadRefFromLegacyPath,
 } from "@yep-anywhere/shared";
 import type { ContentBlock } from "../types";
 import {
@@ -36,29 +37,7 @@ function isImageMimeType(mimeType: string): boolean {
 export function getUploadUrl(filePath: string): string | null {
   const publicLocation: unknown = filePath;
   if (isManagedUploadDownloadUrl(publicLocation)) return publicLocation;
-
-  const normalized = filePath.replaceAll("\\", "/");
-  if (
-    !/^(?:\/(?!\/)|[A-Za-z]:\/)/.test(normalized) ||
-    !normalized.includes("/uploads/")
-  ) {
-    return null;
-  }
-  // Split legacy absolute paths into projectId, sessionId and filename.
-  const parts = normalized.split("/");
-  if (parts.length < 3) return null;
-
-  const filename = parts[parts.length - 1];
-  const sessionId = parts[parts.length - 2];
-  const projectId = parts[parts.length - 3];
-
-  if (!filename || !sessionId || !projectId) return null;
-
-  // Validate filename has UUID prefix
-  if (!/^[0-9a-f-]{36}_/.test(filename)) return null;
-
-  const url = `/api/projects/${projectId}/sessions/${sessionId}/upload/${encodeURIComponent(filename)}`;
-  return isManagedUploadDownloadUrl(url) ? url : null;
+  return managedUploadRefFromLegacyPath(filePath);
 }
 
 function isInputImageBlock(block: ContentBlock): block is InputImageBlock {

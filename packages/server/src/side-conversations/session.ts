@@ -470,7 +470,9 @@ export class SideConversationSession implements SideConversationControl {
       }
       const sendKey = JSON.stringify([
         request.text,
-        (request.attachments ?? []).map((attachment) => attachment.path),
+        (request.attachments ?? []).map(
+          (attachment) => attachment.ref ?? attachment.path,
+        ),
       ]);
       if (this.sends.has(request.requestId)) {
         if (this.sends.get(request.requestId) !== sendKey)

@@ -67,7 +67,9 @@ export type {
   GeneratedArtifactWarning,
 } from "./generated-artifact.js";
 export {
+  generatedArtifactDownloadUrl,
   isGeneratedArtifactDownloadUrl,
+  isGeneratedArtifactRetention,
   isSafeGeneratedArtifactFileName,
 } from "./generated-artifact.js";
 export type {
@@ -292,6 +294,15 @@ export {
 
 export type {
   UploadedFile,
+  StoredUpload,
+  ManagedUploadLocation,
+  UploadCatalogEntry,
+  UploadListResponse,
+  UploadSessionListResponse,
+  UploadSessionRef,
+  UploadSessionSummary,
+  UploadSource,
+  UploadTotals,
   UploadStartMessage,
   UploadEndMessage,
   UploadCancelMessage,
@@ -301,7 +312,14 @@ export type {
   UploadClientMessage,
   UploadServerMessage,
 } from "./upload.js";
-export { isManagedUploadDownloadUrl } from "./upload.js";
+export {
+  isManagedUploadDownloadUrl,
+  isSafeManagedUploadFileName,
+  isSafeUploadSessionId,
+  managedUploadRef,
+  managedUploadRefFromLegacyPath,
+  parseManagedUploadRef,
+} from "./upload.js";
 
 // SDK schema types (type-only, no Zod runtime)
 export type {

@@ -98,7 +98,7 @@ describe("uploadChunks", () => {
     id: "uuid-123",
     name: "uuid-123_test.txt",
     originalName: "test.txt",
-    path: "/uploads/uuid-123_test.txt",
+    ref: "/api/projects/cA/sessions/s/upload/uuid-123_test.txt",
     size: 100,
     mimeType: "text/plain",
   };

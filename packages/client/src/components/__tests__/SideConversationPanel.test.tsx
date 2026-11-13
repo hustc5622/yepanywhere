@@ -293,7 +293,7 @@ it("uploads only images and sends them with the side question", async () => {
       originalName: file.name,
       mimeType: file.type,
       size: file.size,
-      path: `/data/uploads/project/main/${file.name}`,
+      ref: `/api/projects/cA/sessions/main/upload/123e4567-e89b-12d3-a456-426614174000_${file.name}`,
     }),
   );
   const { side } = fixture({ capabilities: { images: true } });
@@ -324,7 +324,7 @@ it("uploads only images and sends them with the side question", async () => {
     "snapshot",
     [
       {
-        path: "/data/uploads/project/main/shot.png",
+        ref: "/api/projects/cA/sessions/main/upload/123e4567-e89b-12d3-a456-426614174000_shot.png",
         name: "shot.png",
         mimeType: "image/png",
       },

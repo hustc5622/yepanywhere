@@ -739,7 +739,7 @@ describe("FeishuInboundProcessor", () => {
     );
     expect(fixture.commands.start).toHaveBeenCalledWith(
       expect.objectContaining({
-        body: expect.objectContaining({ attachments: [attachment] }),
+        origin: expect.objectContaining({ serverAttachments: [attachment] }),
       }),
     );
     expect(fixture.bindings.list()).toEqual([
@@ -1150,9 +1150,9 @@ describe("FeishuInboundProcessor", () => {
         expect.objectContaining({
           sessionId: "session-1",
           excludeFailedTurn: true,
+          origin: expect.objectContaining({ serverAttachments: [attachment] }),
           body: expect.objectContaining({
             model: "deepseek-v4-flash-vision-exp",
-            attachments: [attachment],
           }),
         }),
       ),

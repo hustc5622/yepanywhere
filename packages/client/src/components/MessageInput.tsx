@@ -66,6 +66,11 @@ interface Props {
   attachmentOrder?: string[];
   /** Callback when user selects files to attach */
   onAttach?: (files: File[], beforeAttachmentId?: string) => void;
+  /** Add uploads already on the server (e.g. pasted from a Yep copy) */
+  onAttachExisting?: (
+    files: UploadedFile[],
+    beforeAttachmentId?: string,
+  ) => void;
   /** Callback when user removes an attachment */
   onRemoveAttachment?: (id: string) => void;
   onRestoreAttachment?: (file: UploadedFile) => void;
@@ -118,6 +123,7 @@ export function MessageInput({
   attachments = [],
   attachmentOrder,
   onAttach,
+  onAttachExisting,
   onRemoveAttachment,
   onRestoreAttachment,
   uploadProgress = [],
@@ -178,10 +184,7 @@ export function MessageInput({
       id: file.id,
       name: file.originalName,
       mimeType: file.mimeType,
-      apiPath:
-        projectId && sessionId
-          ? `/api/projects/${projectId}/sessions/${sessionId}/upload/${encodeURIComponent(file.name)}`
-          : undefined,
+      apiPath: file.ref,
     }),
   );
 
@@ -227,6 +230,7 @@ export function MessageInput({
     disabled,
     canAttach,
     onAttach,
+    onAttachExisting,
     onRemove: onRemoveAttachment
       ? (ids) => {
           for (const id of ids) removeDraftAttachment(id);

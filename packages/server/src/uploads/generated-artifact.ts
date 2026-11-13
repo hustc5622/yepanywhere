@@ -16,6 +16,7 @@ import {
   type GeneratedArtifactManifest,
   type GeneratedArtifactSourceType,
   type GeneratedArtifactWarning,
+  generatedArtifactDownloadUrl,
   isUrlProjectId,
 } from "@yep-anywhere/shared";
 import { isStandardBase64 } from "../utils/base64.js";
@@ -25,7 +26,6 @@ import type { UploadManager } from "./manager.js";
 export const MAX_GENERATED_ARTIFACT_BYTES = 30 * 1024 * 1024;
 export const MAX_INLINE_GENERATED_IMAGE_BYTES = 10 * 1024 * 1024;
 export const MAX_GENERATED_ARTIFACTS_PER_TASK = 8;
-export const GENERATED_ARTIFACT_RETENTION_MS = 24 * 60 * 60 * 1000;
 
 const MAX_OFFICE_EXPANDED_BYTES = 100 * 1024 * 1024;
 const MAX_OFFICE_ENTRY_BYTES = 20 * 1024 * 1024;
@@ -70,7 +70,6 @@ export interface GeneratedArtifactMaterializerOptions {
   maxArtifactBytes?: number;
   maxInlineImageBytes?: number;
   maxArtifactsPerTask?: number;
-  retentionMs?: number;
   now?: () => number;
   /** Test-only race hook; production callers must not set it. */
   beforeOpenForTest?: (candidatePath: string) => void | Promise<void>;
@@ -122,7 +121,6 @@ export class GeneratedArtifactMaterializer {
   private readonly maxArtifactBytes: number;
   private readonly maxInlineImageBytes: number;
   private readonly maxArtifactsPerTask: number;
-  private readonly retentionMs: number;
   private readonly now: () => number;
   private readonly cache = new Map<
     string,
@@ -147,11 +145,6 @@ export class GeneratedArtifactMaterializer {
       options.maxArtifactsPerTask,
       MAX_GENERATED_ARTIFACTS_PER_TASK,
       32,
-    );
-    this.retentionMs = positiveBoundedInteger(
-      options.retentionMs,
-      GENERATED_ARTIFACT_RETENTION_MS,
-      30 * 24 * 60 * 60 * 1000,
     );
     this.now = options.now ?? Date.now;
   }
@@ -372,14 +365,9 @@ export class GeneratedArtifactMaterializer {
     grant: CodexGeneratedArtifactGrant,
   ): Promise<GeneratedArtifactManifest> {
     const now = this.now();
-    if (
-      !Number.isSafeInteger(now) ||
-      now < 0 ||
-      now > Number.MAX_SAFE_INTEGER - this.retentionMs
-    ) {
+    if (!Number.isSafeInteger(now) || now < 0) {
       throw new GeneratedArtifactPolicyError("storage_failed");
     }
-    const expiresAtMs = now + this.retentionMs;
     let attachmentId: string | undefined;
     try {
       const attachment = await this.options.uploadManager.ingest({
@@ -404,7 +392,6 @@ export class GeneratedArtifactMaterializer {
           taskId: `generated-${attachment.id}`,
         },
         [attachment.id],
-        expiresAtMs,
         now,
       );
       await this.options.uploadManager.registerGeneratedArtifact({
@@ -418,7 +405,6 @@ export class GeneratedArtifactMaterializer {
         sizeBytes: inspected.bytes.length,
         sha256,
         createdAtMs: now,
-        expiresAtMs,
         kind: inspected.kind,
         source: {
           provider: "codex",
@@ -432,13 +418,13 @@ export class GeneratedArtifactMaterializer {
           sequence: grant.canonicalEventSequence,
         },
       });
-      const downloadUrl = `/api/projects/${encodeURIComponent(
-        grant.projectId,
-      )}/sessions/${encodeURIComponent(
-        grant.sessionId,
-      )}/generated-artifact/${artifactId}/${sha256.slice(
-        "sha256:".length,
-      )}/${encodeURIComponent(inspected.fileName)}`;
+      const downloadUrl = generatedArtifactDownloadUrl({
+        projectId: grant.projectId,
+        sessionId: grant.sessionId,
+        artifactId,
+        sha256,
+        fileName: inspected.fileName,
+      });
       return {
         schemaVersion: 1,
         id: artifactId,
@@ -455,10 +441,7 @@ export class GeneratedArtifactMaterializer {
           turnId: grant.turnId,
           itemId,
         },
-        retention: {
-          policy: "temporary",
-          expiresAt: new Date(expiresAtMs).toISOString(),
-        },
+        retention: { policy: "persistent" },
         downloadUrl,
         ...(inspected.kind === "image" ? { previewUrl: downloadUrl } : {}),
       };

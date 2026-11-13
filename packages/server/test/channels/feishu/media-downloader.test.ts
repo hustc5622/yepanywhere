@@ -301,19 +301,19 @@ describe("FeishuMediaDownloader", () => {
     });
   });
 
-  it("starts one lazy retention sweep for concurrent first media requests", async () => {
+  it("starts one lazy audio staging sweep and never expires stored media", async () => {
     const uploadsDir = await createDataDir(dataDirs);
     const uploadManager = new UploadManager({ uploadsDir });
-    const cleanup = vi
-      .spyOn(uploadManager, "cleanupExpiredTaskAttachments")
-      .mockResolvedValue({
-        scannedTasks: 0,
-        removedTasks: 0,
-        removedBytes: 0,
-        skippedTasks: 0,
-        failures: [],
-      });
     const downloader = new FeishuMediaDownloader({ uploadManager });
+    const cleanup = vi
+      .spyOn(
+        downloader as unknown as {
+          cleanupExpiredAudioStaging: () => Promise<void>;
+        },
+        "cleanupExpiredAudioStaging",
+      )
+      .mockResolvedValue(undefined);
+    expect(uploadManager).not.toHaveProperty("cleanupExpiredTaskAttachments");
     const input = {
       api: { fetchMessageItems: async () => [] },
       messageId: "message-fixture",

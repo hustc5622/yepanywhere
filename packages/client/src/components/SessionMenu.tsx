@@ -1,8 +1,10 @@
 import { fromUrlProjectId, isUrlProjectId } from "@yep-anywhere/shared";
 import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
+import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { useToastContext } from "../contexts/ToastContext";
+import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
 import { useI18n } from "../i18n";
 import { appPath } from "../lib/apiPath";
 import { writeClipboardText } from "../lib/clipboard";
@@ -157,6 +159,8 @@ export function SessionMenu({
 }: SessionMenuProps) {
   const { t } = useI18n();
   const { showToast } = useToastContext();
+  const navigate = useNavigate();
+  const basePath = useRemoteBasePath();
   const projectPath = decodeProjectPath(projectId);
   const [isOpen, setIsOpen] = useState(false);
   const [isCloning, setIsCloning] = useState(false);
@@ -538,6 +542,29 @@ export function SessionMenu({
           <path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71" />
         </svg>
         {t("sessionMenuShareLink")}
+      </button>
+      <button
+        type="button"
+        onClick={() =>
+          handleAction(() =>
+            navigate(
+              `${basePath}/uploads?${new URLSearchParams({ projectId, sessionId })}`,
+            ),
+          )
+        }
+      >
+        <svg
+          width="14"
+          height="14"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2"
+          aria-hidden="true"
+        >
+          <path d="M21.44 11.05l-9.19 9.19a6 6 0 0 1-8.49-8.49l9.19-9.19a4 4 0 0 1 5.66 5.66l-9.2 9.19a2 2 0 0 1-2.83-2.83l8.49-8.48" />
+        </svg>
+        {t("sessionMenuUploads")}
       </button>
       {sharingConfigured && onShare && (
         <button type="button" onClick={handleShare} disabled={isSharing}>

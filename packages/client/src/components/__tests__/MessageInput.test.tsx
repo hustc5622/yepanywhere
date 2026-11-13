@@ -37,7 +37,7 @@ function imageAttachment(id: string, originalName = "image.png"): UploadedFile {
     originalName,
     mimeType: "image/png",
     size: 1024,
-    path: `/tmp/${id}_${originalName}`,
+    ref: `/api/projects/cA/sessions/s/upload/${id}_${originalName}`,
   };
 }
 
@@ -238,7 +238,7 @@ describe("MessageInput", () => {
             originalName: "image.png",
             mimeType: "image/png",
             size: 1024,
-            path: "/tmp/image.png",
+            ref: "/api/projects/cA/sessions/s/upload/attachment-1_image.png",
           },
         ],
       });

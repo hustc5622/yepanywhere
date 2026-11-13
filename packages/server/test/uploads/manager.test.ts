@@ -584,52 +584,34 @@ describe("UploadManager", () => {
       ).rejects.toThrow();
     });
 
-    it("removes only expired task scopes and reports opaque cleanup results", async () => {
+    it("records task attachments without an expiry", async () => {
       const nowMs = 2_000_000;
-      const expired = await manager.ingest({
+      const stored = await manager.ingest({
         projectId: "encoded-project",
         sessionId: "shared-session",
-        originalName: "expired.txt",
+        originalName: "kept.txt",
         mimeType: "text/plain",
-        stream: chunks(Buffer.from("expired")),
-      });
-      const retained = await manager.ingest({
-        projectId: "encoded-project",
-        sessionId: "shared-session",
-        originalName: "retained.txt",
-        mimeType: "text/plain",
-        stream: chunks(Buffer.from("retained")),
+        stream: chunks(Buffer.from("kept")),
       });
       await manager.setTaskAttachmentRetention(
         {
           projectId: "encoded-project",
           sessionId: "shared-session",
-          taskId: "expired-task",
+          taskId: "kept-task",
         },
-        [expired.id],
-        nowMs + 100,
+        [stored.id],
         nowMs,
       );
-      await manager.setTaskAttachmentRetention(
-        {
-          projectId: "encoded-project",
-          sessionId: "shared-session",
-          taskId: "retained-task",
-        },
-        [retained.id],
-        nowMs + 10_000,
-        nowMs,
-      );
-      await expect(
-        manager.getTaskAttachmentRetention({
-          projectId: "encoded-project",
-          sessionId: "shared-session",
-          taskId: "expired-task",
-        }),
-      ).resolves.toMatchObject({
-        attachmentIds: [expired.id],
-        expiresAtMs: nowMs + 100,
+      const record = await manager.getTaskAttachmentRetention({
+        projectId: "encoded-project",
+        sessionId: "shared-session",
+        taskId: "kept-task",
       });
+      expect(record).toMatchObject({
+        attachmentIds: [stored.id],
+        createdAtMs: nowMs,
+      });
+      expect(record).not.toHaveProperty("expiresAtMs");
       await expect(
         manager.getTaskAttachmentRetention({
           projectId: "encoded-project",
@@ -637,84 +619,7 @@ describe("UploadManager", () => {
           taskId: "missing-task",
         }),
       ).resolves.toBeNull();
-
-      const result = await manager.cleanupExpiredTaskAttachments({
-        nowMs: nowMs + 1_000,
-      });
-
-      expect(result).toMatchObject({
-        scannedTasks: 2,
-        removedTasks: 1,
-        skippedTasks: 1,
-        failures: [],
-      });
-      expect(result.removedBytes).toBeGreaterThanOrEqual(
-        Buffer.byteLength("expired"),
-      );
-      expect(JSON.stringify(result)).not.toContain(tempDir);
-      await expect(stat(expired.path)).rejects.toThrow();
-      expect((await stat(retained.path)).isFile()).toBe(true);
-    });
-
-    it("advances a bounded fair cursor past retained prefixes to expired tail records", async () => {
-      const nowMs = 3_000_000;
-      const retained = await manager.ingest({
-        projectId: "encoded-project",
-        sessionId: "cursor-session",
-        originalName: "retained.txt",
-        mimeType: "text/plain",
-        stream: chunks(Buffer.from("retained")),
-      });
-      const expired = await manager.ingest({
-        projectId: "encoded-project",
-        sessionId: "cursor-session",
-        originalName: "expired.txt",
-        mimeType: "text/plain",
-        stream: chunks(Buffer.from("expired")),
-      });
-      await manager.setTaskAttachmentRetention(
-        {
-          projectId: "encoded-project",
-          sessionId: "cursor-session",
-          taskId: "a-retained",
-        },
-        [retained.id],
-        nowMs + 10_000,
-        nowMs,
-      );
-      await manager.setTaskAttachmentRetention(
-        {
-          projectId: "encoded-project",
-          sessionId: "cursor-session",
-          taskId: "z-expired",
-        },
-        [expired.id],
-        nowMs + 10,
-        nowMs,
-      );
-
-      const first = await manager.cleanupExpiredTaskAttachments({
-        nowMs: nowMs + 100,
-        limit: 1,
-      });
-      expect(first).toMatchObject({
-        scannedTasks: 1,
-        skippedTasks: 1,
-        removedTasks: 0,
-      });
-      expect((await stat(expired.path)).isFile()).toBe(true);
-
-      const second = await manager.cleanupExpiredTaskAttachments({
-        nowMs: nowMs + 100,
-        limit: 1,
-      });
-      expect(second).toMatchObject({
-        scannedTasks: 1,
-        skippedTasks: 0,
-        removedTasks: 1,
-      });
-      await expect(stat(expired.path)).rejects.toThrow();
-      expect((await stat(retained.path)).isFile()).toBe(true);
+      expect((await stat(stored.path)).isFile()).toBe(true);
     });
 
     it("supports exact idempotent task cleanup and rejects broad scopes", async () => {
@@ -753,7 +658,6 @@ describe("UploadManager", () => {
           taskId: "task-to-remove",
         },
         [source.id],
-        2_100_000,
         2_000_000,
       );
       const first = await manager.cleanupTaskAttachments({

@@ -11,15 +11,6 @@ import type { UploadProgress } from "../components/MessageInput";
 import { generateUUID } from "../lib/uuid";
 import { useConnection } from "./useConnection";
 
-/** Managed download path of an upload, as the composer and clipboard use it. */
-export function uploadedFileApiPath(
-  projectId: string,
-  sessionId: string,
-  file: Pick<UploadedFile, "name">,
-): string {
-  return `/api/projects/${projectId}/sessions/${sessionId}/upload/${encodeURIComponent(file.name)}`;
-}
-
 function sortByOrder(files: UploadedFile[], order: string[]): UploadedFile[] {
   return files.sort(
     (left, right) => order.indexOf(left.id) - order.indexOf(right.id),
@@ -135,6 +126,25 @@ export function useComposerUploads({
     [connection, onError, projectId, sessionId, setAttachments],
   );
 
+  /** Add uploads already on the server (pasted or restored by reference). */
+  const attachExisting = useCallback(
+    (files: UploadedFile[], beforeAttachmentId?: string) => {
+      const order = orderRef.current;
+      const fresh = files.filter((file) => !order.includes(file.id));
+      if (fresh.length === 0) return;
+      const anchor = beforeAttachmentId
+        ? order.indexOf(beforeAttachmentId)
+        : -1;
+      order.splice(
+        anchor < 0 ? order.length : anchor,
+        0,
+        ...fresh.map((file) => file.id),
+      );
+      setAttachments((prev) => sortByOrder([...prev, ...fresh], order));
+    },
+    [setAttachments],
+  );
+
   const remove = useCallback(
     (ids: string[]) => {
       for (const id of ids) {
@@ -206,10 +216,7 @@ export function useComposerUploads({
       id: file.id,
       name: file.originalName,
       mimeType: file.mimeType,
-      apiPath:
-        projectId && sessionId
-          ? uploadedFileApiPath(projectId, sessionId, file)
-          : undefined,
+      apiPath: file.ref,
     })),
     ...uploadProgress.map((progress) => ({
       id: progress.fileId,
@@ -233,6 +240,7 @@ export function useComposerUploads({
     /** In-flight uploads now; each resolves to the upload or null. */
     pendingUploads: () => [...pendingRef.current.values()],
     attach,
+    attachExisting,
     remove,
     restore,
     restoreFile,

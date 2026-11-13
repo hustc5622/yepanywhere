@@ -61,7 +61,7 @@ function uploadedFile(file: File): UploadedFile {
     originalName: file.name,
     mimeType: file.type,
     size: file.size,
-    path: `/tmp/${id}_${file.name}`,
+    ref: `/api/projects/cA/sessions/s/upload/${id}_${file.name}`,
   };
 }
 
@@ -152,10 +152,18 @@ function setup(entry: Entry) {
       }
       await waitFor(() => expect(api.queueMessage).toHaveBeenCalledTimes(1));
       const submitted = vi.mocked(api.queueMessage).mock.calls[0];
-      expect(submitted?.[3]).toHaveLength(upload.mock.calls.length);
+      const attachments = submitted?.[3] ?? [];
+      // Uploads made here live in session "s"; reused ones are sent as is.
+      const reused = attachments.filter(
+        (attachment) => !attachment.ref.includes("/sessions/s/"),
+      );
+      expect(attachments).toHaveLength(
+        upload.mock.calls.length + reused.length,
+      );
       return {
         text: submitted?.[1],
         files: upload.mock.calls.map((call) => call[2]),
+        attachments,
       };
     },
   };
@@ -417,6 +425,24 @@ describe.each<Entry>(["reply", "new session", "compact new session"])(
       fetchBlob.mockResolvedValue(
         new Blob(["zip bytes"], { type: "application/zip" }),
       );
+      vi.spyOn(api, "getUploadEntry").mockResolvedValue({
+        entry: {
+          ref: reference,
+          id: "123e4567-e89b-12d3-a456-426614174000",
+          projectId: "cHJvamVjdA",
+          sessionId: "other",
+          name: "123e4567-e89b-12d3-a456-426614174000_big.zip",
+          originalName: "big.zip",
+          size: 9,
+          mimeType: "application/zip",
+          uploadedAt: "2026-11-12T00:00:00.000Z",
+          source: "web",
+          usedBy: [],
+          downloadUrl: reference,
+        },
+      });
+      // Replies here have no `onAttachExisting`, so they read the bytes back.
+      const reuses = entry !== "reply";
       const copied = "a @[shot.png] b @[notes.pdf] c @[big.zip] d @[gone.txt]";
       await act(async () => {
         fireEvent.paste(composer, {
@@ -438,20 +464,33 @@ describe.each<Entry>(["reply", "new session", "compact new session"])(
       });
 
       await waitFor(() => expect(cards(composer)).toHaveLength(3));
-      expect(fetchBlob).toHaveBeenCalledWith(reference.slice("/api".length));
+      if (reuses) {
+        expect(api.getUploadEntry).toHaveBeenCalledWith(reference);
+        expect(fetchBlob).not.toHaveBeenCalled();
+      } else {
+        expect(fetchBlob).toHaveBeenCalledWith(reference.slice("/api".length));
+      }
       const pastedText = serializeComposerContent(composer);
       expect(pastedText).toBe("a @[shot.png] b @[notes.pdf] c @[big.zip] d");
       const submitted = await submit();
-      expect(submitted.files.map((file) => [file.name, file.type])).toEqual([
+      const uploadedNames = [
         ["shot.png", "image/png"],
         ["notes.pdf", "application/pdf"],
-        ["big.zip", "application/zip"],
-      ]);
+        ...(reuses ? [] : [["big.zip", "application/zip"]]),
+      ];
+      expect(submitted.files.map((file) => [file.name, file.type])).toEqual(
+        uploadedNames,
+      );
       expect(await Promise.all(submitted.files.map(readFile))).toEqual([
         "first",
         "%PDF",
-        "zip bytes",
+        ...(reuses ? [] : ["zip bytes"]),
       ]);
+      if (reuses) {
+        expect((submitted.attachments ?? []).map((file) => file.ref)).toContain(
+          reference,
+        );
+      }
     });
 
     it("copies the whole draft with every attachment", async () => {

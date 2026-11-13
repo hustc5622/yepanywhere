@@ -17,8 +17,8 @@ import type {
   SessionQuestion,
   SessionRetryStatus,
   SessionRuntime,
+  StoredUpload,
   ThinkingConfig,
-  UploadedFile,
   UrlProjectId,
 } from "@yep-anywhere/shared";
 import type { PermissionMode, SDKMessage } from "../sdk/types.js";
@@ -317,7 +317,7 @@ export type ProcessEvent =
         tempId?: string;
         content: string;
         timestamp: string;
-        attachments?: UploadedFile[];
+        attachments?: StoredUpload[];
         blocked?: boolean;
       }[];
     };

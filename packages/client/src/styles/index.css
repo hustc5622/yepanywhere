@@ -12399,6 +12399,113 @@ button.context-usage-indicator--button:focus-visible {
 }
 
 /* ==========================================================================
+   Uploads Page (reuses the archive list layout)
+   ========================================================================== */
+
+.uploads-session-card {
+  width: 100%;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+
+.uploads-session-card:hover {
+  background: var(--bg-hover);
+}
+
+.uploads-session-header {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-bottom: var(--space-3);
+}
+
+.uploads-link-button {
+  align-self: flex-start;
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--link-color);
+  font: inherit;
+  font-size: var(--font-size-sm);
+  text-decoration: none;
+  cursor: pointer;
+}
+
+.uploads-tabs {
+  grid-template-columns: repeat(2, minmax(0, 160px));
+  margin-bottom: var(--space-3);
+  padding-left: 0;
+}
+
+.uploads-file-card {
+  align-items: center;
+}
+
+.uploads-file-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  width: 56px;
+  height: 56px;
+  overflow: hidden;
+  border-radius: var(--radius-sm);
+  background: var(--bg-tertiary);
+  color: var(--text-muted);
+  font-size: var(--font-size-xs);
+  text-transform: uppercase;
+}
+
+.uploads-file-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.uploads-file-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  flex-shrink: 0;
+  font-size: var(--font-size-sm);
+}
+
+.uploads-delete-button {
+  padding: 0;
+  border: 0;
+  background: none;
+  color: var(--error-color);
+  font: inherit;
+  cursor: pointer;
+}
+
+.uploads-delete-button:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.uploads-change-path {
+  font-family: var(--font-mono);
+}
+
+.uploads-load-more {
+  margin-top: var(--space-3);
+}
+
+@media (max-width: 720px) {
+  .uploads-file-card {
+    flex-direction: row;
+    flex-wrap: wrap;
+  }
+
+  .uploads-file-actions {
+    width: 100%;
+  }
+}
+
+/* ==========================================================================
    Login Page
    ========================================================================== */
 

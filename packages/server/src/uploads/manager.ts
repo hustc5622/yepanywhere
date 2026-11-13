@@ -30,10 +30,16 @@ import {
   type GeneratedArtifactKind,
   type GeneratedArtifactManifest,
   type GeneratedArtifactSource,
+  type StoredUpload,
   type UploadedFile,
+  generatedArtifactDownloadUrl,
   isGeneratedArtifactDownloadUrl,
   isSafeGeneratedArtifactFileName,
+  isSafeUploadSessionId,
   isUrlProjectId,
+  managedUploadRef,
+  managedUploadRefFromLegacyPath,
+  parseManagedUploadRef,
 } from "@yep-anywhere/shared";
 import { getDataDir } from "../config.js";
 
@@ -46,6 +52,8 @@ export const UPLOADS_DIR = join(getDataDir(), "uploads");
  */
 export interface UploadState {
   id: string;
+  projectId: string;
+  sessionId: string;
   originalName: string;
   sanitizedName: string;
   filePath: string;
@@ -122,12 +130,130 @@ export async function getUploadDir(
   if (!isUrlProjectId(encodedProjectPath)) {
     throw new Error("Invalid upload project ID");
   }
-  if (!isSafePathSegment(sessionId)) {
+  if (!isSafeUploadSessionId(sessionId)) {
     throw new Error("Invalid upload session ID");
   }
   const dir = join(uploadsDir, encodedProjectPath, sessionId);
   await mkdir(dir, { recursive: true, mode: 0o700 });
   return dir;
+}
+
+const UPLOAD_MIME_TYPES_BY_EXTENSION: Record<string, string> = {
+  png: "image/png",
+  jpg: "image/jpeg",
+  jpeg: "image/jpeg",
+  gif: "image/gif",
+  webp: "image/webp",
+  pdf: "application/pdf",
+  txt: "text/plain; charset=utf-8",
+  md: "text/markdown; charset=utf-8",
+  csv: "text/csv; charset=utf-8",
+  json: "application/json",
+  docx: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+  xlsx: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+  pptx: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+  mp4: "video/mp4",
+};
+
+/** Content type of a stored upload, from its extension only. */
+export function mimeTypeForUploadFileName(fileName: string): string {
+  const ext = fileName.split(".").pop()?.toLowerCase() ?? "";
+  return UPLOAD_MIME_TYPES_BY_EXTENSION[ext] ?? "application/octet-stream";
+}
+
+/** Drop the server path before an upload crosses the client boundary. */
+export function toPublicUpload(upload: StoredUpload): UploadedFile {
+  return {
+    id: upload.id,
+    ref: upload.ref,
+    originalName: upload.originalName,
+    name: upload.name,
+    size: upload.size,
+    mimeType: upload.mimeType,
+  };
+}
+
+/** An attachment as a client sends it: a managed reference, or a legacy path. */
+export interface ManagedUploadInput {
+  ref?: unknown;
+  path?: unknown;
+  originalName?: unknown;
+  mimeType?: unknown;
+}
+
+export class ManagedUploadResolutionError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "ManagedUploadResolutionError";
+  }
+}
+
+/**
+ * Resolve a client-supplied attachment to the managed file it names. The
+ * client is never the authority on server paths: only a reference to a regular
+ * file directly inside the uploads root, reached without symlinks, resolves.
+ */
+export async function resolveManagedUpload(
+  input: ManagedUploadInput,
+  uploadsDir: string = UPLOADS_DIR,
+): Promise<StoredUpload> {
+  const ref =
+    typeof input.ref === "string"
+      ? input.ref
+      : typeof input.path === "string"
+        ? managedUploadRefFromLegacyPath(input.path)
+        : null;
+  const location = parseManagedUploadRef(ref);
+  if (
+    !ref ||
+    !location ||
+    !isUrlProjectId(location.projectId) ||
+    isGeneratedArtifactStorageFilename(location.fileName)
+  ) {
+    throw new ManagedUploadResolutionError(
+      "Attachment is not a managed upload",
+    );
+  }
+
+  const root = await realpath(uploadsDir).catch(() => {
+    throw new ManagedUploadResolutionError("Uploads are unavailable");
+  });
+  const candidate = join(
+    root,
+    location.projectId,
+    location.sessionId,
+    location.fileName,
+  );
+  const stats = await lstat(candidate).catch(() => {
+    throw new ManagedUploadResolutionError("Attachment no longer exists");
+  });
+  if (!stats.isFile() || stats.isSymbolicLink() || stats.nlink !== 1) {
+    throw new ManagedUploadResolutionError("Attachment is not a managed file");
+  }
+  if ((await realpath(candidate)) !== candidate) {
+    throw new ManagedUploadResolutionError("Attachment is not a managed file");
+  }
+
+  const storedName = location.fileName.slice(37);
+  const originalName =
+    typeof input.originalName === "string" &&
+    input.originalName.trim() &&
+    input.originalName.length <= 260
+      ? input.originalName
+      : storedName;
+  const mimeType =
+    typeof input.mimeType === "string" && input.mimeType.trim()
+      ? normalizeMimeType(input.mimeType)
+      : mimeTypeForUploadFileName(location.fileName).split(";")[0];
+  return {
+    id: location.fileName.slice(0, 36),
+    ref: managedUploadRef(location),
+    originalName,
+    name: location.fileName,
+    path: candidate,
+    size: stats.size,
+    mimeType: mimeType ?? "application/octet-stream",
+  };
 }
 
 export interface UploadManagerOptions {
@@ -150,7 +276,7 @@ export interface IngestUploadInput {
 export interface DerivedUploadArtifactInput {
   projectId: string;
   sessionId: string;
-  source: UploadedFile;
+  source: StoredUpload;
   kind: "text" | "metadata" | "archive-index";
   label: string;
   mime: string;
@@ -173,11 +299,16 @@ export interface TaskAttachmentScope extends AttachmentStorageScope {
   taskId: string;
 }
 
+/**
+ * Groups the files one task (a Feishu message, a generated artifact) stored,
+ * so a failed task can be rolled back. Files are kept until the user deletes
+ * them; `expiresAtMs` only exists on records written before that.
+ */
 export interface TaskAttachmentRetentionRecord extends TaskAttachmentScope {
   schemaVersion: 1;
   attachmentIds: string[];
   createdAtMs: number;
-  expiresAtMs: number;
+  expiresAtMs?: number;
 }
 
 export interface GeneratedArtifactStorageRecord extends AttachmentStorageScope {
@@ -189,7 +320,8 @@ export interface GeneratedArtifactStorageRecord extends AttachmentStorageScope {
   sizeBytes: number;
   sha256: string;
   createdAtMs: number;
-  expiresAtMs: number;
+  /** Legacy records only; no longer enforced. */
+  expiresAtMs?: number;
   /** Added records bind the managed copy to one exact canonical journal item. */
   kind?: GeneratedArtifactKind;
   source?: GeneratedArtifactSource;
@@ -215,7 +347,6 @@ export interface GeneratedArtifactReadExpectation {
   managedRef?: string;
   mimeType?: string;
   sizeBytes?: number;
-  expiresAtMs?: number;
 }
 
 export interface GeneratedArtifactReadResult {
@@ -223,29 +354,18 @@ export interface GeneratedArtifactReadResult {
   bytes: Uint8Array;
 }
 
-export interface AttachmentRetentionCleanupResult {
-  scannedTasks: number;
-  removedTasks: number;
-  removedBytes: number;
-  skippedTasks: number;
-  failures: Array<{
-    taskRef: string;
-    code: "INVALID_RETENTION_RECORD" | "CLEANUP_FAILED";
-  }>;
-}
-
 const CONTAINER_PROBE_LIMIT = 2 * 1024 * 1024;
 const MAX_ARCHIVE_ENTRY_BYTES = 100 * 1024 * 1024;
 const MAX_ARCHIVE_EXPANSION_RATIO = 100;
 const DERIVED_DIR_NAME = ".derived";
-const RETENTION_DIR_NAME = ".retention";
-const GENERATED_ARTIFACT_REGISTRY_DIR_NAME = ".generated";
+export const RETENTION_DIR_NAME = ".retention";
+export const GENERATED_ARTIFACT_REGISTRY_DIR_NAME = ".generated";
 const MAX_RETENTION_RECORD_BYTES = 16 * 1024;
 const MAX_GENERATED_ARTIFACT_RECORD_BYTES = 16 * 1024;
 const MAX_GENERATED_ARTIFACT_REGISTRY_ENTRIES = 4_096;
 const MAX_GENERATED_ARTIFACT_REPLAY_COUNT = 64;
 const MAX_GENERATED_ARTIFACT_REPLAY_BYTES = 64 * 1024 * 1024;
-const GENERATED_ARTIFACT_STORAGE_MARKER = ".yep-generated-";
+export const GENERATED_ARTIFACT_STORAGE_MARKER = ".yep-generated-";
 
 export class UploadContainerError extends Error {
   readonly code:
@@ -261,7 +381,7 @@ export class UploadContainerError extends Error {
 }
 
 export class GeneratedArtifactAccessError extends Error {
-  readonly code: "NOT_FOUND" | "EXPIRED" | "INTEGRITY" | "INVALID";
+  readonly code: "NOT_FOUND" | "INTEGRITY" | "INVALID";
 
   constructor(code: GeneratedArtifactAccessError["code"]) {
     super(code);
@@ -277,8 +397,6 @@ export class UploadManager {
   private uploads = new Map<string, UploadState>();
   private uploadsDir: string;
   private maxUploadSizeBytes: number;
-  /** Fair bounded cursor for repeated retention sweeps. */
-  private cleanupCursor: string | null = null;
 
   constructor(options: UploadManagerOptions = {}) {
     this.uploadsDir = options.uploadsDir ?? UPLOADS_DIR;
@@ -308,7 +426,7 @@ export class UploadManager {
     if (!isUrlProjectId(encodedProjectPath)) {
       throw new Error("Invalid upload project ID");
     }
-    if (!isSafePathSegment(sessionId)) {
+    if (!isSafeUploadSessionId(sessionId)) {
       throw new Error("Invalid upload session ID");
     }
     if (
@@ -345,6 +463,8 @@ export class UploadManager {
 
     const state: UploadState = {
       id,
+      projectId: encodedProjectPath,
+      sessionId,
       originalName,
       sanitizedName: storageName,
       filePath,
@@ -429,7 +549,7 @@ export class UploadManager {
    * Complete an upload.
    * Closes the write stream and verifies the file.
    */
-  async completeUpload(uploadId: string): Promise<UploadedFile> {
+  async completeUpload(uploadId: string): Promise<StoredUpload> {
     const state = this.uploads.get(uploadId);
     if (!state) {
       throw new Error(`Upload not found: ${uploadId}`);
@@ -474,6 +594,11 @@ export class UploadManager {
 
     return {
       id: state.id,
+      ref: managedUploadRef({
+        projectId: state.projectId,
+        sessionId: state.sessionId,
+        fileName: state.sanitizedName,
+      }),
       originalName: state.originalName,
       name: state.sanitizedName,
       path: state.filePath,
@@ -514,7 +639,7 @@ export class UploadManager {
    * used by browser uploads. This is intentionally transport-agnostic so
    * channel adapters do not need to impersonate a WebSocket client.
    */
-  async ingest(input: IngestUploadInput): Promise<UploadedFile> {
+  async ingest(input: IngestUploadInput): Promise<StoredUpload> {
     const expectedSize = input.expectedSize ?? null;
     const { uploadId, state } = await this.startUpload(
       input.projectId,
@@ -837,12 +962,8 @@ export class UploadManager {
   async listReplayableGeneratedArtifacts(
     scope: AttachmentStorageScope,
     canonicalEvents: readonly GeneratedArtifactReplayEvent[],
-    nowMs = Date.now(),
   ): Promise<GeneratedArtifactManifest[]> {
     assertStorageScope(scope);
-    if (!Number.isSafeInteger(nowMs)) {
-      throw new GeneratedArtifactAccessError("INVALID");
-    }
     const eventsById = new Map(
       canonicalEvents
         .filter(
@@ -907,8 +1028,7 @@ export class UploadManager {
         record.canonicalEvent.sequence !== event.sequence ||
         record.source.threadId !== event.threadId ||
         record.source.turnId !== event.turnId ||
-        record.source.itemId !== event.itemId ||
-        record.expiresAtMs <= nowMs
+        record.source.itemId !== event.itemId
       ) {
         continue;
       }
@@ -923,30 +1043,24 @@ export class UploadManager {
       attemptedArtifactBytes += record.sizeBytes;
 
       try {
-        await this.readGeneratedArtifactBytes(
-          scope,
-          {
-            artifactId: record.artifactId,
-            managedRef: record.managedRef,
-            fileName: record.fileName,
-            mimeType: record.mimeType,
-            sizeBytes: record.sizeBytes,
-            sha256: record.sha256,
-            expiresAtMs: record.expiresAtMs,
-          },
-          nowMs,
-        );
+        await this.readGeneratedArtifactBytes(scope, {
+          artifactId: record.artifactId,
+          managedRef: record.managedRef,
+          fileName: record.fileName,
+          mimeType: record.mimeType,
+          sizeBytes: record.sizeBytes,
+          sha256: record.sha256,
+        });
       } catch {
         continue;
       }
 
-      const downloadUrl = `/api/projects/${encodeURIComponent(
-        scope.projectId,
-      )}/sessions/${encodeURIComponent(
-        scope.sessionId,
-      )}/generated-artifact/${record.artifactId}/${record.sha256.slice(
-        "sha256:".length,
-      )}/${encodeURIComponent(record.fileName)}`;
+      const downloadUrl = generatedArtifactDownloadUrl({
+        ...scope,
+        artifactId: record.artifactId,
+        sha256: record.sha256,
+        fileName: record.fileName,
+      });
       if (!isGeneratedArtifactDownloadUrl(downloadUrl)) continue;
       const manifest: GeneratedArtifactManifest = {
         schemaVersion: 1,
@@ -958,10 +1072,7 @@ export class UploadManager {
         sizeBytes: record.sizeBytes,
         sha256: record.sha256,
         source: structuredClone(record.source),
-        retention: {
-          policy: "temporary",
-          expiresAt: new Date(record.expiresAtMs).toISOString(),
-        },
+        retention: { policy: "persistent" },
         downloadUrl,
         ...(record.kind === "image" ? { previewUrl: downloadUrl } : {}),
       };
@@ -982,18 +1093,14 @@ export class UploadManager {
 
   /**
    * Resolve and verify a generated artifact for HTTP or channel delivery.
-   * Missing/expired retention and registry state always fail closed.
+   * Missing retention and registry state always fail closed.
    */
   async readGeneratedArtifactBytes(
     scope: AttachmentStorageScope,
     expected: GeneratedArtifactReadExpectation,
-    nowMs = Date.now(),
   ): Promise<GeneratedArtifactReadResult> {
     assertStorageScope(scope);
     assertGeneratedArtifactExpectation(expected);
-    if (!Number.isSafeInteger(nowMs)) {
-      throw new GeneratedArtifactAccessError("INVALID");
-    }
     const record = await readGeneratedArtifactRecord(
       join(
         generatedArtifactRegistryDir(
@@ -1010,9 +1117,6 @@ export class UploadManager {
     if (!matchesGeneratedArtifactExpectation(record, expected)) {
       throw new GeneratedArtifactAccessError("NOT_FOUND");
     }
-    if (record.expiresAtMs <= nowMs) {
-      throw new GeneratedArtifactAccessError("EXPIRED");
-    }
     const parsedRef = parseUploadPathRef(record.managedRef);
     const retention = await this.getTaskAttachmentRetention({
       projectId: scope.projectId,
@@ -1021,16 +1125,11 @@ export class UploadManager {
     });
     if (
       !retention ||
-      retention.expiresAtMs <= nowMs ||
       retention.expiresAtMs !== record.expiresAtMs ||
       retention.createdAtMs !== record.createdAtMs ||
       !retention.attachmentIds.includes(parsedRef.attachmentId)
     ) {
-      throw new GeneratedArtifactAccessError(
-        retention?.expiresAtMs !== undefined && retention.expiresAtMs <= nowMs
-          ? "EXPIRED"
-          : "NOT_FOUND",
-      );
+      throw new GeneratedArtifactAccessError("NOT_FOUND");
     }
     let bytes: Uint8Array;
     try {
@@ -1058,11 +1157,10 @@ export class UploadManager {
     return { record: structuredClone(record), bytes };
   }
 
-  /** Assign a task-scoped expiry without exposing the storage path. */
+  /** Record which files a task stored, without exposing the storage path. */
   async setTaskAttachmentRetention(
     scope: TaskAttachmentScope,
     attachmentIds: string[],
-    expiresAtMs: number,
     nowMs = Date.now(),
   ): Promise<TaskAttachmentRetentionRecord> {
     assertTaskScope(scope);
@@ -1073,12 +1171,8 @@ export class UploadManager {
     ) {
       throw new Error("Invalid task attachment IDs");
     }
-    if (
-      !Number.isSafeInteger(expiresAtMs) ||
-      !Number.isSafeInteger(nowMs) ||
-      expiresAtMs <= nowMs
-    ) {
-      throw new Error("Invalid attachment retention expiry");
+    if (!Number.isSafeInteger(nowMs)) {
+      throw new Error("Invalid attachment record time");
     }
     const taskDir = taskUploadDir(
       this.uploadsDir,
@@ -1099,7 +1193,6 @@ export class UploadManager {
       taskId: scope.taskId,
       attachmentIds: uniqueAttachmentIds,
       createdAtMs: nowMs,
-      expiresAtMs,
     };
     const temporaryPath = join(
       retentionDir,
@@ -1218,75 +1311,6 @@ export class UploadManager {
     return { removed: true, removedBytes };
   }
 
-  /** Scan retention records and clean only scopes whose expiry has elapsed. */
-  async cleanupExpiredTaskAttachments(
-    options: {
-      nowMs?: number;
-      limit?: number;
-    } = {},
-  ): Promise<AttachmentRetentionCleanupResult> {
-    const nowMs = options.nowMs ?? Date.now();
-    const limit = options.limit ?? 100;
-    if (
-      !Number.isSafeInteger(nowMs) ||
-      !Number.isSafeInteger(limit) ||
-      limit <= 0
-    ) {
-      throw new Error("Invalid attachment cleanup options");
-    }
-    const result: AttachmentRetentionCleanupResult = {
-      scannedTasks: 0,
-      removedTasks: 0,
-      removedBytes: 0,
-      skippedTasks: 0,
-      failures: [],
-    };
-    const candidates = await listRetentionCleanupCandidates(this.uploadsDir);
-    if (candidates.length === 0) {
-      this.cleanupCursor = null;
-      return result;
-    }
-    const startIndex = this.cleanupCursor
-      ? firstCandidateAfter(candidates, this.cleanupCursor)
-      : 0;
-    const scanCount = Math.min(limit, candidates.length);
-    for (let offset = 0; offset < scanCount; offset += 1) {
-      const candidate = candidates[(startIndex + offset) % candidates.length];
-      if (!candidate) continue;
-      this.cleanupCursor = candidate.key;
-      result.scannedTasks += 1;
-      const taskRef = taskReference(candidate.scope);
-      let record: TaskAttachmentRetentionRecord | null;
-      try {
-        record = await readRetentionRecord(
-          candidate.retentionPath,
-          candidate.scope,
-          this.uploadsDir,
-        );
-      } catch {
-        result.failures.push({
-          taskRef,
-          code: "INVALID_RETENTION_RECORD",
-        });
-        continue;
-      }
-      if (!record || record.expiresAtMs > nowMs) {
-        result.skippedTasks += 1;
-        continue;
-      }
-      try {
-        const removed = await this.cleanupTaskAttachments(candidate.scope);
-        if (removed.removed) {
-          result.removedTasks += 1;
-          result.removedBytes += removed.removedBytes;
-        }
-      } catch {
-        result.failures.push({ taskRef, code: "CLEANUP_FAILED" });
-      }
-    }
-    return result;
-  }
-
   /**
    * Get current state of an upload.
    */
@@ -1295,67 +1319,11 @@ export class UploadManager {
   }
 }
 
-interface RetentionCleanupCandidate {
-  key: string;
-  scope: TaskAttachmentScope;
-  retentionPath: string;
-}
-
-async function listRetentionCleanupCandidates(
-  uploadsDir: string,
-): Promise<RetentionCleanupCandidate[]> {
-  const projects = await readdir(uploadsDir, { withFileTypes: true }).catch(
-    (error: NodeJS.ErrnoException) => {
-      if (error.code === "ENOENT") return [];
-      throw error;
-    },
-  );
-  const candidates: RetentionCleanupCandidate[] = [];
-  for (const project of projects) {
-    if (!project.isDirectory() || !isSafePathSegment(project.name)) continue;
-    const projectDir = join(uploadsDir, project.name);
-    const sessions = await readdir(projectDir, { withFileTypes: true }).catch(
-      () => [],
-    );
-    for (const session of sessions) {
-      if (!session.isDirectory() || !isSafePathSegment(session.name)) continue;
-      const retentionDir = join(projectDir, session.name, RETENTION_DIR_NAME);
-      const records = await readdir(retentionDir, {
-        withFileTypes: true,
-      }).catch(() => []);
-      for (const entry of records) {
-        if (!entry.isFile() || !entry.name.endsWith(".json")) continue;
-        const taskId = entry.name.slice(0, -".json".length);
-        if (!isSafePathSegment(taskId)) continue;
-        const scope = {
-          projectId: project.name,
-          sessionId: session.name,
-          taskId,
-        };
-        candidates.push({
-          key: `${project.name}\0${session.name}\0${taskId}`,
-          scope,
-          retentionPath: join(retentionDir, entry.name),
-        });
-      }
-    }
-  }
-  return candidates.sort((left, right) => left.key.localeCompare(right.key));
-}
-
-function firstCandidateAfter(
-  candidates: readonly RetentionCleanupCandidate[],
-  cursor: string,
-): number {
-  const index = candidates.findIndex((candidate) => candidate.key > cursor);
-  return index < 0 ? 0 : index;
-}
-
 function assertStorageScope(scope: AttachmentStorageScope): void {
   if (!isUrlProjectId(scope.projectId)) {
     throw new Error("Invalid upload project ID");
   }
-  if (!isSafePathSegment(scope.sessionId)) {
+  if (!isSafeUploadSessionId(scope.sessionId)) {
     throw new Error("Invalid upload session ID");
   }
 }
@@ -1615,8 +1583,8 @@ async function readRetentionRecord(
     parsed.attachmentIds.length === 0 ||
     parsed.attachmentIds.some((id) => !isSafeAttachmentId(id)) ||
     !Number.isSafeInteger(parsed.createdAtMs) ||
-    !Number.isSafeInteger(parsed.expiresAtMs) ||
-    (parsed.expiresAtMs ?? 0) <= (parsed.createdAtMs ?? 0)
+    (parsed.expiresAtMs !== undefined &&
+      !Number.isSafeInteger(parsed.expiresAtMs))
   ) {
     throw new Error("Invalid attachment retention record");
   }
@@ -1744,9 +1712,8 @@ function assertGeneratedArtifactRecord(
     !/^sha256:[a-f0-9]{64}$/.test(record.sha256) ||
     typeof record.createdAtMs !== "number" ||
     !Number.isSafeInteger(record.createdAtMs) ||
-    typeof record.expiresAtMs !== "number" ||
-    !Number.isSafeInteger(record.expiresAtMs) ||
-    record.expiresAtMs <= record.createdAtMs ||
+    (record.expiresAtMs !== undefined &&
+      !Number.isSafeInteger(record.expiresAtMs)) ||
     !isValidGeneratedArtifactReplayBinding(record)
   ) {
     throw new GeneratedArtifactAccessError("INVALID");
@@ -1801,9 +1768,7 @@ function assertGeneratedArtifactExpectation(
       !/^upload:[a-f0-9-]{36}$/.test(expected.managedRef)) ||
     (expected.mimeType !== undefined && !isSafeMimeType(expected.mimeType)) ||
     (expected.sizeBytes !== undefined &&
-      (!Number.isSafeInteger(expected.sizeBytes) || expected.sizeBytes <= 0)) ||
-    (expected.expiresAtMs !== undefined &&
-      !Number.isSafeInteger(expected.expiresAtMs))
+      (!Number.isSafeInteger(expected.sizeBytes) || expected.sizeBytes <= 0))
   ) {
     throw new GeneratedArtifactAccessError("INVALID");
   }
@@ -1823,9 +1788,7 @@ function matchesGeneratedArtifactExpectation(
     (expected.mimeType === undefined ||
       record.mimeType === expected.mimeType) &&
     (expected.sizeBytes === undefined ||
-      record.sizeBytes === expected.sizeBytes) &&
-    (expected.expiresAtMs === undefined ||
-      record.expiresAtMs === expected.expiresAtMs)
+      record.sizeBytes === expected.sizeBytes)
   );
 }
 
@@ -1844,10 +1807,6 @@ export function isGeneratedArtifactStorageFilename(value: string): boolean {
       value,
     ) && value.slice(37).startsWith(GENERATED_ARTIFACT_STORAGE_MARKER)
   );
-}
-
-function taskReference(scope: TaskAttachmentScope): string {
-  return `upload-task:${scope.projectId}:${scope.sessionId}:${scope.taskId}`;
 }
 
 function isSafePathSegment(value: string): boolean {

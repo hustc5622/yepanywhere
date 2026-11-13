@@ -1,5 +1,5 @@
 import type { UploadedFile } from "@yep-anywhere/shared";
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { restorePromptAttachments } from "../restorePromptAttachments";
 import {
   getUploadUrl,
@@ -7,8 +7,33 @@ import {
   parseUserPromptContent,
 } from "../userPromptContent";
 
+const mocks = vi.hoisted(() => ({ getUploadEntry: vi.fn() }));
+vi.mock("../../api/client", () => ({
+  api: { getUploadEntry: mocks.getUploadEntry },
+}));
+
 const managedPath =
   "/Users/test/.yep-anywhere/uploads/cHJvamVjdA/session-1/123e4567-e89b-12d3-a456-426614174000_shot.png";
+
+function managedEntry(ref: string) {
+  const name = decodeURIComponent(ref.split("/").pop() ?? "");
+  return {
+    entry: {
+      ref,
+      id: name.slice(0, 36),
+      projectId: "cHJvamVjdA",
+      sessionId: "session-1",
+      name,
+      originalName: name.slice(37),
+      size: 12,
+      mimeType: "image/png",
+      uploadedAt: "2026-11-12T00:00:00.000Z",
+      source: "web",
+      usedBy: [],
+      downloadUrl: ref,
+    },
+  };
+}
 
 function connection() {
   return {
@@ -24,7 +49,7 @@ function connection() {
         id: "restored-image",
         originalName: file.name,
         name: `restored_${file.name}`,
-        path: `/uploads/restored_${file.name}`,
+        ref: `/api/projects/cA/sessions/s/upload/restored_${file.name}`,
         size: file.size,
         mimeType: file.type,
       }),
@@ -33,9 +58,14 @@ function connection() {
 }
 
 describe("historical prompt attachments", () => {
+  beforeEach(() => {
+    mocks.getUploadEntry
+      .mockReset()
+      .mockImplementation(async (ref: string) => managedEntry(ref));
+  });
   afterEach(() => vi.unstubAllGlobals());
 
-  it("restores a named screenshot once, retaining its position in the text", async () => {
+  it("reuses a managed screenshot once, retaining its position in the text", async () => {
     const parsed = parseUserPromptContent([
       {
         type: "text",
@@ -50,16 +80,15 @@ describe("historical prompt attachments", () => {
       "project",
       "session",
     );
+    const ref =
+      "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_shot.png";
     expect(restored.text).toBe("before @[shot.png] after");
-    expect(restored.attachments).toHaveLength(1);
-    expect(transport.fetchBlob).toHaveBeenCalledWith(
-      "/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_shot.png",
-    );
-    expect(transport.upload).toHaveBeenCalledWith(
-      "project",
-      "session",
-      expect.objectContaining({ name: "shot.png", size: 14 }),
-    );
+    expect(restored.attachments).toEqual([
+      expect.objectContaining({ ref, originalName: "shot.png" }),
+    ]);
+    expect(mocks.getUploadEntry).toHaveBeenCalledWith(ref);
+    expect(transport.fetchBlob).not.toHaveBeenCalled();
+    expect(transport.upload).not.toHaveBeenCalled();
   });
 
   it("preserves two different files sharing one filename and adds only the missing token", async () => {
@@ -80,13 +109,13 @@ describe("historical prompt attachments", () => {
       "session",
     );
     expect(restored.text).toBe("compare @[shot.png]  @[shot.png]  ");
-    expect(restored.attachments).toHaveLength(2);
-    expect(transport.upload).toHaveBeenCalledTimes(2);
+    expect(new Set(restored.attachments.map((file) => file.id)).size).toBe(2);
+    expect(transport.upload).not.toHaveBeenCalled();
   });
 
-  it("fails the complete restoration before uploading when an image is missing", async () => {
+  it("fails the complete restoration when a managed upload is gone", async () => {
     const transport = connection();
-    transport.fetchBlob.mockRejectedValueOnce(new Error("API error: 404"));
+    mocks.getUploadEntry.mockRejectedValueOnce(new Error("API error: 404"));
     const parsed = parseUserPromptContent(
       `Keep screenshot\n\nUser uploaded files:\n- shot.png (12 KB, image/png): ${managedPath}`,
     );
@@ -202,7 +231,7 @@ describe("historical prompt attachments", () => {
           attachments: [
             {
               originalName: "shot.png",
-              path: managedPath,
+              path: "/api/local-image?path=%2Ftmp%2Fshot.png",
               size: "1 KB",
               mimeType: "image/png",
             },

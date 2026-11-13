@@ -520,7 +520,7 @@ describe("canonical Codex persisted session projection", () => {
     });
   });
 
-  it("attaches only unexpired, source-matched generated artifact manifests", () => {
+  it("attaches source-matched generated artifact manifests, including legacy expiring ones", () => {
     const events = [
       testEvent(1, "item/completed", {
         threadId: "thread-1",
@@ -570,23 +570,20 @@ describe("canonical Codex persisted session projection", () => {
             downloadUrl: `/api/projects/project-1/sessions/session-1/generated-artifact/ga_ffffffffffffffffffffffffffffffff/${"a".repeat(64)}/report.txt`,
           },
         ],
-        nowMs: Date.parse("2026-08-08T00:00:00.000Z"),
       },
     );
     expect(liveEquivalent.messages[0]?.codexGeneratedArtifacts).toEqual([
       artifact,
     ]);
 
-    const expired = overlayCanonicalCodexSessionMessages(
-      "session-1",
-      [],
-      events,
-      {
-        generatedArtifacts: [artifact],
-        nowMs: Date.parse("2026-08-09T00:00:00.000Z"),
-      },
-    );
-    expect(expired.messages[0]?.codexGeneratedArtifacts).toBeUndefined();
+    const persistent = {
+      ...artifact,
+      retention: { policy: "persistent" as const },
+    };
+    const kept = overlayCanonicalCodexSessionMessages("session-1", [], events, {
+      generatedArtifacts: [persistent],
+    });
+    expect(kept.messages[0]?.codexGeneratedArtifacts).toEqual([persistent]);
   });
 
   it("retains original reasoning, commands, paths, diffs and generated prompts", () => {

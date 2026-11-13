@@ -1,3 +1,4 @@
+import type { UploadedFile } from "@yep-anywhere/shared";
 import {
   type KeyboardEvent,
   useCallback,
@@ -17,7 +18,10 @@ import {
   isComposerComposing,
 } from "../lib/composerKeyboard";
 import { useCommandCompletion } from "./useCommandCompletion";
-import { useComposerDocument } from "./useComposerDocument";
+import {
+  type AttachmentCandidate,
+  useComposerDocument,
+} from "./useComposerDocument";
 
 export interface UseComposerOptions<T> {
   /** Committed draft text; the container owns persistence. */
@@ -27,11 +31,15 @@ export interface UseComposerOptions<T> {
   describeAttachment: (attachment: T) => ComposerAttachment;
   getClipboardSource?: (attachment: T) => ClipboardAttachmentSource | null;
   onAttach?: (files: File[], beforeAttachmentId?: string) => void;
+  onAttachExisting?: (
+    uploads: UploadedFile[],
+    beforeAttachmentId?: string,
+  ) => void;
   onRemove?: (ids: string[]) => void;
   onRestore?: (ids: string[]) => void;
   canAttach?: boolean;
-  acceptFile?: (file: File) => boolean;
-  onRejectFiles?: (files: File[]) => void;
+  acceptFile?: (file: AttachmentCandidate) => boolean;
+  onRejectFiles?: (files: AttachmentCandidate[]) => void;
   disabled?: boolean;
   commandConfigs: AgentCommandConfig[];
   onCustomCommand?: (command: string) => boolean;
@@ -55,6 +63,7 @@ export function useComposer<T>({
   describeAttachment,
   getClipboardSource,
   onAttach,
+  onAttachExisting,
   onRemove,
   onRestore,
   canAttach,
@@ -113,6 +122,7 @@ export function useComposer<T>({
     acceptFile,
     onRejectFiles,
     onAttach,
+    onAttachExisting,
     onRemove,
     onRestore,
     onTextChange: (value, cursor) => {

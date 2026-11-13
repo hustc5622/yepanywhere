@@ -98,10 +98,27 @@ import { NewSessionSetupSkeleton } from "./NewSessionSkeleton";
 import { PiGatewayKeySelect } from "./PiGatewayKeySelect";
 import { ThinkingToggleButton } from "./ThinkingToggleButton";
 
-interface PendingFile {
-  id: string;
-  file: File;
-  previewUrl?: string;
+/** A local file uploaded once the session exists, or an upload already on the server. */
+type PendingFile =
+  | { id: string; file: File; previewUrl?: string }
+  | { id: string; upload: UploadedFile; previewUrl?: undefined };
+
+function pendingFileInfo(pending: PendingFile): {
+  name: string;
+  mimeType: string;
+  size: number;
+} {
+  return "file" in pending
+    ? {
+        name: pending.file.name,
+        mimeType: pending.file.type,
+        size: pending.file.size,
+      }
+    : {
+        name: pending.upload.originalName,
+        mimeType: pending.upload.mimeType,
+        size: pending.upload.size,
+      };
 }
 
 const CODEX_MCP_MODE_ORDER: CodexMcpMode[] = ["clear", "standard", "full"];
@@ -1188,7 +1205,9 @@ export function NewSessionForm({
       void draftFileStore
         .save(
           draftFilesKey,
-          pendingFiles.map(({ id, file }) => ({ id, file })),
+          pendingFiles.flatMap((pending) =>
+            "file" in pending ? [{ id: pending.id, file: pending.file }] : [],
+          ),
         )
         .then(({ skippedNames }) => {
           const fresh = skippedNames.filter(
@@ -1206,13 +1225,35 @@ export function NewSessionForm({
   }, [draftFilesKey, isStarting, pendingFiles, restoringFiles, showToast, t]);
 
   const addPendingFiles = (files: File[], beforeAttachmentId?: string) => {
-    const newPendingFiles: PendingFile[] = files.map((file) => ({
-      id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
-      file,
-      previewUrl: file.type.startsWith("image/")
-        ? URL.createObjectURL(file)
-        : undefined,
-    }));
+    insertPendingFiles(
+      files.map((file) => ({
+        id: `pending-${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        file,
+        previewUrl: file.type.startsWith("image/")
+          ? URL.createObjectURL(file)
+          : undefined,
+      })),
+      beforeAttachmentId,
+    );
+  };
+
+  const addExistingUploads = (
+    uploads: UploadedFile[],
+    beforeAttachmentId?: string,
+  ) => {
+    const present = new Set(pendingFileOrderRef.current);
+    insertPendingFiles(
+      uploads
+        .filter((upload) => !present.has(upload.id))
+        .map((upload) => ({ id: upload.id, upload })),
+      beforeAttachmentId,
+    );
+  };
+
+  const insertPendingFiles = (
+    newPendingFiles: PendingFile[],
+    beforeAttachmentId?: string,
+  ) => {
     const order = pendingFileOrderRef.current;
     const anchorIndex = beforeAttachmentId
       ? order.indexOf(beforeAttachmentId)
@@ -1244,11 +1285,13 @@ export function NewSessionForm({
     attachments: pendingFiles,
     describeAttachment: (pending) => {
       const progress = isStarting ? uploadProgress[pending.id] : undefined;
+      const info = pendingFileInfo(pending);
       return {
         id: pending.id,
-        name: pending.file.name,
-        mimeType: pending.file.type,
+        name: info.name,
+        mimeType: info.mimeType,
         previewUrl: pending.previewUrl,
+        apiPath: "upload" in pending ? pending.upload.ref : undefined,
         pending: !!progress,
         progress: progress
           ? progress.total > 0
@@ -1257,14 +1300,24 @@ export function NewSessionForm({
           : undefined,
       };
     },
-    // Pending files are still local, so copies carry their bytes.
-    getClipboardSource: (pending) => ({
-      name: pending.file.name,
-      mimeType: pending.file.type,
-      read: async () => pending.file,
-    }),
+    // Local files carry their bytes; existing uploads travel by reference.
+    getClipboardSource: (pending) =>
+      "file" in pending
+        ? {
+            name: pending.file.name,
+            mimeType: pending.file.type,
+            read: async () => pending.file,
+          }
+        : {
+            name: pending.upload.originalName,
+            mimeType: pending.upload.mimeType,
+            read: () =>
+              connection.fetchBlob(pending.upload.ref.slice("/api".length)),
+            reference: pending.upload.ref,
+          },
     disabled: isStarting,
     onAttach: addPendingFiles,
+    onAttachExisting: addExistingUploads,
     onRemove: removePendingFiles,
     onRestore: (ids) => {
       const restored = ids.flatMap((id) => {
@@ -1707,6 +1760,10 @@ export function NewSessionForm({
 
         // Step 2: Upload files to the real session folder
         for (const pendingFile of pendingFiles) {
+          if ("upload" in pendingFile) {
+            uploadedFiles.push(pendingFile.upload);
+            continue;
+          }
           try {
             const uploadedFile = await connection.upload(
               projectId,
@@ -1964,7 +2021,7 @@ export function NewSessionForm({
           const progress = isStarting ? uploadProgress[pending.id] : undefined;
           return progress
             ? `${Math.round((progress.uploaded / progress.total) * 100)}%`
-            : formatSize(pending.file.size);
+            : formatSize(pendingFileInfo(pending).size);
         }}
       />
       <ComposerToolbar
