@@ -77,6 +77,7 @@ import { normalizeProviderGroup } from "../sessions/provider-groups.js";
 import {
   type ProviderResolutionDeps,
   type SessionSource,
+  createCursorSource,
   findSessionSummaryAcrossProviders,
   resolveSessionSources,
 } from "../sessions/provider-resolution.js";
@@ -960,7 +961,14 @@ export function createSessionDisplaySource(
             deferThinking: true,
           },
         );
-        if (!loaded && resolved.runtime.toolsMayBeActive && !cursor)
+        if (
+          !loaded &&
+          !cursor &&
+          (resolved.runtime.toolsMayBeActive ||
+            (resolved.source.provider === "cursor" &&
+              resolved.runtime.provider === "cursor" &&
+              resolved.runtime.projectId === resolved.project.id))
+        )
           return {
             provider: resolved.source.provider,
             messages: [],
@@ -1150,6 +1158,25 @@ async function resolveDisplaySession(
     : { toolsMayBeActive: false };
   const preferredProvider =
     runtime.provider ?? deps.getPersistedProvider?.(sessionId);
+  if (allowUnpersisted && preferredProvider === "cursor") {
+    const source = createCursorSource(project, deps.providerResolution);
+    // The reader checks meta.json for this chat's project before opening SQLite.
+    // A new chat may have no store yet, but its runtime still knows its project.
+    const targetProjectId = project.id;
+    const summary = await timed(timing, "summary", () =>
+      source.reader.getSessionSummary(sessionId, targetProjectId),
+    );
+    if (summary) return { project, sessionId, source, summary, runtime };
+    if (runtime.provider === "cursor" && runtime.projectId === project.id) {
+      return {
+        project,
+        sessionId,
+        source,
+        runtime,
+        summary: unpersistedDisplaySummary(sessionId, project.id, "cursor"),
+      };
+    }
+  }
   const findSummary = (target: Project) =>
     timed(timing, "summary", () =>
       findSessionSummaryAcrossProviders(
@@ -1193,17 +1220,11 @@ async function resolveDisplaySession(
     if (source)
       resolved = {
         source,
-        summary: {
-          id: sessionId,
-          projectId: project.id,
-          title: null,
-          fullTitle: null,
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-          messageCount: 0,
-          ownership: { owner: "none" },
-          provider: runtime.provider,
-        },
+        summary: unpersistedDisplaySummary(
+          sessionId,
+          project.id,
+          runtime.provider,
+        ),
       };
   }
   if (!resolved) {
@@ -1219,6 +1240,25 @@ async function resolveDisplaySession(
     source: resolved.source,
     summary: resolved.summary,
     runtime,
+  };
+}
+
+function unpersistedDisplaySummary(
+  sessionId: string,
+  projectId: Project["id"],
+  provider: ProviderName,
+): SessionSummary {
+  const now = new Date().toISOString();
+  return {
+    id: sessionId,
+    projectId,
+    title: null,
+    fullTitle: null,
+    createdAt: now,
+    updatedAt: now,
+    messageCount: 0,
+    ownership: { owner: "none" },
+    provider,
   };
 }
 

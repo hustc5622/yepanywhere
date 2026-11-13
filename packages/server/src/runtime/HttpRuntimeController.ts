@@ -411,12 +411,12 @@ export class HttpRuntimeController implements RuntimeController {
     });
   }
 
-  async warmCursorAuth(model?: string): Promise<void> {
+  async warmCursorAuth(input: { cwd: string; model?: string }): Promise<void> {
     await this.request(
       "/cursor/warm",
       {
         method: "POST",
-        body: JSON.stringify({ model }),
+        body: JSON.stringify(input),
       },
       "slow",
     );

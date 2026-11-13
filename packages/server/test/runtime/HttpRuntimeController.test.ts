@@ -258,7 +258,9 @@ describe("HttpRuntimeController", () => {
     await expect(controller.getStatus()).rejects.toThrow(
       "Agent runtime did not answer GET /status within 20ms",
     );
-    await expect(controller.warmCursorAuth("auto")).rejects.toThrow(
+    await expect(
+      controller.warmCursorAuth({ cwd: "/tmp/test", model: "auto" }),
+    ).rejects.toThrow(
       "Agent runtime did not answer POST /cursor/warm within 40ms",
     );
   });
@@ -438,7 +440,10 @@ describe("HttpRuntimeController", () => {
       cwd: "/tmp/cursor-prepare",
       model: "auto",
     });
-    await controller.warmCursorAuth("auto");
+    await controller.warmCursorAuth({
+      cwd: "/tmp/cursor-prepare",
+      model: "auto",
+    });
 
     expect(prepareCursorSession).toHaveBeenCalledWith({
       cwd: "/tmp/cursor-prepare",
@@ -449,7 +454,10 @@ describe("HttpRuntimeController", () => {
       cwd: "/tmp/cursor-prepare",
       model: "auto",
     });
-    expect(warmCursorAuth).toHaveBeenCalledWith("auto");
+    expect(warmCursorAuth).toHaveBeenCalledWith({
+      cwd: "/tmp/cursor-prepare",
+      model: "auto",
+    });
   });
 
   it("round-trips immediate admission without entering the external runtime queue", async () => {

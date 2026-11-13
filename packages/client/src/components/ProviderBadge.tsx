@@ -167,7 +167,7 @@ export function ProviderBadge({
     cursorBadge?.reasoning || cursorBadge?.thinking,
   );
 
-  const modelLabel = getModelLabel(model);
+  const modelLabel = getModelLabel(cursorBadge?.modelId ?? model);
   const configLabel = [
     modelLabel,
     cursorBadge?.context,

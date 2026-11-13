@@ -582,6 +582,43 @@ describe("session display routes", () => {
     }
   });
 
+  it.each([false, true])(
+    "opens a registered Cursor session before its store exists (active=%s)",
+    async (toolsMayBeActive) => {
+      const reader = {
+        getSessionSummary: vi.fn(async () => null),
+        getSession: vi.fn(async () => null),
+        getSessionFileStats: vi.fn(async () => null),
+      };
+      const readerFactory = vi.fn();
+      const getSessionSummaryWithCache = vi.fn();
+      const source = createSessionDisplaySource({
+        scanner: { getOrCreateProject: vi.fn(async () => project()) },
+        providerResolution: {
+          readerFactory,
+          cursorReaderFactory: () => reader as never,
+          sessionIndexService: { getSessionSummaryWithCache } as never,
+        },
+        getRuntimeState: async () => ({
+          provider: "cursor",
+          projectId: PROJECT_ID,
+          toolsMayBeActive,
+        }),
+      });
+
+      expect(
+        await source.read({ projectId: PROJECT_ID, sessionId: SESSION_ID }),
+      ).toMatchObject({
+        provider: "cursor",
+        activity: toolsMayBeActive ? "running" : "unknown",
+        messages: [],
+      });
+      expect(reader.getSession).toHaveBeenCalledOnce();
+      expect(readerFactory).not.toHaveBeenCalled();
+      expect(getSessionSummaryWithCache).not.toHaveBeenCalled();
+    },
+  );
+
   it("annotates native Codex fork questions with cross-session alternatives", async () => {
     const summary: SessionSummary = {
       id: SESSION_ID,

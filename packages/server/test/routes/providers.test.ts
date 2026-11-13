@@ -97,11 +97,16 @@ describe("provider routes", () => {
         await forwarded.request("/cursor/warm", {
           method: "POST",
           headers: { "content-type": "application/json" },
-          body: JSON.stringify({ model: "auto" }),
+          body: JSON.stringify({ projectId, model: "auto" }),
         })
       ).status,
     ).toBe(200);
-    await vi.waitFor(() => expect(warmCursorAuth).toHaveBeenCalledWith("auto"));
+    await vi.waitFor(() =>
+      expect(warmCursorAuth).toHaveBeenCalledWith({
+        cwd: "/tmp/cursor-prepare",
+        model: "auto",
+      }),
+    );
     expect(
       (
         await createProvidersRoutes({

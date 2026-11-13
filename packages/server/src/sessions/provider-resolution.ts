@@ -314,7 +314,7 @@ function createMcodeSource(
   };
 }
 
-function createCursorSource(
+export function createCursorSource(
   project: Project,
   deps: ProviderResolutionDeps,
 ): SessionSource {

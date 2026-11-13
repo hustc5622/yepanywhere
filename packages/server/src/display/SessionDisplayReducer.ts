@@ -304,6 +304,17 @@ export class SessionDisplayReducer {
     }
   }
 
+  private cursorTurnEnd(section: string): number | undefined {
+    let end = this.nodes.length;
+    for (let index = end - 1; index >= 0; index--) {
+      const node = this.nodes[index];
+      if (node?.type !== "question") continue;
+      if (node.turnId === section) return end;
+      end = index;
+    }
+    return undefined;
+  }
+
   /**
    * Restore a reasoning boundary inside a previously coalesced tool group.
    * Use the same first-call identity as live grouping so detail URLs and the
@@ -389,7 +400,7 @@ export class SessionDisplayReducer {
     // A missed anchor stays in this turn, before the reply it belongs with,
     // or before the tools when the reply has not been written yet. It must
     // not be appended after the answer.
-    return lastText ?? firstTool;
+    return lastText ?? firstTool ?? this.cursorTurnEnd(section);
   }
 
   setRuntime(state: SessionDisplayActivity["state"]): void {
@@ -832,7 +843,7 @@ export class SessionDisplayReducer {
         resultRun,
         message.turnStatus === "interrupted"
           ? "interrupted"
-          : message.is_error === true
+          : message.turnStatus === "failed" || message.is_error === true
             ? "failed"
             : "completed",
       );
@@ -919,8 +930,22 @@ export class SessionDisplayReducer {
       const previous =
         previousIndex === undefined ? undefined : this.nodes[previousIndex];
       if (previous?.type === "question") {
+        const turnId =
+          this.provider === "cursor" &&
+          runId &&
+          previous.turnId === `turn:${rawId}`
+            ? `turn:${runId}`
+            : previous.turnId;
+        if (
+          turnId !== previous.turnId &&
+          this.currentSection === previous.turnId
+        ) {
+          this.currentRun = runId ?? this.currentRun;
+          this.currentSection = turnId;
+        }
         this.put({
           ...previous,
+          turnId,
           question: {
             ...previous.question,
             ...question,
@@ -949,7 +974,16 @@ export class SessionDisplayReducer {
       if (startsNewRun) this.setRuntime("running");
       return;
     }
-    if (runId) this.currentRun = runId;
+    // Recovered Cursor thoughts and errors can target a previous question.
+    // They must not change which run subsequent live events belong to.
+    if (
+      runId &&
+      !(
+        this.provider === "cursor" &&
+        (message.type === "error" || message.cursorThinkingBefore !== undefined)
+      )
+    )
+      this.currentRun = runId;
     const effectiveRun = runId ?? this.currentRun;
     if (message.type === "system") {
       const nativeItem = record(message.codexThreadItem);
@@ -1052,12 +1086,18 @@ export class SessionDisplayReducer {
         string(message.error) ??
         string(record(message.error)?.message) ??
         (outputText(content) || "Agent error");
-      this.put({
+      const node: SegmentNode = {
         type: "segment",
         id,
         turnId: `turn:${effectiveRun}`,
         segment: { type: "error", id, message: text.slice(0, 8_192) },
-      });
+      };
+      const at =
+        this.provider === "cursor" && !this.nodeIndices.has(id)
+          ? this.cursorTurnEnd(node.turnId)
+          : undefined;
+      if (at === undefined) this.put(node);
+      else this.insertAt(at, node);
       this.closeRun(effectiveRun, "failed");
     }
   }

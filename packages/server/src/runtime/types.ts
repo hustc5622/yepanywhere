@@ -270,7 +270,7 @@ export interface RuntimeController {
     permissionMode?: PermissionMode;
   }): Promise<void>;
   discardCursorPrepare(input: { cwd: string; model?: string }): Promise<void>;
-  warmCursorAuth(model?: string): Promise<void>;
+  warmCursorAuth(input: { cwd: string; model?: string }): Promise<void>;
   queueMessage(
     input: QueueRuntimeMessageRequest,
   ): Promise<RuntimeQueueMessageResponse>;

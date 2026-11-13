@@ -108,7 +108,8 @@ describe("session display read observation", () => {
 
     expect(first.states).toEqual(["miss"]);
     expect(first.phases.get("read")).toBe(7);
-    expect(first.phases.get("stamp")).toBe(1);
+    // A cold read always reads the source; it has no stamp to compare.
+    expect(first.phases.has("stamp")).toBe(false);
     for (const name of ["attach", "reduce", "replay"] as const)
       expect(first.phases.has(name)).toBe(true);
 
@@ -136,7 +137,8 @@ describe("session display read observation", () => {
       failed: false,
       nodeCount: 1,
     });
-    expect(fields.phases).toMatchObject({ read: 3, stamp: 1 });
+    expect(fields.phases).toMatchObject({ read: 3 });
+    expect(fields.phases).not.toHaveProperty("stamp");
 
     // A warm read does not log again.
     await service.snapshot(selection);

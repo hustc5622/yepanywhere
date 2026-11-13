@@ -119,8 +119,9 @@ export function createRuntimeControlApp(
     return c.json({ ok: true });
   });
   app.post("/cursor/warm", async (c) => {
-    const body = await c.req.json<{ model?: string }>();
-    await controller.warmCursorAuth(body.model);
+    const body = await c.req.json<{ cwd?: string; model?: string }>();
+    if (body.cwd)
+      await controller.warmCursorAuth({ cwd: body.cwd, model: body.model });
     return c.json({ ok: true });
   });
   app.get("/processes", async (c) =>

@@ -1220,7 +1220,7 @@ export const api = {
       body: JSON.stringify(body),
     }),
 
-  warmCursorSession: (body: { model?: string }) =>
+  warmCursorSession: (body: { projectId: string; model?: string }) =>
     fetchJSON<{ ok: true }>("/providers/cursor/warm", {
       method: "POST",
       headers: { "Content-Type": "application/json" },

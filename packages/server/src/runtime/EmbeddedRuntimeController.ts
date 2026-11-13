@@ -231,8 +231,8 @@ export class EmbeddedRuntimeController implements RuntimeController {
     await discardCursorPrepareState(input);
   }
 
-  async warmCursorAuth(model?: string): Promise<void> {
-    await warmCursorAuthState(model);
+  async warmCursorAuth(input: { cwd: string; model?: string }): Promise<void> {
+    await warmCursorAuthState(input);
   }
 
   async listProcesses(): Promise<ProcessInfo[]> {

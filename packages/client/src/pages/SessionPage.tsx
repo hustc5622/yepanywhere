@@ -392,8 +392,10 @@ function SessionPageContent({
   const isReadOnlySession = isReadOnlyProvider(effectiveProvider);
   useEffect(() => {
     if (effectiveProvider !== "cursor" || !session?.id) return;
-    void api.warmCursorSession({ model: session.model }).catch(() => undefined);
-  }, [effectiveProvider, session?.id, session?.model]);
+    void api
+      .warmCursorSession({ projectId, model: session.model })
+      .catch(() => undefined);
+  }, [effectiveProvider, projectId, session?.id, session?.model]);
 
   const [scrollTrigger, setScrollTrigger] = useState(0);
   const draftControlsRef = useRef<DraftControls | null>(null);

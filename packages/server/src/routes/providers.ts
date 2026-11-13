@@ -140,11 +140,13 @@ export function createProvidersRoutes(deps: ProviderRouteDeps = {}): Hono {
     if (!isProviderEnabled("cursor", deps.enabledProviders))
       return c.json({ error: "Provider not found" }, 404);
     const body = await readJsonObject(c);
-    const model = stringField(body, "model");
+    const cwd = cursorPrepareCwd(body);
+    if (!cwd) return c.json({ ok: true });
+    const input = { cwd, model: stringField(body, "model") };
     if (deps.runtimeController?.mode === "external") {
-      void deps.runtimeController.warmCursorAuth(model).catch(() => undefined);
+      void deps.runtimeController.warmCursorAuth(input).catch(() => undefined);
     } else {
-      void warmCursorAuth(model).catch(() => undefined);
+      void warmCursorAuth(input).catch(() => undefined);
     }
     return c.json({ ok: true });
   });

@@ -65,7 +65,10 @@ import {
   getModelReasoningEfforts,
   resolveModelReasoningEffort,
 } from "../lib/codexReasoning";
-import { getPreferredCursorModelId } from "../lib/cursorModels";
+import {
+  getPreferredCursorModelId,
+  selectCursorModels,
+} from "../lib/cursorModels";
 import { draftFileStore } from "../lib/draftFileStore";
 import {
   clearLegacySessionPrefill,
@@ -467,17 +470,15 @@ export function NewSessionForm({
     full: t("newSessionCodexMcpFullDescription"),
   };
   // Get models and capabilities for the currently selected provider.
-  // A cold Cursor catalog must not block the shared provider list, so the
-  // form loads it only after Cursor is selected and the list is still empty.
+  // The shared provider list can arrive before Cursor's parameterized catalog.
+  // A non-empty flat list must not win over that catalog, or a saved
+  // expression stays stuck in one raw dropdown.
   const listedModels = selectedProviderInfo?.models ?? [];
   const availableModels: ModelInfo[] =
     selectedProvider === "mcode" && mcodeCatalog
       ? mcodeCatalog
-      : selectedProvider === "cursor" &&
-          listedModels.length === 0 &&
-          cursorCatalog &&
-          cursorCatalog.length > 0
-        ? cursorCatalog
+      : selectedProvider === "cursor"
+        ? selectCursorModels(listedModels, cursorCatalog)
         : listedModels;
   const selectedModelInfo = availableModels.find(
     (model) => model.id === selectedModel,
@@ -1444,9 +1445,6 @@ export function NewSessionForm({
         undefined)
       : selectedModelForRequest;
 
-  const cursorListedCount =
-    providers.find((provider) => provider.name === "cursor")?.models?.length ??
-    0;
   useEffect(() => {
     if (selectedProvider !== "mcode") {
       setMcodeCatalog(null);
@@ -1469,15 +1467,25 @@ export function NewSessionForm({
     };
   }, [selectedProvider]);
 
+  const cursorListedModels =
+    selectedProvider === "cursor" ? selectedProviderInfo?.models : undefined;
   useEffect(() => {
-    if (selectedProvider !== "cursor" || cursorListedCount > 0) return;
+    if (selectedProvider !== "cursor") return;
     let cancelled = false;
-    setCursorCatalogLoading(true);
+    const listed = cursorListedModels ?? [];
+    const listedHasOptions = listed.some(
+      (model) => (model.cursorConfigOptions?.length ?? 0) > 0,
+    );
+    if (!listedHasOptions) setCursorCatalogLoading(true);
     api
       .getProvider("cursor", { fresh: true })
       .then((result) => {
         if (cancelled) return;
-        setCursorCatalog(result.provider.models ?? []);
+        const models = result.provider.models ?? [];
+        const freshHasOptions = models.some(
+          (model) => (model.cursorConfigOptions?.length ?? 0) > 0,
+        );
+        if (freshHasOptions || listed.length === 0) setCursorCatalog(models);
       })
       .catch(() => undefined)
       .finally(() => {
@@ -1486,8 +1494,23 @@ export function NewSessionForm({
     return () => {
       cancelled = true;
     };
-  }, [selectedProvider, cursorListedCount]);
+  }, [cursorListedModels, selectedProvider]);
+  useEffect(() => {
+    if (selectedProvider !== "cursor") return;
+    const models = selectCursorModels(cursorListedModels ?? [], cursorCatalog);
+    if (!models.some((model) => (model.cursorConfigOptions?.length ?? 0) > 0)) {
+      return;
+    }
+    setSelectedModel((current) => {
+      if (!current) return current;
+      const next = getPreferredCursorModelId(models, current);
+      return next && next !== current ? next : current;
+    });
+  }, [cursorCatalog, cursorListedModels, selectedProvider]);
 
+  // ACP creates the chat using the base model. The selected parameters are
+  // applied on send, so changing them can reuse the same prepared chat.
+  const cursorPrepareModel = modelForRequest?.split("[", 1)[0];
   useEffect(() => {
     const discard = (key: string | null) => {
       if (!key) return;
@@ -1499,12 +1522,12 @@ export function NewSessionForm({
         })
         .catch(() => undefined);
     };
-    if (selectedProvider !== "cursor" || !projectId || !modelForRequest) {
+    if (selectedProvider !== "cursor" || !projectId) {
       discard(cursorPrepareKeyRef.current);
       cursorPrepareKeyRef.current = null;
       return;
     }
-    const key = `${projectId}\0${modelForRequest}`;
+    const key = `${projectId}\0${cursorPrepareModel ?? ""}`;
     if (cursorPrepareKeyRef.current && cursorPrepareKeyRef.current !== key) {
       discard(cursorPrepareKeyRef.current);
     }
@@ -1512,11 +1535,11 @@ export function NewSessionForm({
     void api
       .prepareCursorSession({
         projectId,
-        model: modelForRequest,
+        model: cursorPrepareModel,
         permissionMode: mode,
       })
       .catch(() => undefined);
-  }, [mode, modelForRequest, projectId, selectedProvider]);
+  }, [cursorPrepareModel, mode, projectId, selectedProvider]);
 
   useEffect(
     () => () => {

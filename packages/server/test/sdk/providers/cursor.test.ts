@@ -36,6 +36,7 @@ let extension: (
 ) => Promise<Record<string, unknown>>;
 const sessions: AgentSession[] = [];
 const processes: Process[] = [];
+const warmInput = { cwd: "/test", model: "auto" };
 
 beforeEach(() => {
   vi.spyOn(ACPClient.prototype, "connect").mockResolvedValue();
@@ -205,7 +206,7 @@ describe("Cursor ACP lifecycle", () => {
   });
   it("applies selected parameters on a prepared session before the first prompt", async () => {
     const model = "grok-4.7[context=500k,reasoning_effort=high,fast=false]";
-    await prepareCursorSession({ cwd: "/test", model });
+    await prepareCursorSession({ cwd: "/test", model: "grok-4.7" });
     expect(ACPClient.prototype.connect).toHaveBeenCalledWith(
       expect.objectContaining({
         args: expect.arrayContaining(["--model", "grok-4.7", "acp"]),
@@ -236,6 +237,10 @@ describe("Cursor ACP lifecycle", () => {
       sendText("hello");
       await new Promise<void>((resolve) => {
         finish = resolve;
+      });
+      update({
+        sessionId: "cursor-test",
+        update: { sessionUpdate: "session_info_update", title: "New title" },
       });
       sendText(" world");
       return { stopReason: "end_turn" };
@@ -553,6 +558,7 @@ describe("Cursor ACP lifecycle", () => {
       session_id: "cursor-test",
     });
     expect(ACPClient.prototype.newSession).toHaveBeenCalledTimes(1);
+    expect(ACPClient.prototype.setSessionMode).toHaveBeenCalledTimes(1);
   });
 
   it("resumes on an already authenticated idle process", async () => {
@@ -560,7 +566,8 @@ describe("Cursor ACP lifecycle", () => {
     vi.spyOn(ACPClient.prototype, "prompt").mockResolvedValue({
       stopReason: "end_turn",
     });
-    await warmCursorAuth("auto");
+    await warmCursorAuth(warmInput);
+    const warmed = vi.mocked(ACPClient.prototype.connect).mock.contexts[0];
     vi.mocked(ACPClient.prototype.connect).mockClear();
     vi.mocked(ACPClient.prototype.authenticate).mockClear();
     const session = await start({
@@ -573,6 +580,9 @@ describe("Cursor ACP lifecycle", () => {
       "resume-1",
       "/test",
     );
+    expect(vi.mocked(ACPClient.prototype.loadSession).mock.contexts[0]).toBe(
+      warmed,
+    );
     expect(ACPClient.prototype.newSession).not.toHaveBeenCalled();
   });
 
@@ -580,17 +590,35 @@ describe("Cursor ACP lifecycle", () => {
     vi.spyOn(ACPClient.prototype, "prompt").mockResolvedValue({
       stopReason: "end_turn",
     });
-    await warmCursorAuth("auto");
+    await warmCursorAuth(warmInput);
+    const warmed = vi.mocked(ACPClient.prototype.connect).mock.contexts[0];
     const session = await start({ model: "auto" });
     expect((await session.iterator.next()).value).toMatchObject({
       type: "system",
       session_id: "cursor-test",
     });
-    expect(ACPClient.prototype.connect).not.toHaveBeenCalledWith(
-      expect.objectContaining({ cwd: "/test" }),
-    );
     expect(ACPClient.prototype.newSession).toHaveBeenCalledTimes(1);
     expect(ACPClient.prototype.newSession).toHaveBeenCalledWith("/test");
+    expect(vi.mocked(ACPClient.prototype.newSession).mock.contexts[0]).toBe(
+      warmed,
+    );
+  });
+
+  it("does not reuse an idle process from a different project", async () => {
+    await warmCursorAuth({ cwd: "/other-project", model: "auto" });
+    const session = await start({ model: "auto" });
+    expect((await session.iterator.next()).value.type).toBe("system");
+    expect(ACPClient.prototype.connect).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({ cwd: "/other-project" }),
+    );
+    expect(ACPClient.prototype.connect).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({ cwd: "/test" }),
+    );
+    expect(vi.mocked(ACPClient.prototype.newSession).mock.contexts[0]).toBe(
+      vi.mocked(ACPClient.prototype.connect).mock.contexts[1],
+    );
   });
 
   it("closes an agent that never finishes authenticating", async () => {
@@ -598,13 +626,13 @@ describe("Cursor ACP lifecycle", () => {
     vi.mocked(ACPClient.prototype.authenticate).mockImplementation(
       () => new Promise<void>(() => {}),
     );
-    await expect(warmCursorAuth("auto")).rejects.toThrow(
+    await expect(warmCursorAuth(warmInput)).rejects.toThrow(
       /authentication did not finish within 20ms/,
     );
     expect(ACPClient.prototype.close).toHaveBeenCalledTimes(1);
     // The failed warm leaves no entry behind, so the next warm retries.
     vi.mocked(ACPClient.prototype.authenticate).mockResolvedValue();
-    await warmCursorAuth("auto");
+    await warmCursorAuth(warmInput);
     expect(ACPClient.prototype.connect).toHaveBeenCalledTimes(2);
   });
 
@@ -624,11 +652,34 @@ describe("Cursor ACP lifecycle", () => {
     );
   });
 
+  it("does not send the first prompt if startup is aborted during prewarm handoff", async () => {
+    let finishPrepare!: (sessionId: string) => void;
+    const newSession = vi.mocked(ACPClient.prototype.newSession);
+    newSession.mockImplementationOnce(
+      () =>
+        new Promise((resolve) => {
+          finishPrepare = resolve;
+        }),
+    );
+    const prompt = vi.spyOn(ACPClient.prototype, "prompt");
+    const preparing = prepareCursorSession(warmInput);
+    await vi.waitFor(() => expect(newSession).toHaveBeenCalledOnce());
+    const session = await start({ model: "auto" });
+    const started = session.iterator.next();
+    session.abort();
+    finishPrepare("cursor-test");
+    await preparing;
+
+    await expect(started).resolves.toMatchObject({ done: true });
+    expect(ACPClient.prototype.close).toHaveBeenCalled();
+    expect(prompt).not.toHaveBeenCalled();
+  });
+
   it("does not hand out a warm agent that exited while idle", async () => {
     vi.spyOn(ACPClient.prototype, "prompt").mockResolvedValue({
       stopReason: "end_turn",
     });
-    await warmCursorAuth("auto");
+    await warmCursorAuth(warmInput);
     vi.mocked(ACPClient.prototype.isAlive).mockReturnValueOnce(false);
     vi.mocked(ACPClient.prototype.connect).mockClear();
     const session = await start({ model: "auto" });
@@ -641,9 +692,9 @@ describe("Cursor ACP lifecycle", () => {
   });
 
   it("evicts the default-model idle process when warming a third model", async () => {
-    await warmCursorAuth();
-    await warmCursorAuth("auto");
-    await warmCursorAuth("gpt-5");
+    await warmCursorAuth({ cwd: "/test" });
+    await warmCursorAuth(warmInput);
+    await warmCursorAuth({ cwd: "/test", model: "gpt-5" });
     expect(ACPClient.prototype.connect).toHaveBeenCalledTimes(3);
     await vi.waitFor(() =>
       expect(ACPClient.prototype.close).toHaveBeenCalledTimes(1),

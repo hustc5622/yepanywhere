@@ -114,6 +114,11 @@ interface Entry {
    * answer.
    */
   cursorPendingThoughts: string[];
+  /** Live question identity and timestamp, retained when Cursor persists it under a hash. */
+  cursorPrompts: Map<
+    string,
+    { id?: string; timestamp?: string; digest: string }
+  >;
   streamId?: string;
   provider?: string;
   stamp?: string;
@@ -269,6 +274,52 @@ function cursorPromptsMatch(native: string, live: string): boolean {
   const left = cursorPromptIdentity(native);
   const right = cursorPromptIdentity(live);
   return left.length > 0 && left === right;
+}
+
+function cursorPromptDigest(message: RecordValue): string {
+  return createHash("sha256")
+    .update(cursorPromptIdentity(cursorPromptBody(message)))
+    .digest("hex");
+}
+
+function rememberCursorPrompt(entry: Entry, message: RecordValue): boolean {
+  const { turnId, cursorTurnIndex } = message;
+  if (
+    typeof turnId !== "string" ||
+    typeof cursorTurnIndex !== "number" ||
+    !isCursorUserPrompt(message)
+  )
+    return false;
+  const identity = message.clientUserMessageId ?? message.uuid ?? message.id;
+  const id = typeof identity === "string" ? identity : undefined;
+  const timestamp =
+    typeof message.timestamp === "string" ? message.timestamp : undefined;
+  const digest = cursorPromptDigest(message);
+  const previous = entry.cursorPrompts.get(turnId);
+  if (
+    previous?.id === id &&
+    previous?.timestamp === timestamp &&
+    previous?.digest === digest
+  )
+    return false;
+  if (entry.cursorPrompts.size >= 500 && !previous) {
+    const oldest = entry.cursorPrompts.keys().next().value;
+    if (oldest !== undefined) entry.cursorPrompts.delete(oldest);
+  }
+  entry.cursorPrompts.set(turnId, { id, timestamp, digest });
+  return true;
+}
+
+function mergeCursorPrompt(entry: Entry, message: Message): Message {
+  if (typeof message.turnId !== "string" || !isCursorUserPrompt(message))
+    return message;
+  const live = entry.cursorPrompts.get(message.turnId);
+  if (!live || live.digest !== cursorPromptDigest(message)) return message;
+  return {
+    ...message,
+    ...(live.id ? { clientUserMessageId: live.id } : {}),
+    ...(live.timestamp ? { timestamp: live.timestamp } : {}),
+  };
 }
 
 /**
@@ -621,6 +672,7 @@ export class SessionDisplayService {
         details: new Map(),
         detailBytes: 0,
         cursorPendingThoughts: [],
+        cursorPrompts: new Map(),
       };
       this.entries.set(key, entry);
       const current = entry;
@@ -726,6 +778,7 @@ export class SessionDisplayService {
     entry.details.clear();
     entry.detailBytes = 0;
     entry.cursorPendingThoughts = [];
+    entry.cursorPrompts.clear();
   }
 
   /**
@@ -885,6 +938,7 @@ export class SessionDisplayService {
         const terminals = new Map<unknown, RecordValue>();
         const thoughts = new Map<string, RecordValue>();
         const pendingThoughts: RecordValue[] = [];
+        let promptsChanged = false;
         // Reuse lifecycle pairing on timing-only messages. Replaying whole
         // tools here would replace native names/results and disturb grouping.
         const toolTimings = new SessionDisplayReducer(entry.view, "cursor");
@@ -900,8 +954,13 @@ export class SessionDisplayService {
             record.sessionId !== entry.selection.sessionId
           )
             continue;
-          const message = asRecord(record.data);
-          if (!message) continue;
+          const data = asRecord(record.data);
+          if (!data) continue;
+          const message: RecordValue = {
+            ...data,
+            timestamp: data.timestamp ?? record.timestamp,
+          };
+          if (rememberCursorPrompt(entry, message)) promptsChanged = true;
           const content = messageContent(message);
           if (Array.isArray(content)) {
             const tools = content.flatMap<RecordValue>((value) => {
@@ -983,9 +1042,13 @@ export class SessionDisplayService {
           if (record.processId && record.processId !== outcomeProcessId)
             continue;
           const failure = cursorStreamError(messageContent(message));
-          if (failure || message.type === "error")
+          if (
+            (failure || message.type === "error") &&
+            typeof message.turnId === "string"
+          )
             failures.set(message.turnId, {
               ...message,
+              uuid: message.uuid ?? `cursor-error:${message.turnId}`,
               isReplay: false,
               type: "error",
               message: undefined,
@@ -993,23 +1056,26 @@ export class SessionDisplayService {
               role: undefined,
               error: failure?.message ?? message.error,
             });
-          if (message.type === "result") terminals.set(message.turnId, message);
+          if (message.type === "result" && typeof message.turnId === "string")
+            terminals.set(message.turnId, {
+              ...message,
+              uuid: message.uuid ?? `cursor-result:${message.turnId}`,
+            });
         }
         for (const thought of pendingThoughts) {
           if (thought.cursorThinkingBefore === undefined)
             thought.cursorThinkingBefore = { fallback: true };
         }
-        for (const [turnId, failure] of failures) {
+        for (const failure of failures.values())
           this.event(entry, "message", failure);
-          const terminal = terminals.get(turnId);
-          if (terminal)
-            this.event(entry, "message", {
-              ...terminal,
-              isReplay: false,
-              turnStatus: "failed",
-              is_error: true,
-            });
-        }
+        for (const [turnId, terminal] of terminals)
+          this.event(entry, "message", {
+            ...terminal,
+            isReplay: false,
+            ...(failures.has(turnId)
+              ? { turnStatus: "failed", is_error: true }
+              : {}),
+          });
         let anchorsChanged = false;
         for (const thought of thoughts.values()) {
           const uuid = thought.uuid;
@@ -1030,7 +1096,7 @@ export class SessionDisplayService {
         // Thoughts already on screen were appended before this journal pass
         // could see what followed them. Rebuild so the new anchors apply.
         entry.model?.restoreToolTimings(toolTimings.tools.values());
-        if (anchorsChanged) await this.refresh(entry, true);
+        if (anchorsChanged || promptsChanged) await this.refresh(entry, true);
         this.scheduleFlush(entry);
       } catch {
         // Native history remains usable during a runtime/journal outage.
@@ -1439,6 +1505,8 @@ export class SessionDisplayService {
           ? `turn-complete:${completionTurnId}`
           : undefined);
       if (typeof id === "string") {
+        if (isCursorTrackedMessage(compact, entry.provider))
+          rememberCursorPrompt(entry, compact);
         const previous = entry.overlay.get(id);
         const oldContent = messageContent(previous ?? {});
         const newContent = messageContent(compact);
@@ -1568,8 +1636,11 @@ export class SessionDisplayService {
     if (entry.refreshing) return entry.refreshing;
     const task = (async () => {
       const source = this.requireSource();
-      const stamp = await source.stamp(entry.selection, timing);
-      if (!force && stamp === entry.stamp) return;
+      if (
+        !force &&
+        (await source.stamp(entry.selection, timing)) === entry.stamp
+      )
+        return;
       const page = await source.read(entry.selection, undefined, timing);
       if (entry.controller.signal.aborted) return;
       const reduceStartedAt = performance.now();
@@ -1617,11 +1688,13 @@ export class SessionDisplayService {
         });
       }
       for (const [id, message] of entry.bootstrapReplay) {
-        if (message.type === "result" && failedTurns.has(message.turnId))
+        rememberCursorPrompt(entry, message);
+        if (message.type === "result" && typeof message.turnId === "string")
           entry.overlay.set(id, {
             ...message,
-            turnStatus: "failed",
-            is_error: true,
+            ...(failedTurns.has(message.turnId)
+              ? { turnStatus: "failed", is_error: true }
+              : {}),
           });
       }
       // Native history can contain tool or assistant rows before `<user_query>`
@@ -1659,6 +1732,7 @@ export class SessionDisplayService {
     );
     let restored = page.messages;
     if (page.provider === "cursor") {
+      restored = restored.map((message) => mergeCursorPrompt(entry, message));
       for (const message of entry.overlay.values()) {
         if (isCursorUserPrompt(message))
           restored = insertCursorPrompt(restored, message);
@@ -1671,7 +1745,11 @@ export class SessionDisplayService {
     entry.bootstrapReplay.clear();
     model.setRuntime(page.activity);
     for (const message of entry.overlay.values()) {
-      if (message.subtype === "turn_complete") continue;
+      if (
+        message.subtype === "turn_complete" ||
+        (page.provider === "cursor" && message.type === "result")
+      )
+        continue;
       if (page.provider === "pi" || page.provider === "mcode") {
         if (message.type !== "system" && message.type !== "result") {
           const content = messageContent(message);
@@ -1695,7 +1773,11 @@ export class SessionDisplayService {
     // Apply terminal facts after replaying prose. An older turn must not
     // close a newer, not-yet-persisted turn in the same overlay.
     for (const message of entry.overlay.values()) {
-      if (message.subtype === "turn_complete") model.message(message);
+      if (
+        message.subtype === "turn_complete" ||
+        (page.provider === "cursor" && message.type === "result")
+      )
+        model.message(message);
     }
     if (page.provider === "cursor" && entry.model)
       model.restoreToolTimings(entry.model.tools.values());

@@ -36,10 +36,13 @@ const cursor: ProviderInfo = {
   supportsThinkingToggle: false,
   models,
 };
+const providerHolder = vi.hoisted(() => ({
+  providers: [] as ProviderInfo[],
+}));
 vi.mock("../../hooks/useProviders", async (original) => ({
   ...(await original<typeof import("../../hooks/useProviders")>()),
   useProviders: () => ({
-    providers: [cursor],
+    providers: providerHolder.providers,
     loading: false,
     error: null,
     refetch: vi.fn(),
@@ -70,6 +73,7 @@ let scope = 0;
 beforeEach(() => {
   localStorage.clear();
   sessionStorage.clear();
+  providerHolder.providers = [cursor];
   setCurrentInstallId(`cursor-defaults-${++scope}`);
   settings = {
     newSessionDefaults: {
@@ -96,6 +100,7 @@ beforeEach(() => {
     };
     return { settings };
   });
+  vi.spyOn(api, "getProvider").mockResolvedValue({ provider: cursor });
   vi.spyOn(api, "prepareCursorSession").mockResolvedValue({ ok: true });
   vi.spyOn(api, "discardCursorSession").mockResolvedValue({ ok: true });
   vi.spyOn(api, "warmCursorSession").mockResolvedValue({ ok: true });
@@ -151,9 +156,18 @@ describe("Cursor model options and Set as default", () => {
     const view = renderForm();
     await screen.findByRole("button", { name: "Auto" });
     choose("Model", "GPT-5.6 Sol");
+    await waitFor(() =>
+      expect(api.prepareCursorSession).toHaveBeenLastCalledWith(
+        expect.objectContaining({ model: "gpt-5.6-sol" }),
+      ),
+    );
+    const prepareCount = vi.mocked(api.prepareCursorSession).mock.calls.length;
+    const discardCount = vi.mocked(api.discardCursorSession).mock.calls.length;
     choose("Thinking effort", "Extra high");
     choose("Context window", "1M");
     fireEvent.click(screen.getByRole("switch", { name: "Fast" }));
+    expect(api.prepareCursorSession).toHaveBeenCalledTimes(prepareCount);
+    expect(api.discardCursorSession).toHaveBeenCalledTimes(discardCount);
     fireEvent.click(screen.getByRole("button", { name: /Plan mode/i }));
     fireEvent.click(screen.getByRole("button", { name: "Set as default" }));
     const model = "gpt-5.6-sol[context=1m,reasoning=xhigh,fast=true]";
@@ -249,15 +263,50 @@ describe("Cursor model options and Set as default", () => {
     );
   });
 
-  it("preserves a previously saved flat variant instead of silently resetting it to Auto", async () => {
+  it("restores a saved variant as its model, effort and Fast switch", async () => {
     settings.newSessionDefaults = {
       provider: "cursor",
       model: "gpt-5.6-sol-high-fast",
     };
     renderForm();
-    await screen.findByRole("button", { name: "gpt-5.6-sol-high-fast" });
-    expect(screen.getByText(/Using your saved model selection/)).toBeTruthy();
-    choose("Model", "GPT-5.6 Sol");
-    expect(screen.getByRole("button", { name: "Medium" })).toBeTruthy();
+    await screen.findByRole("button", { name: "GPT-5.6 Sol" });
+    expect(screen.getByRole("button", { name: "High" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "272K" })).toBeTruthy();
+    expect(
+      screen.getByRole("switch", { name: "Fast" }).getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(screen.queryByText(/Using your saved model selection/)).toBeNull();
+  });
+
+  it("replaces a flat model list with the parameterized catalog", async () => {
+    providerHolder.providers = [
+      {
+        ...cursor,
+        models: [
+          { id: "auto", name: "Auto" },
+          { id: "grok-4.7", name: "Grok 4.7" },
+        ],
+      },
+    ];
+    settings.newSessionDefaults = {
+      provider: "cursor",
+      model: "grok-4.7[context=500K,reasoning_effort=high,fast=true]",
+      permissionMode: "default",
+      byProvider: {
+        cursor: {
+          model: "grok-4.7[context=500K,reasoning_effort=high,fast=true]",
+          permissionMode: "default",
+        },
+      },
+    };
+    renderForm();
+    await screen.findByRole("button", { name: "Grok 4.7" });
+    expect(screen.getByRole("button", { name: "500K" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "High" })).toBeTruthy();
+    expect(
+      screen.getByRole("switch", { name: "Fast" }).getAttribute("aria-checked"),
+    ).toBe("true");
+    expect(screen.queryByText(/Using your saved model selection/)).toBeNull();
+    expect(api.getProvider).toHaveBeenCalledWith("cursor", { fresh: true });
   });
 });

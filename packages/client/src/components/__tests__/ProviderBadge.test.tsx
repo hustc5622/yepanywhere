@@ -110,11 +110,27 @@ describe("Cursor model parameter badge", () => {
     });
   });
 
-  it("leaves variant slugs without a Fast label", () => {
+  it("splits a legacy variant into effort and Fast", () => {
     const { container } = render(
       <ProviderBadge provider="cursor" model="gpt-5.6-sol-high-fast" />,
     );
-    expect(container.textContent).toContain("Gpt-5.6-sol-high-fast");
-    expect(container.textContent).not.toContain("Fast");
+    expect(container.textContent).toContain("Gpt-5.6-sol");
+    expect(container.textContent).toContain("High");
+    expect(container.textContent).toContain("Fast");
+    expect(container.textContent).not.toContain("Gpt-5.6-sol-high-fast");
+  });
+
+  it("shows only the effort encoded in a legacy variant", async () => {
+    localStorage.setItem(UI_KEYS.locale, "zh-CN");
+    render(
+      <I18nProvider>
+        <ProviderBadge provider="cursor" model="claude-opus-5-5-high" />
+      </I18nProvider>,
+    );
+    await waitFor(() => {
+      expect(screen.getByText("Opus 5.5 · 高")).toBeTruthy();
+    });
+    expect(screen.queryByText(/Fast/)).toBeNull();
+    expect(screen.queryByText(/300K/)).toBeNull();
   });
 });

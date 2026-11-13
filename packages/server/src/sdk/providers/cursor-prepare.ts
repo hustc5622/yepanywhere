@@ -2,7 +2,7 @@
  * Warm Cursor ACP processes so sending a message does not pay for
  * authenticate + newSession on the critical path.
  *
- * One process is bound to one model family (`--model` is a startup flag) and,
+ * One process is bound to one project and model family (`--model` is a startup flag) and,
  * after newSession, to one chat. Parameterized selections launch the base id;
  * the session applies each option before the first prompt. A new or resumed
  * session with no prepared chat claims an already authenticated idle process
@@ -11,7 +11,6 @@
  */
 
 import { rm, stat } from "node:fs/promises";
-import { homedir } from "node:os";
 import { join, resolve, sep } from "node:path";
 import type { PermissionMode } from "@yep-anywhere/shared";
 import { getLogger } from "../../logging/logger.js";
@@ -32,9 +31,8 @@ const MAX_PREPARED_SLOTS = 4;
 const SWEEP_INTERVAL_MS = 60 * 1000;
 /**
  * `authenticate` can wait on an interactive login that never comes, and a
- * pending ACP request only settles when the agent's stdout closes. This work
- * runs before the Supervisor's session-id wait starts, so every handshake
- * gets its own deadline that closes the agent.
+ * pending ACP request only settles when the agent's stdout closes. Each
+ * speculative handshake has its own deadline even before a session starts.
  */
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 30_000;
 let handshakeTimeoutMs = DEFAULT_HANDSHAKE_TIMEOUT_MS;
@@ -70,11 +68,7 @@ function toCursorMode(mode: PermissionMode | undefined): "agent" | "plan" {
 }
 
 function prepareKey(cwd: string, model: string | undefined): string {
-  return `${canonicalizeProjectPath(cwd)}\0${model ?? ""}`;
-}
-
-function modelKey(model: string | undefined): string {
-  return model ?? "";
+  return `${canonicalizeProjectPath(cwd)}\0${cursorLaunchModel(model) ?? ""}`;
 }
 
 /** Reject once the handshake deadline passes; the caller closes the agent. */
@@ -91,17 +85,19 @@ function withDeadline<T>(promise: Promise<T>, what: string): Promise<T> {
   return Promise.race([promise, deadline]).finally(() => clearTimeout(timer));
 }
 
-async function connectAuthenticated(
+export async function connectAuthenticatedCursor(
   model: string | undefined,
-  cwd?: string,
+  cwd: string,
+  client = new ACPClient(),
+  signal?: AbortSignal,
 ): Promise<ACPClient> {
   const agentPath = await findCursorAgentPath();
+  signal?.throwIfAborted();
   if (!agentPath) {
     throw new Error(
       "Cursor CLI not found. Install it from https://cursor.com/docs/cli/overview and run `agent login`.",
     );
   }
-  const client = new ACPClient();
   try {
     const args = ["acp"];
     const launchModel = cursorLaunchModel(model);
@@ -111,7 +107,7 @@ async function connectAuthenticated(
         await client.connect({
           command: agentPath,
           args,
-          cwd: cwd ?? homedir(),
+          cwd,
         });
         await client.initialize(CURSOR_ACP_CLIENT_CAPABILITIES);
         await client.authenticate("cursor_login");
@@ -131,7 +127,9 @@ async function createPrepared(input: {
   permissionMode?: PermissionMode;
 }): Promise<PreparedCursorSession> {
   const cwd = canonicalizeProjectPath(input.cwd);
-  const client = await connectAuthenticated(input.model, cwd);
+  const client =
+    (await claimIdleClient(cwd, input.model)) ??
+    (await connectAuthenticatedCursor(input.model, cwd));
   let sessionId: string | undefined;
   try {
     sessionId = await withDeadline(client.newSession(cwd), "newSession");
@@ -179,10 +177,11 @@ async function applyMode(
   prepared: PreparedCursorSession,
   permissionMode: PermissionMode | undefined,
 ): Promise<void> {
-  if (prepared.permissionMode === permissionMode) return;
-  await prepared.client.setSessionMode(
-    prepared.sessionId,
-    toCursorMode(permissionMode),
+  const mode = toCursorMode(permissionMode);
+  if (toCursorMode(prepared.permissionMode) === mode) return;
+  await withDeadline(
+    prepared.client.setSessionMode(prepared.sessionId, mode),
+    "setSessionMode",
   );
   prepared.permissionMode = permissionMode;
 }
@@ -235,9 +234,7 @@ export async function prepareCursorSession(input: {
   const id = prepareKey(input.cwd, input.model);
   const existing = slots.get(id);
   if (existing) {
-    await existing.promise.then((prepared) =>
-      applyMode(prepared, input.permissionMode),
-    );
+    await existing.promise;
     return;
   }
   while (slots.size >= MAX_PREPARED_SLOTS) {
@@ -273,9 +270,13 @@ export async function discardCursorPrepare(input: {
   }
 }
 
-export function warmCursorAuth(model?: string): Promise<void> {
+export function warmCursorAuth(input: {
+  cwd: string;
+  model?: string;
+}): Promise<void> {
   sweepExpired();
-  const key = modelKey(model);
+  const cwd = canonicalizeProjectPath(input.cwd);
+  const key = prepareKey(cwd, input.model);
   const existing = idleClients.get(key);
   if (existing) return existing.promise.then(() => undefined);
   while (idleClients.size >= MAX_IDLE_CLIENTS) {
@@ -283,7 +284,8 @@ export function warmCursorAuth(model?: string): Promise<void> {
     if (!evicted) break;
     void closeIdle(evicted);
   }
-  const promise = connectAuthenticated(model);
+  // Cursor's command and skill discovery uses the child process's cwd.
+  const promise = connectAuthenticatedCursor(input.model, cwd);
   idleClients.set(key, { promise, at: Date.now() });
   ensureSweepTimer();
   void promise.catch(() => {
@@ -292,23 +294,22 @@ export function warmCursorAuth(model?: string): Promise<void> {
   return promise.then(() => undefined);
 }
 
-function rewarm(model: string | undefined): void {
-  void warmCursorAuth(model).catch((error) => {
+function rewarm(input: { cwd: string; model?: string }): void {
+  void warmCursorAuth(input).catch((error) => {
     log.warn({ err: error }, "Cursor auth warm failed");
   });
 }
 
 async function claimIdleClient(
+  cwd: string,
   model: string | undefined,
 ): Promise<ACPClient | null> {
-  const key = modelKey(model);
+  const key = prepareKey(cwd, model);
   const idle = idleClients.get(key);
   if (!idle) return null;
   idleClients.delete(key);
   try {
-    const client = usableClient(await idle.promise, "warm");
-    rewarm(model);
-    return client;
+    return usableClient(await idle.promise, "warm");
   } catch (error) {
     log.warn({ err: error }, "Cursor warm claim failed");
     return null;
@@ -330,20 +331,19 @@ export async function claimCursorPrepare(input: {
         const prepared = await slot.promise;
         if (usableClient(prepared.client, "prepared")) {
           await applyMode(prepared, input.permissionMode);
-          rewarm(input.model);
+          rewarm(input);
           return { client: prepared.client, sessionId: prepared.sessionId };
         }
         await deleteUnpromptedCursorSession(prepared.sessionId);
       } catch (error) {
         log.warn({ err: error }, "Cursor prepare claim failed");
-        await slot.promise
-          .then((prepared) => prepared.client.close())
-          .catch(() => undefined);
+        await closePrepared(slot);
       }
     }
   }
 
-  const client = await claimIdleClient(input.model);
+  const client = await claimIdleClient(input.cwd, input.model);
+  if (client) rewarm(input);
   return client ? { client } : null;
 }
 

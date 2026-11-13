@@ -681,6 +681,150 @@ describe("SessionDisplayService", () => {
     expect(snapshot.activity.state).toBe("running");
   });
 
+  it("restores Cursor outcomes and fold timing for each question from the journal", async () => {
+    const { service, source, runtime } = fixture(60_000, {
+      foldSettledTurns: true,
+    });
+    runtime.getProcessForSession.mockResolvedValue(null as never);
+    const turn = (index: number) => ({
+      turnId: `cursor-turn-${index}`,
+      cursorTurnIndex: index,
+    });
+    const questions = [1, 2].map((index) => ({
+      ...turn(index),
+      type: "user",
+      uuid: `native-${index}`,
+      message: { role: "user", content: `Question ${index}` },
+    }));
+    source.read.mockResolvedValue({
+      provider: "cursor",
+      messages: questions.flatMap((question, index) => [
+        question,
+        {
+          ...turn(index + 1),
+          type: "assistant",
+          uuid: `progress-${index}`,
+          codexMessagePhase: "commentary",
+          message: { role: "assistant", content: "Checking" },
+        },
+        {
+          ...turn(index + 1),
+          type: "assistant",
+          uuid: `answer-${index}`,
+          message: { role: "assistant", content: `Answer ${index + 1}` },
+        },
+      ]) as Message[],
+      activity: "unknown",
+      stamp: "1",
+    });
+    const at = (seconds: number) =>
+      new Date(Date.UTC(2026, 0, 1, 0, 0, seconds)).toISOString();
+    const event = (data: Record<string, unknown>, seconds: number) => ({
+      type: "message",
+      sessionId: selection.sessionId,
+      processId: "process",
+      timestamp: at(seconds),
+      data,
+    });
+    Object.assign(runtime, {
+      replay: vi.fn(async () => [
+        event({ ...questions[0], uuid: "live-1" }, 0),
+        event({ ...turn(1), type: "error", error: "Cursor unavailable" }, 5),
+        event({ ...turn(1), type: "result", turnStatus: "failed" }, 6),
+        event({ ...questions[1], uuid: "live-2" }, 20),
+        event({ ...turn(2), type: "result", turnStatus: "completed" }, 32),
+      ]),
+    });
+
+    const snapshot = await service.snapshot(selection);
+    expect(snapshot.activity.state).toBe("completed");
+    expect(displayNodeLabels(snapshot)).toEqual([
+      "question",
+      "process",
+      "text:Answer 1",
+      "error",
+      "question",
+      "process",
+      "text:Answer 2",
+    ]);
+    const folds = snapshot.nodes.flatMap((node) =>
+      node.type === "segment" && node.segment.type === "process"
+        ? [node.segment]
+        : [],
+    );
+    expect(folds).toMatchObject([
+      {
+        id: "process:question:live-1:0",
+        status: "failed",
+        startedAt: at(0),
+        endedAt: at(6),
+      },
+      {
+        id: "process:question:live-2:0",
+        status: "completed",
+        startedAt: at(20),
+        endedAt: at(32),
+      },
+    ]);
+    for (const fold of folds)
+      expect((await service.process(selection, fold.id)).nodes).toHaveLength(1);
+  });
+
+  it("keeps a Cursor fold addressable after the native question replaces the live prompt", async () => {
+    const { service, source, push } = fixture(60_000, {
+      foldSettledTurns: true,
+    });
+    const turn = { turnId: "cursor-turn-1", cursorTurnIndex: 1 };
+    const question = {
+      ...turn,
+      type: "user",
+      uuid: "live-question",
+      timestamp: "2026-01-01T00:00:00.000Z",
+      message: { role: "user", content: "Question" },
+    };
+    const progress = {
+      ...turn,
+      type: "assistant",
+      uuid: "live-progress",
+      codexMessagePhase: "commentary",
+      message: { role: "assistant", content: "Checking" },
+    };
+    const empty = {
+      provider: "cursor",
+      messages: [],
+      activity: "running",
+      stamp: "1",
+    } as const;
+    source.read.mockResolvedValue({ ...empty, messages: [] });
+    await service.subscribe(selection, vi.fn());
+    push("message", question);
+    push("message", progress);
+    push("message", {
+      ...turn,
+      type: "result",
+      uuid: "done",
+      turnStatus: "completed",
+    });
+    const id = "process:question:live-question:0";
+    expect((await service.process(selection, id)).nodes).toHaveLength(1);
+
+    source.read.mockResolvedValue({
+      provider: "cursor",
+      activity: "completed",
+      stamp: "2",
+      messages: [
+        { ...question, uuid: "native-question", timestamp: undefined },
+        { ...progress, uuid: "native-progress" },
+      ] as Message[],
+    });
+    push("status", { state: "idle" });
+    await vi.waitFor(async () => {
+      expect((await service.process(selection, id)).nodes[0]?.id).toBe(
+        "text:native-progress:0",
+      );
+    });
+  });
+
   it("keeps an unanchored thought in its own turn during journal recovery", async () => {
     const { service, source, runtime } = fixture();
     const prompt = (turn: number) => ({

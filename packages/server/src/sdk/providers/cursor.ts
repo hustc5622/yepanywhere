@@ -32,13 +32,13 @@ import { ACPClient } from "./acp/client.js";
 import { cursorAccountService } from "./cursor-account.js";
 import { findCursorAgentPath } from "./cursor-cli.js";
 import { cursorStreamError } from "./cursor-errors.js";
-import {
-  CURSOR_ACP_CLIENT_CAPABILITIES,
-  applyCursorModelParameters,
-  cursorLaunchModel,
-} from "./cursor-model-selection.js";
+import { applyCursorModelParameters } from "./cursor-model-selection.js";
 import { loadCursorModelCatalog } from "./cursor-models.js";
-import { claimCursorPrepare } from "./cursor-prepare.js";
+import {
+  claimCursorPrepare,
+  connectAuthenticatedCursor,
+  deleteUnpromptedCursorSession,
+} from "./cursor-prepare.js";
 import type {
   AgentProvider,
   AgentSession,
@@ -242,24 +242,19 @@ export class CursorProvider implements AgentProvider {
     const queue = new MessageQueue();
     const abortController = new AbortController();
     if (options.initialMessage) queue.push(options.initialMessage);
-    const claimed = await claimCursorPrepare({
-      cwd: options.cwd,
-      model: options.model,
-      permissionMode: options.permissionMode,
-      resumeSessionId: options.resumeSessionId,
-    });
-    const client = claimed?.client ?? new ACPClient();
-    let sessionId: string | null = claimed?.sessionId ?? null;
+    let client: ACPClient | undefined;
+    let sessionId: string | null = null;
     const commands = new AcpCommandTracker("cursor", options.cwd);
     const iterator = this.runSession(
-      client,
       sessionOptions,
       queue,
       abortController.signal,
       (id) => {
         sessionId = id;
       },
-      claimed,
+      (activeClient) => {
+        client = activeClient;
+      },
       commands,
     );
     return {
@@ -268,23 +263,23 @@ export class CursorProvider implements AgentProvider {
       abort: () => {
         abortController.abort();
         queue.close();
-        if (sessionId) {
+        if (client && sessionId) {
           void client.cancel(sessionId).catch(() => undefined);
         }
-        client.close();
+        client?.close();
       },
-      isProcessAlive: () => client.isAlive(),
+      isProcessAlive: () => client?.isAlive() ?? false,
       get pid() {
-        return client.pid;
+        return client?.pid;
       },
       interrupt: async () => {
-        if (sessionId) await client.cancel(sessionId);
+        if (client && sessionId) await client.cancel(sessionId);
       },
       setPermissionMode: async (mode) => {
         if (!this.permissionModes.some((supported) => supported === mode)) {
           throw new Error(`Unsupported Cursor permission mode: ${mode}`);
         }
-        if (!sessionId) {
+        if (!client || !sessionId) {
           throw new Error("Cursor ACP session is not initialized yet");
         }
         await client.setSessionMode(sessionId, toCursorMode(mode));
@@ -300,59 +295,58 @@ export class CursorProvider implements AgentProvider {
   }
 
   private async *runSession(
-    client: ACPClient,
     options: StartSessionOptions,
     queue: MessageQueue,
     signal: AbortSignal,
     onSessionId: (sessionId: string) => void,
-    handoff?: { sessionId?: string } | null,
+    onClient: (client: ACPClient) => void,
     commands?: AcpCommandTracker,
   ): AsyncIterableIterator<SDKMessage> {
-    const agentPath = await findCursorAgentPath();
-    if (!agentPath) {
-      yield {
-        type: "error",
-        error:
-          "Cursor CLI not found. Install it from https://cursor.com/docs/cli/overview and run `agent login`.",
-      } as SDKMessage;
-      return;
-    }
-
+    let client: ACPClient | undefined;
+    let activeSessionId = "";
+    let ready = false;
+    let promptActive = false;
     const updateQueue: SessionNotification[] = [];
     const sideMessages: SDKMessage[] = [];
     const toolNames = new Map<string, string>();
-    let activeSessionId = handoff?.sessionId ?? "";
-    client.setSessionUpdateCallback((update) => {
-      // Cursor announces its commands and skills as session metadata.
-      if (commands?.accept(update)) return;
-      updateQueue.push(update);
-    });
-    client.setPermissionRequestCallback((request) =>
-      this.handlePermissionRequest(request, options, signal),
-    );
-    client.setExtensionRequestCallback((method, params) =>
-      this.handleExtensionRequest(
-        method,
-        params,
-        options,
-        signal,
-        sideMessages,
-        toolNames,
-        () => activeSessionId,
-      ),
-    );
-
     try {
-      if (!handoff) {
-        const args = ["acp"];
-        const launchModel = cursorLaunchModel(options.model);
-        if (launchModel) {
-          args.unshift("--model", launchModel);
-        }
-        await client.connect({ command: agentPath, args, cwd: options.cwd });
-        await client.initialize(CURSOR_ACP_CLIENT_CAPABILITIES);
-        await client.authenticate("cursor_login");
-      }
+      // Claim inside the iterator so the supervisor's startup deadline also
+      // covers an in-flight prewarm.
+      const handoff = await claimCursorPrepare(options);
+      client = handoff?.client ?? new ACPClient();
+      activeSessionId = handoff?.sessionId ?? "";
+      onClient(client);
+      signal.throwIfAborted();
+
+      client.setSessionUpdateCallback((update) => {
+        if (commands?.accept(update)) return;
+        // loadSession replays the entire native history. Yep reads that from
+        // disk, so only buffer updates while a prompt is active.
+        if (promptActive) updateQueue.push(update);
+      });
+      client.setPermissionRequestCallback((request) =>
+        this.handlePermissionRequest(request, options, signal),
+      );
+      client.setExtensionRequestCallback((method, params) =>
+        this.handleExtensionRequest(
+          method,
+          params,
+          options,
+          signal,
+          (messages) => {
+            if (promptActive) sideMessages.push(...messages);
+          },
+          toolNames,
+          () => activeSessionId,
+        ),
+      );
+      if (!handoff)
+        await connectAuthenticatedCursor(
+          options.model,
+          options.cwd,
+          client,
+          signal,
+        );
 
       let sessionId: string;
       if (handoff?.sessionId) {
@@ -360,7 +354,6 @@ export class CursorProvider implements AgentProvider {
       } else if (options.resumeSessionId) {
         await client.loadSession(options.resumeSessionId, options.cwd);
         sessionId = options.resumeSessionId;
-        updateQueue.length = 0;
       } else {
         sessionId = await client.newSession(options.cwd);
       }
@@ -381,12 +374,15 @@ export class CursorProvider implements AgentProvider {
         if (!turnCountTrusted || persisted > turnIndex) turnIndex = persisted;
         turnCountTrusted = true;
       };
-      await refreshTurnCount();
-      await client.setSessionMode(
-        sessionId,
-        toCursorMode(options.permissionMode),
-      );
+      if (!handoff?.sessionId) {
+        await client.setSessionMode(
+          sessionId,
+          toCursorMode(options.permissionMode),
+        );
+      }
       await applyCursorModelParameters(client, sessionId, options.model);
+      signal.throwIfAborted();
+      ready = true;
 
       yield {
         type: "system",
@@ -419,6 +415,8 @@ export class CursorProvider implements AgentProvider {
         } as SDKMessage;
 
         updateQueue.length = 0;
+        sideMessages.length = 0;
+        promptActive = true;
         for await (const output of this.streamPrompt(
           client,
           sessionId,
@@ -432,11 +430,13 @@ export class CursorProvider implements AgentProvider {
             ...output,
             ...(turnCountTrusted ? { cursorTurnIndex: turnIndex } : {}),
             turnId,
-            ...(output.type === "result" && turnCountTrusted
-              ? { uuid: `cursor-result-${turnIndex}` }
+            ...(output.type === "result" || output.type === "error"
+              ? { uuid: `${output.type}:${turnId}` }
               : {}),
           } as SDKMessage;
         }
+        promptActive = false;
+        if (!client.isAlive()) break;
       }
     } catch (error) {
       if (signal.aborted) return;
@@ -445,7 +445,11 @@ export class CursorProvider implements AgentProvider {
       yield { type: "error", error: message } as SDKMessage;
     } finally {
       queue.close();
-      client.close();
+      client?.close();
+      if (!ready && activeSessionId && !options.resumeSessionId)
+        await deleteUnpromptedCursorSession(activeSessionId).catch(
+          () => undefined,
+        );
     }
   }
 
@@ -530,6 +534,8 @@ export class CursorProvider implements AgentProvider {
           assistantDirty = true;
           continue;
         }
+        const converted = convertUpdate(update, sessionId, toolNames);
+        if (!converted) continue;
         if (thinkingText) {
           if (thinkingDirty)
             yield thinkingMessage(sessionId, thinkingId, thinkingText);
@@ -543,8 +549,7 @@ export class CursorProvider implements AgentProvider {
         assistantText = "";
         assistantId = null;
         assistantDirty = false;
-        const converted = convertUpdate(update, sessionId, toolNames);
-        if (converted) yield converted;
+        yield converted;
       }
       if (thinkingDirty && thinkingText) {
         yield thinkingMessage(sessionId, thinkingId, thinkingText);
@@ -587,7 +592,7 @@ export class CursorProvider implements AgentProvider {
           errorCode: failure.code,
         } as SDKMessage;
       }
-      if (result.stopReason === "refusal") {
+      if (result.stopReason === "refusal" && !failure) {
         yield {
           type: "error",
           session_id: sessionId,
@@ -627,20 +632,14 @@ export class CursorProvider implements AgentProvider {
     params: Record<string, unknown>,
     options: StartSessionOptions,
     signal: AbortSignal,
-    sideMessages: SDKMessage[],
+    publish: (messages: SDKMessage[]) => void,
     toolNames: Map<string, string>,
     sessionId: () => string,
   ): Promise<Record<string, unknown>> {
     const name = method.replace(/^_/, "");
     const cancelled = { outcome: { outcome: "cancelled" } };
     if (signal.aborted) return cancelled;
-    const displayed = cursorExtensionMessages(
-      name,
-      params,
-      sessionId(),
-      toolNames,
-    );
-    if (displayed.length) sideMessages.push(...displayed);
+    publish(cursorExtensionMessages(name, params, sessionId(), toolNames));
     if (name === "cursor/ask_question") {
       if (!options.onToolApproval || !Array.isArray(params.questions))
         return cancelled;
