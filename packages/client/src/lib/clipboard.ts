@@ -252,7 +252,12 @@ function restoreFocusAndSelection(
   }
 }
 
-function writeClipboardTextWithExecCommand(text: string): void {
+/**
+ * Synchronous copy through a hidden selection. With `html`, a copy listener
+ * replaces the selection's data, which also works in insecure contexts where
+ * the async Clipboard API does not exist.
+ */
+function writeClipboardTextWithExecCommand(text: string, html?: string): void {
   if (typeof document === "undefined" || !document.body) {
     throw new Error("Clipboard fallback requires a document body");
   }
@@ -277,7 +282,8 @@ function writeClipboardTextWithExecCommand(text: string): void {
   const previousRecentTextSelection = recentTextSelection;
 
   const textarea = document.createElement("textarea");
-  textarea.value = text;
+  // A collapsed selection may not dispatch `copy`; the listener supplies text.
+  textarea.value = html !== undefined && !text ? " " : text;
   textarea.setAttribute("readonly", "");
   textarea.setAttribute("aria-hidden", "true");
   textarea.setAttribute("data-yep-clipboard-fallback", "");
@@ -289,6 +295,16 @@ function writeClipboardTextWithExecCommand(text: string): void {
   textarea.style.pointerEvents = "none";
   document.body.appendChild(textarea);
 
+  let richDataWritten = false;
+  const writeRichData = (event: ClipboardEvent) => {
+    if (!event.clipboardData || html === undefined) return;
+    event.clipboardData.setData("text/plain", text);
+    event.clipboardData.setData("text/html", html);
+    event.preventDefault();
+    richDataWritten = true;
+  };
+  if (html !== undefined) document.addEventListener("copy", writeRichData);
+
   suppressSelectionTracking = true;
   try {
     textarea.focus({ preventScroll: true });
@@ -297,7 +313,13 @@ function writeClipboardTextWithExecCommand(text: string): void {
     if (!execCommand.call(document, "copy")) {
       throw new Error("Clipboard fallback was rejected");
     }
+    if (html !== undefined && !richDataWritten) {
+      throw new Error("Clipboard fallback could not write rich data");
+    }
   } finally {
+    if (html !== undefined) {
+      document.removeEventListener("copy", writeRichData);
+    }
     textarea.remove();
     restoreFocusAndSelection(
       activeElement,
@@ -398,7 +420,14 @@ function renderClipboardTextHtml(text: string): string {
 }
 
 type PreparedAttachment =
-  | { kind: "inline"; name: string; mimeType: string; dataUrl: string }
+  | {
+      kind: "inline";
+      name: string;
+      mimeType: string;
+      dataUrl: string;
+      /** Yep's own paste reuses the managed upload instead of the bytes. */
+      reference?: string;
+    }
   | { kind: "reference"; name: string; mimeType: string; path: string }
   | { kind: "missing"; name: string };
 
@@ -415,11 +444,14 @@ function buildUserInputClipboardHtml(
     if (attachment.kind === "reference") {
       return `<span ${ATTACHMENT_NAME_ATTRIBUTE}="${name}" ${ATTACHMENT_TYPE_ATTRIBUTE}="${type}" ${ATTACHMENT_REF_ATTRIBUTE}="${escapeHtml(attachment.path)}">${name}</span>`;
     }
+    const reference = attachment.reference
+      ? ` ${ATTACHMENT_REF_ATTRIBUTE}="${escapeHtml(attachment.reference)}"`
+      : "";
     // Images stay visible when pasted into other rich editors; other files
     // keep their bytes in an attribute only Yep reads.
     return attachment.mimeType.startsWith("image/")
-      ? `<img src="${escapeHtml(attachment.dataUrl)}" alt="${name}" ${ATTACHMENT_NAME_ATTRIBUTE}="${name}" ${ATTACHMENT_TYPE_ATTRIBUTE}="${type}">`
-      : `<span ${ATTACHMENT_NAME_ATTRIBUTE}="${name}" ${ATTACHMENT_TYPE_ATTRIBUTE}="${type}" ${ATTACHMENT_DATA_ATTRIBUTE}="${escapeHtml(attachment.dataUrl)}">${name}</span>`;
+      ? `<img src="${escapeHtml(attachment.dataUrl)}" alt="${name}" ${ATTACHMENT_NAME_ATTRIBUTE}="${name}" ${ATTACHMENT_TYPE_ATTRIBUTE}="${type}"${reference}>`
+      : `<span ${ATTACHMENT_NAME_ATTRIBUTE}="${name}" ${ATTACHMENT_TYPE_ATTRIBUTE}="${type}" ${ATTACHMENT_DATA_ATTRIBUTE}="${escapeHtml(attachment.dataUrl)}"${reference}>${name}</span>`;
   });
 
   return [
@@ -502,6 +534,34 @@ function resolveMimeType(blob: Blob, declared: string | undefined): string {
   return fromDeclared || fromBlob || "application/octet-stream";
 }
 
+function managedReference(
+  attachment: ClipboardAttachmentSource,
+): string | undefined {
+  return attachment.reference &&
+    isManagedUploadDownloadUrl(attachment.reference)
+    ? attachment.reference
+    : undefined;
+}
+
+/** Without async clipboard access only references can be written, synchronously. */
+function prepareReferencesOnly(
+  attachments: ClipboardAttachmentSource[],
+): PreparedAttachment[] {
+  return attachments.map((attachment) => {
+    const reference = managedReference(attachment);
+    return reference
+      ? {
+          kind: "reference",
+          name: attachment.name,
+          mimeType:
+            normalizedMimeType(attachment.mimeType) ||
+            "application/octet-stream",
+          path: reference,
+        }
+      : { kind: "missing", name: attachment.name };
+  });
+}
+
 async function prepareAttachments(
   attachments: ClipboardAttachmentSource[],
 ): Promise<PreparedAttachment[]> {
@@ -509,10 +569,7 @@ async function prepareAttachments(
   const prepared: PreparedAttachment[] = [];
   // Sequential: keeps the inline budget deterministic and memory bounded.
   for (const attachment of attachments) {
-    const reference =
-      attachment.reference && isManagedUploadDownloadUrl(attachment.reference)
-        ? attachment.reference
-        : undefined;
+    const reference = managedReference(attachment);
     const referenceEntry = (mimeType: string): PreparedAttachment | null =>
       reference
         ? {
@@ -539,6 +596,7 @@ async function prepareAttachments(
           name: attachment.name,
           mimeType,
           dataUrl: await blobToDataUrl(typed, mimeType),
+          ...(reference ? { reference } : {}),
         });
         continue;
       }
@@ -601,6 +659,19 @@ export async function writeClipboardUserInput(
     !clipboardItemWriter ||
     (typeof window !== "undefined" && window.isSecureContext === false)
   ) {
+    const prepared = prepareReferencesOnly(attachments);
+    const result = copyResult(requested, prepared);
+    if (result.copiedAttachmentCount > 0) {
+      try {
+        writeClipboardTextWithExecCommand(
+          text,
+          buildUserInputClipboardHtml(text, prepared),
+        );
+        return result;
+      } catch {
+        // Fall back to text below.
+      }
+    }
     if (!hasUsableText(text)) {
       throw new Error("Rich clipboard support is required to copy attachments");
     }
@@ -727,10 +798,14 @@ export function readClipboardUserInput(
       return;
     }
     const reference = element.getAttribute(ATTACHMENT_REF_ATTRIBUTE);
-    if (reference !== null) {
-      // Only managed upload routes: pasted HTML is not authority to fetch
-      // arbitrary API paths.
-      if (isManagedUploadDownloadUrl(reference) && requestedName) {
+    const dataUrl =
+      element.tagName === "IMG"
+        ? (element.getAttribute("src") ?? "")
+        : (element.getAttribute(ATTACHMENT_DATA_ATTRIBUTE) ?? "");
+    // Only managed upload routes: pasted HTML is not authority to fetch
+    // arbitrary API paths. A reference wins over inline bytes of the same file.
+    if (reference !== null && isManagedUploadDownloadUrl(reference)) {
+      if (requestedName) {
         attachments.push({
           kind: "reference",
           name: leafClipboardFileName(requestedName, "attachment"),
@@ -738,15 +813,13 @@ export function readClipboardUserInput(
             normalizedMimeType(declaredType) || "application/octet-stream",
           path: reference,
         });
-      } else if (requestedName) {
-        missingNames.push(requestedName);
       }
       return;
     }
-    const dataUrl =
-      element.tagName === "IMG"
-        ? (element.getAttribute("src") ?? "")
-        : (element.getAttribute(ATTACHMENT_DATA_ATTRIBUTE) ?? "");
+    if (reference !== null && !dataUrl) {
+      if (requestedName) missingNames.push(requestedName);
+      return;
+    }
     const file = dataUrlToFile(dataUrl, requestedName, index + 1, declaredType);
     if (file) attachments.push({ kind: "file", file });
     else if (requestedName) missingNames.push(requestedName);

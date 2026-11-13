@@ -240,6 +240,82 @@ describe("user input clipboard payload", () => {
     });
   });
 
+  it("lets Yep reuse an inline image's managed upload instead of its bytes", async () => {
+    const writtenItems = installRichClipboardMock();
+    const reference =
+      "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_shot.png";
+    await writeClipboardUserInput("look", [
+      {
+        name: "shot.png",
+        mimeType: "image/png",
+        read: async () => new Blob(["png"], { type: "image/png" }),
+        reference,
+      },
+    ]);
+    const html = await readBlob(
+      (await writtenItems[0]?.representations["text/html"]) as Blob,
+    );
+    expect(html).toContain('<img src="data:image/png;base64,');
+    expect(
+      readClipboardUserInput({
+        getData: (type) => (type === "text/html" ? html : "look"),
+      })?.attachments,
+    ).toEqual([
+      {
+        kind: "reference",
+        name: "shot.png",
+        mimeType: "image/png",
+        path: reference,
+      },
+    ]);
+  });
+
+  it("copies managed references synchronously in an insecure context", async () => {
+    Object.defineProperty(window, "isSecureContext", {
+      configurable: true,
+      value: false,
+    });
+    const reference =
+      "/api/projects/cHJvamVjdA/sessions/session-1/upload/123e4567-e89b-12d3-a456-426614174000_shot.png";
+    const written = new Map<string, string>();
+    const read = vi.fn();
+    const execCommand = vi.fn(() => {
+      const event = new Event("copy", { cancelable: true }) as ClipboardEvent;
+      Object.defineProperty(event, "clipboardData", {
+        value: {
+          setData: (type: string, value: string) => written.set(type, value),
+        },
+      });
+      document.dispatchEvent(event);
+      return true;
+    });
+    Object.defineProperty(document, "execCommand", {
+      configurable: true,
+      value: execCommand,
+    });
+
+    const result = await writeClipboardUserInput("", [
+      { name: "shot.png", mimeType: "image/png", read, reference },
+      { name: "local.png", mimeType: "image/png", read },
+    ]);
+
+    expect(result).toEqual({
+      requestedAttachmentCount: 2,
+      copiedAttachmentCount: 1,
+      failedNames: ["local.png"],
+    });
+    expect(read).not.toHaveBeenCalled();
+    expect(execCommand).toHaveBeenCalledWith("copy");
+    const payload = readClipboardUserInput({
+      getData: (type) => written.get(type) ?? "",
+    });
+    expect(payload?.attachments).toEqual([
+      expect.objectContaining({ kind: "reference", path: reference }),
+    ]);
+    expect(payload?.missingNames).toEqual(["local.png"]);
+    Reflect.deleteProperty(document, "execCommand");
+  });
+
   it("ignores references that are not managed upload routes", () => {
     const payload = readClipboardUserInput({
       getData: (type) =>
