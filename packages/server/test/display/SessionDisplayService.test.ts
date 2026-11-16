@@ -400,6 +400,75 @@ describe("SessionDisplayService", () => {
       labels.indexOf("text:The answer"),
     );
   });
+  it("drops a finished Cursor journal thought already stored in native history", async () => {
+    const { service, source, runtime } = fixture();
+    runtime.getProcessForSession.mockResolvedValue(null);
+    const thought = (uuid: string, body: string) => ({
+      type: "message",
+      sessionId: selection.sessionId,
+      data: {
+        type: "assistant",
+        uuid,
+        cursorTurnIndex: 1,
+        turnId: "cursor-turn-1",
+        message: {
+          role: "assistant",
+          content: [{ type: "thinking", thinking: body }],
+        },
+      },
+    });
+    (runtime as { replay: (query: unknown) => Promise<unknown[]> }).replay =
+      vi.fn(async () => [
+        thought("journal-unique", "Only in the journal"),
+        thought("journal-duplicate", "All tests passed\n"),
+        {
+          type: "message",
+          sessionId: selection.sessionId,
+          data: {
+            type: "result",
+            uuid: "result:cursor-turn-1",
+            cursorTurnIndex: 1,
+            turnId: "cursor-turn-1",
+            turnStatus: "completed",
+          },
+        },
+      ]);
+    source.read.mockResolvedValue({
+      provider: "cursor",
+      messages: [
+        {
+          uuid: "disk-user",
+          type: "user",
+          cursorTurnIndex: 1,
+          turnId: "cursor-turn-1",
+          message: { role: "user", content: "Explain" },
+        },
+        {
+          uuid: "disk-answer",
+          type: "assistant",
+          cursorTurnIndex: 1,
+          turnId: "cursor-turn-1",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "All tests passed" },
+              { type: "text", text: "完整总结" },
+            ],
+          },
+        },
+      ],
+      activity: "unknown",
+      stamp: "1",
+    });
+    await service.subscribe(selection, vi.fn());
+    const snapshot = await service.snapshot(selection);
+    expect(
+      displayNodeLabels(snapshot).filter((label) =>
+        label.startsWith("thinking:"),
+      ),
+    ).toEqual(["thinking:All tests passed", "thinking:Only in the journal"]);
+    expect(displayNodeLabels(snapshot)).toContain("text:完整总结");
+  });
   it("places recovered Cursor thoughts before the reply or tool that followed them", async () => {
     const { service, source, runtime } = fixture();
     runtime.getProcessForSession.mockResolvedValue(null);
@@ -679,6 +748,87 @@ describe("SessionDisplayService", () => {
       "question",
     ]);
     expect(snapshot.activity.state).toBe("running");
+  });
+
+  it("keeps a live Cursor turn expanded when an older result is still overlaid", async () => {
+    const { service, source, push } = fixture(60_000, {
+      foldSettledTurns: true,
+    });
+    const history: DisplaySourcePage = {
+      provider: "cursor",
+      messages: [
+        {
+          uuid: "user-1",
+          type: "user",
+          turnId: "cursor-turn-1",
+          cursorTurnIndex: 1,
+          timestamp: "2026-01-01T00:00:00.000Z",
+          message: { role: "user", content: "Inspect the sidebar" },
+        },
+        {
+          uuid: "tool-1",
+          type: "assistant",
+          turnId: "cursor-turn-1",
+          cursorTurnIndex: 1,
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "call-1",
+                name: "Bash",
+                input: { command: "ls" },
+              },
+            ],
+          },
+        },
+        {
+          uuid: "tool-result-1",
+          type: "user",
+          turnId: "cursor-turn-1",
+          cursorTurnIndex: 1,
+          message: {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "call-1", content: "ok" },
+            ],
+          },
+        },
+        {
+          uuid: "answer-1",
+          type: "assistant",
+          turnId: "cursor-turn-1",
+          cursorTurnIndex: 1,
+          message: { role: "assistant", content: "The tools finished" },
+        },
+      ] as Message[],
+      activity: "running",
+      stamp: "1",
+    };
+    source.read.mockResolvedValue(history);
+    await service.subscribe(selection, vi.fn());
+    push("status", { state: "in-turn" });
+    push("message", {
+      type: "result",
+      uuid: "result:cursor-turn-1",
+      turnId: "cursor-turn-1",
+      turnStatus: "completed",
+    });
+
+    await vi.waitFor(async () => {
+      const snapshot = await service.snapshot(selection);
+      expect(snapshot.activity.state).toBe("running");
+      expect(displayNodeLabels(snapshot)).not.toContain("process");
+      expect(displayNodeLabels(snapshot)).toContain("tool_group");
+    });
+
+    // Once the process is actually idle, the same result may settle the turn.
+    push("status", { state: "idle" });
+    await vi.waitFor(async () => {
+      const snapshot = await service.snapshot(selection);
+      expect(snapshot.activity.state).toBe("completed");
+      expect(displayNodeLabels(snapshot)).toContain("process");
+    });
   });
 
   it("restores Cursor outcomes and fold timing for each question from the journal", async () => {

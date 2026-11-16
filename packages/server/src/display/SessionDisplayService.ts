@@ -114,6 +114,11 @@ interface Entry {
    * answer.
    */
   cursorPendingThoughts: string[];
+  /**
+   * Plain reasoning already stored for each Cursor turn. A finished turn drops
+   * a journal copy when one of these bodies contains it.
+   */
+  cursorNativeThoughts: Map<number, string[]>;
   /** Live question identity and timestamp, retained when Cursor persists it under a hash. */
   cursorPrompts: Map<
     string,
@@ -220,18 +225,25 @@ function cursorThinkingAnchor(
   return undefined;
 }
 
-function thinkingBody(message: RecordValue): string {
+function thinkingBodies(message: RecordValue): string[] {
   const content = messageContent(message);
-  if (!Array.isArray(content)) return "";
-  return content
-    .flatMap((value) => {
-      const block = asRecord(value);
-      return block?.type === "thinking" && typeof block.thinking === "string"
-        ? [block.thinking.trim()]
-        : [];
-    })
-    .filter(Boolean)
-    .join("\n");
+  if (!Array.isArray(content)) return [];
+  return content.flatMap((value) => {
+    const block = asRecord(value);
+    return block?.type === "thinking" &&
+      typeof block.thinking === "string" &&
+      block.thinking.trim()
+      ? [block.thinking.trim()]
+      : [];
+  });
+}
+
+/** Native history already has this streamed thought, allowing for a shorter prefix. */
+function nativeThoughtCovers(native: string, live: string): boolean {
+  const stored = native.trim();
+  const streamed = live.trim();
+  if (!stored || !streamed) return false;
+  return stored.includes(streamed);
 }
 
 function cursorPromptBody(message: RecordValue): string {
@@ -672,6 +684,7 @@ export class SessionDisplayService {
         details: new Map(),
         detailBytes: 0,
         cursorPendingThoughts: [],
+        cursorNativeThoughts: new Map(),
         cursorPrompts: new Map(),
       };
       this.entries.set(key, entry);
@@ -778,6 +791,7 @@ export class SessionDisplayService {
     entry.details.clear();
     entry.detailBytes = 0;
     entry.cursorPendingThoughts = [];
+    entry.cursorNativeThoughts.clear();
     entry.cursorPrompts.clear();
   }
 
@@ -1091,6 +1105,9 @@ export class SessionDisplayService {
             }
             continue;
           }
+          // The same reasoning is already in native history. Injecting the
+          // journal copy would show the chain twice.
+          if (this.settledCursorThought(entry, thought)) continue;
           this.event(entry, "message", { ...thought, isReplay: false });
         }
         // Thoughts already on screen were appended before this journal pass
@@ -1103,6 +1120,28 @@ export class SessionDisplayService {
         // On-demand reasoning can retry recovery when the connection returns.
       }
     }
+  }
+
+  /**
+   * A finished Cursor turn whose native history already contains this thought.
+   * The journal copy uses a different id, so identity dedup does not see it.
+   */
+  private settledCursorThought(entry: Entry, message: RecordValue): boolean {
+    const index = message.cursorTurnIndex;
+    if (typeof index !== "number" || !isCursorThinkingOnly(message))
+      return false;
+    const completed = [...entry.overlay.values()].some(
+      (item) => item.type === "result" && item.cursorTurnIndex === index,
+    );
+    if (!completed) return false;
+    const live = thinkingBodies(message);
+    const native = entry.cursorNativeThoughts.get(index) ?? [];
+    return (
+      live.length > 0 &&
+      live.every((body) =>
+        native.some((stored) => nativeThoughtCovers(stored, body)),
+      )
+    );
   }
 
   private rememberBody(entry: Entry, message: RecordValue): RecordValue {
@@ -1785,6 +1824,19 @@ export class SessionDisplayService {
     const controlState = asRecord(
       entry.controls.get("status") ?? entry.controls.get("connected"),
     )?.state;
+    // Cursor persists a finished-looking bubble while the model is still
+    // thinking, and an older result can stay in the overlay. Replaying that
+    // result closes whichever run is current and the transcript looks idle.
+    // An explicit in-turn status means the process has already moved on, so
+    // put running back after the overlay. Missing, idle, hold, and
+    // waiting-input states keep the terminal fact the result just recorded.
+    // Codex and Pi are unchanged: their own turn status stays authoritative.
+    if (
+      page.provider === "cursor" &&
+      page.activity === "running" &&
+      controlState === "in-turn"
+    )
+      model.setRuntime("running");
     if (
       (controlState === "hold" || controlState === "waiting-input") &&
       !["completed", "interrupted", "failed"].includes(
@@ -1855,7 +1907,10 @@ export class SessionDisplayService {
               })
               .join("")
           : "";
-    const cursorTurns = new Map<number, { prompt: string; text: string }>();
+    const cursorTurns = new Map<
+      number,
+      { prompt: string; text: string; thoughts: string[] }
+    >();
     const completedCursorTurns = new Set<number>();
     const cursorPromptTexts: string[] = [];
     if (page.provider === "cursor") {
@@ -1869,7 +1924,11 @@ export class SessionDisplayService {
       for (const message of page.messages) {
         const index = message.cursorTurnIndex;
         if (typeof index !== "number") continue;
-        const turn = cursorTurns.get(index) ?? { prompt: "", text: "" };
+        const turn = cursorTurns.get(index) ?? {
+          prompt: "",
+          text: "",
+          thoughts: [],
+        };
         const content = messageContent(message);
         if (message.type === "user") {
           const body = cursorPromptBody(message);
@@ -1878,10 +1937,16 @@ export class SessionDisplayService {
             cursorPromptTexts.push(body);
           }
         }
-        if (message.type === "assistant") turn.text += text(content);
+        if (message.type === "assistant") {
+          turn.text += text(content);
+          turn.thoughts.push(...thinkingBodies(message));
+        }
         cursorTurns.set(index, turn);
       }
-    }
+      entry.cursorNativeThoughts = new Map(
+        [...cursorTurns].map(([index, turn]) => [index, turn.thoughts]),
+      );
+    } else entry.cursorNativeThoughts.clear();
     for (const message of page.messages) {
       const nativeKey = nativeIdentity(message);
       if (nativeKey) nativeItems.add(nativeKey);
@@ -1980,22 +2045,20 @@ export class SessionDisplayService {
           : undefined;
       if (cursorTurn && !tools.length) {
         const body = text(content);
-        const thinkingBodies = blocks.flatMap((block) =>
-          block?.type === "thinking" &&
-          typeof block.thinking === "string" &&
-          block.thinking.trim()
-            ? [block.thinking]
-            : [],
-        );
-        // Native history keeps an encrypted signature and an empty reasoning
-        // body. Drop the live thought only when that body is actually in the
-        // persisted assistant text.
+        const liveThoughts = thinkingBodies(message);
+        // Native history used to keep only an encrypted signature. Drop the
+        // live thought once the turn has finished and the same body is in the
+        // persisted answer or in a persisted reasoning block.
         const settledThinking =
           message.type === "assistant" &&
           !body &&
-          thinkingBodies.length > 0 &&
-          thinkingBodies.every((thinking) =>
-            cursorTurn.text.includes(thinking),
+          liveThoughts.length > 0 &&
+          liveThoughts.every(
+            (thinking) =>
+              cursorTurn.text.includes(thinking) ||
+              cursorTurn.thoughts.some((native) =>
+                nativeThoughtCovers(native, thinking),
+              ),
           ) &&
           completedCursorTurns.has(message.cursorTurnIndex as number) &&
           blocks.every((block) => block?.type === "thinking");

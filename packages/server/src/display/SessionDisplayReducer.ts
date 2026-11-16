@@ -71,6 +71,15 @@ function isPinnedSegment(segment: DisplaySegment): boolean {
   return isAsyncText(segment);
 }
 
+/** Cursor's background-task notice. It stays in the same user turn. */
+function isCursorTaskNotice(segment: DisplaySegment): boolean {
+  return (
+    segment.type === "notice" &&
+    segment.kind === "provider_event" &&
+    segment.title === "cursor-task"
+  );
+}
+
 /**
  * Live work that keeps a block expanded. Only tools and streaming text count:
  * closing a run settles both, whereas notice states (agent waits, subagents)
@@ -1400,6 +1409,24 @@ export class SessionDisplayReducer {
         const node = block[cursor];
         if (node) tail.add(node.id);
       }
+    }
+    // A background-task notice is not a new question, and the follow-up it
+    // asks for must not become the only visible reply. Keep the answer that
+    // was already written, then the notice, then the short follow-up.
+    for (let cursor = 0; cursor < block.length; cursor += 1) {
+      const segment = block[cursor]?.segment;
+      if (!segment || !isCursorTaskNotice(segment)) continue;
+      let previous = cursor - 1;
+      let saved = false;
+      while (previous >= 0) {
+        const node = block[previous];
+        if (!node || !isAnswerText(node.segment)) break;
+        tail.add(node.id);
+        saved = true;
+        previous -= 1;
+      }
+      const notice = block[cursor];
+      if (saved && notice) tail.add(notice.id);
     }
     // Visible markers recorded once the answer had begun (a manual compaction
     // between turns, a late warning) keep their source position after it

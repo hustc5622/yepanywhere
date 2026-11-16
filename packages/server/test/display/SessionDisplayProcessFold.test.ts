@@ -545,4 +545,120 @@ describe("SessionDisplayReducer process folding", () => {
       "text:这条黄字是核对说明",
     ]);
   });
+
+  it("keeps the Cursor answer before a background task notice outside the fold", () => {
+    const model = new SessionDisplayReducer(view, "cursor", {
+      foldSettled: true,
+    });
+    const turn = "cursor-turn-1";
+    const withTurn = (message: Record<string, unknown>) => ({
+      ...message,
+      turnId: turn,
+      cursorTurnIndex: 1,
+    });
+    model.restore(
+      [
+        withTurn({
+          uuid: "user",
+          type: "user",
+          message: { role: "user", content: "开始吧" },
+        }),
+        withTurn({
+          uuid: "progress",
+          type: "assistant",
+          message: { role: "assistant", content: "先看一下" },
+        }),
+        withTurn({
+          uuid: "tool",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              {
+                type: "tool_use",
+                id: "read-1",
+                name: "Read",
+                input: { path: "a.ts" },
+              },
+            ],
+          },
+        }),
+        withTurn({
+          uuid: "result",
+          type: "user",
+          message: {
+            role: "user",
+            content: [
+              { type: "tool_result", tool_use_id: "read-1", content: "ok" },
+            ],
+          },
+        }),
+        withTurn({
+          uuid: "answer",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "All tests passed" },
+              { type: "text", text: "完整总结" },
+            ],
+          },
+        }),
+        withTurn({
+          uuid: "notice",
+          type: "system",
+          subtype: "cursor_task",
+          content: "check pools (shell, success)",
+        }),
+        withTurn({
+          uuid: "follow-thought",
+          type: "assistant",
+          message: {
+            role: "assistant",
+            content: [
+              { type: "thinking", thinking: "The result is already in hand" },
+            ],
+          },
+        }),
+        withTurn({
+          uuid: "follow-up",
+          type: "assistant",
+          message: { role: "assistant", content: "短回复" },
+        }),
+      ] as Message[],
+      { [turn]: "completed" },
+    );
+    model.setRuntime("completed");
+    const snapshot = model.snapshot();
+    expect(labels(snapshot.nodes)).toEqual([
+      "question",
+      "process:completed",
+      "text:完整总结",
+      "notice",
+      "text:短回复",
+    ]);
+    const [fold] = processes(snapshot);
+    const members = model.processNodes(fold?.id ?? "") ?? [];
+    expect(labels(members)).toEqual([
+      "text:先看一下",
+      "tool_group",
+      "thinking",
+      "thinking",
+    ]);
+    expect(
+      members.flatMap((node) =>
+        node.type === "segment" && node.segment.type === "thinking"
+          ? [node.segment.content]
+          : [],
+      ),
+    ).toEqual(["All tests passed", "The result is already in hand"]);
+    const notice = snapshot.nodes.find(
+      (node) => node.type === "segment" && node.segment.type === "notice",
+    );
+    expect(notice?.type === "segment" && notice.segment).toMatchObject({
+      type: "notice",
+      title: "cursor-task",
+      message: "check pools (shell, success)",
+    });
+  });
 });
