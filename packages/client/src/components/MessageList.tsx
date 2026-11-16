@@ -469,19 +469,6 @@ export const MessageList = memo(function MessageList({
     return null;
   }, [hasNewerMessages, isProcessing, latestTurnUsesUpdateTime, rows]);
 
-  const activeTurnHasThinking = useMemo(() => {
-    if (!lastUpdatedAssistantTurnKey) return false;
-    const row = rows.find(
-      (candidate) =>
-        candidate.kind === "assistant-turn" &&
-        candidate.key === lastUpdatedAssistantTurnKey,
-    );
-    return (
-      row?.kind === "assistant-turn" &&
-      row.items.some((item) => item.type === "thinking")
-    );
-  }, [lastUpdatedAssistantTurnKey, rows]);
-
   // Only window long lists, and never while a branch/target focus is pending —
   // those flows scroll to and highlight a specific DOM node, which must be
   // mounted. Both flags are transient (cleared by onBranchFocused /
@@ -1259,11 +1246,7 @@ export const MessageList = memo(function MessageList({
               !lastUpdatedAssistantTurnKey && (
                 <MessageActions runningPhase="llm" />
               )}
-            <ProcessingIndicator
-              isProcessing={
-                isProcessing && !isCompacting && !activeTurnHasThinking
-              }
-            />
+            <ProcessingIndicator isProcessing={isProcessing && !isCompacting} />
           </>
         );
     }

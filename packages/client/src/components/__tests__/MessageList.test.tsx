@@ -31,7 +31,8 @@ vi.mock("../MessageActions", () => ({
 }));
 
 vi.mock("../ProcessingIndicator", () => ({
-  ProcessingIndicator: () => null,
+  ProcessingIndicator: ({ isProcessing }: { isProcessing: boolean }) =>
+    isProcessing ? <div data-testid="processing-indicator" /> : null,
 }));
 
 vi.mock("../RenderItemComponent", () => ({
@@ -633,6 +634,50 @@ describe("MessageList active turn timestamp", () => {
     expect(
       screen.getAllByTestId("message-actions").map((el) => el.dataset.phase),
     ).toEqual([undefined, "llm"]);
+  });
+});
+
+describe("MessageList processing indicator", () => {
+  beforeEach(() => {
+    vi.stubGlobal(
+      "ResizeObserver",
+      class {
+        observe() {}
+        disconnect() {}
+      },
+    );
+  });
+
+  afterEach(() => {
+    cleanup();
+    vi.unstubAllGlobals();
+  });
+
+  it("shows whenever the session is running, even after reasoning", () => {
+    const items = [userPromptItem("u1"), assistantThinkingItem("t1")];
+    const { rerender } = render(
+      <MessageList messages={[]} preprocessedItems={items} isProcessing />,
+    );
+    expect(screen.queryByTestId("processing-indicator")).not.toBeNull();
+
+    rerender(
+      <MessageList
+        messages={[]}
+        preprocessedItems={items}
+        isProcessing
+        isCompacting
+      />,
+    );
+    expect(screen.queryByTestId("processing-indicator")).toBeNull();
+
+    rerender(
+      <MessageList
+        messages={[]}
+        preprocessedItems={items}
+        isProcessing={false}
+      />,
+    );
+    expect(screen.queryByTestId("processing-indicator")).toBeNull();
   });
 });
 
