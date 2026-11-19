@@ -602,6 +602,36 @@ html.mobile-navigation-viewport .attachment-composer {
   text-align: center;
 }
 
+.session-schema-mismatch {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 0.75rem;
+}
+
+.session-schema-mismatch p {
+  margin: 0;
+}
+
+.session-schema-mismatch-builds {
+  color: var(--text-muted);
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+}
+
+.session-schema-mismatch-details {
+  max-width: 100%;
+  color: var(--text-muted);
+  text-align: left;
+}
+
+.session-schema-mismatch-details pre {
+  margin: 0.5rem 0 0;
+  font-family: var(--font-mono);
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 .breadcrumb {
   font-size: var(--font-size-lg);
   color: var(--text-muted);

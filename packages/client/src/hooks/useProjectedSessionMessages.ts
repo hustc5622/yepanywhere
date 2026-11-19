@@ -14,6 +14,10 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
 import { extractCodexTurnContextUsage } from "../lib/codexMessageContext";
 import { connectionManager } from "../lib/connection";
+import {
+  parseDisplaySnapshot,
+  reportDisplaySchemaMismatch,
+} from "../lib/displaySchemaMismatch";
 import { DisplaySnapshotCache } from "../lib/displaySnapshotCache";
 import { displayNodeContainsMessage } from "../lib/messageSearchTarget";
 import { sessionLoadTracer } from "../lib/sessionLoadTiming";
@@ -235,7 +239,7 @@ export function useProjectedSessionMessages(
             reset: refreshOptions?.replaceMessages,
           }),
         ]);
-        const next = SessionDisplaySnapshotSchema.parse(display);
+        const next = parseDisplaySnapshot(display, "refresh view");
         if (keyRef.current !== expected) return null;
         if (
           snapshotRef.current?.view.epoch !== expectedEpoch &&
@@ -321,7 +325,9 @@ export function useProjectedSessionMessages(
         });
       } else if (type === "display-snapshot") {
         const parsed = SessionDisplaySnapshotSchema.safeParse(data);
-        if (parsed.success) {
+        if (!parsed.success)
+          reportDisplaySchemaMismatch(parsed.error, "ws snapshot");
+        else {
           install(parsed.data);
           if (snapshotRef.current === parsed.data) {
             skipDeferredView.current?.();
@@ -359,8 +365,11 @@ export function useProjectedSessionMessages(
         }
       } else if (type === "display-patch") {
         const parsed = SessionDisplayPatchSchema.safeParse(data);
+        if (!parsed.success) {
+          reportDisplaySchemaMismatch(parsed.error, "ws patch");
+          return;
+        }
         if (
-          !parsed.success ||
           parsed.data.view.sessionId !== sessionId ||
           parsed.data.view.branchScopeId !== (branchId ?? "active")
         )
@@ -474,7 +483,7 @@ export function useProjectedSessionMessages(
             (!snapshotRef.current ||
               snapshotRef.current.view.epoch === next.view.epoch)
           ) {
-            install(SessionDisplaySnapshotSchema.parse(next));
+            install(parseDisplaySnapshot(next, "http view"));
             sessionLoadTracer.fresh(key, "http");
           }
         })

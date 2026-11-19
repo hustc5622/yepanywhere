@@ -2,6 +2,7 @@ import { act, cleanup, renderHook, waitFor } from "@testing-library/react";
 import type { SessionDisplaySnapshot } from "@yep-anywhere/shared";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { connectionManager } from "../../lib/connection";
+import { DisplaySchemaMismatchError } from "../../lib/displaySchemaMismatch";
 import {
   resetSessionPrefetchForTests,
   startSessionPrefetch,
@@ -257,6 +258,29 @@ describe("projected session messages", () => {
     renderHook(() => useProjectedSessionMessages({ ...options, onLoadError }));
     await waitFor(() => expect(onLoadError).toHaveBeenCalledWith(error));
     expect(api.getSessionDisplayView).toHaveBeenCalledTimes(1);
+  });
+
+  it("reports a display payload newer than the client schema as a mismatch", async () => {
+    vi.spyOn(console, "warn").mockImplementation(() => {});
+    const drifted = snapshot();
+    const question = drifted.nodes[0] as Extract<
+      (typeof drifted.nodes)[number],
+      { type: "question" }
+    >;
+    api.getSessionDisplayView.mockResolvedValue({
+      ...drifted,
+      nodes: [
+        { ...question, question: { ...question.question, futureField: 1 } },
+      ],
+    });
+    const onLoadError = vi.fn();
+    renderHook(() => useProjectedSessionMessages({ ...options, onLoadError }));
+    await waitFor(() => expect(onLoadError).toHaveBeenCalled());
+    const error = onLoadError.mock.calls[0]?.[0];
+    expect(error).toBeInstanceOf(DisplaySchemaMismatchError);
+    expect((error as DisplaySchemaMismatchError).detail).toBe(
+      "nodes.*.question: unrecognized_keys (futureField)",
+    );
   });
 
   it("cancels a scheduled retry after switching sessions", async () => {

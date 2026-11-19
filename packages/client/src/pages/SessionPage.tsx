@@ -17,6 +17,7 @@ import {
   useSearchParams,
 } from "react-router-dom";
 import { api, isQueuedResumeSessionResponse } from "../api/client";
+import { DisplaySchemaMismatchNotice } from "../components/DisplaySchemaMismatchNotice";
 import { ExpandableSessionTitle } from "../components/ExpandableSessionTitle";
 import { GoalModal } from "../components/GoalModal";
 import { ModelSwitchModal } from "../components/ModelSwitchModal";
@@ -76,6 +77,7 @@ import {
   parseCodexSlashCommand,
   resolveCodexSkillInputs,
 } from "../lib/codexInputCommands";
+import { isDisplaySchemaMismatchError } from "../lib/displaySchemaMismatch";
 import { normalizeExternalHttpUrl } from "../lib/externalUrl";
 import { getMessageId } from "../lib/mergeMessages";
 import { isStalePendingInputError } from "../lib/pendingInputError";
@@ -2343,7 +2345,9 @@ function SessionPageContent({
   const abortTurn = useStableCallback(handleAbort);
 
   if (error)
-    return (
+    return isDisplaySchemaMismatchError(error) ? (
+      <DisplaySchemaMismatchNotice detail={error.detail} />
+    ) : (
       <div className="error">
         {t("sessionErrorPrefix")} {error.message}
       </div>
