@@ -767,8 +767,13 @@ export type {
 } from "./cursor.js";
 export type {
   AgyAccountResponse,
+  AgyCredits,
   AgyLoginState,
   AgyLoginStatus,
+  AgyUsageBucket,
+  AgyUsageGroup,
+  AgyUsageResponse,
+  AgyUsageState,
 } from "./agy.js";
 export * from "./curl.js";
 export type {

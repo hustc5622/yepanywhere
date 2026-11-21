@@ -1031,6 +1031,11 @@ export const api = {
         ? "/providers/agy/account?fresh=1"
         : "/providers/agy/account",
     ),
+  // Quota from agy's read-only `/usage` + `/credits` (no agent turn).
+  getAgyUsage: (options?: { fresh?: boolean }) =>
+    fetchJSON<import("@yep-anywhere/shared").AgyUsageResponse>(
+      options?.fresh ? "/providers/agy/usage?fresh=1" : "/providers/agy/usage",
+    ),
   startAgyLogin: () =>
     fetchJSON<{
       login: import("@yep-anywhere/shared").AgyLoginState | null;

@@ -67,12 +67,35 @@ describe("provider routes", () => {
     await app.request("/agy/logout", { method: "POST" });
     expect(agyLogin.logout).toHaveBeenCalled();
 
+    const agyUsage = {
+      getUsage: vi.fn(async () => ({
+        state: "signed-out" as const,
+        groups: [],
+        credits: null,
+        message: null,
+        fetchedAt: null,
+      })),
+    };
+    const usageApp = createProvidersRoutes({ agyUsage });
+    expect(
+      await (await usageApp.request("/agy/usage?fresh=1")).json(),
+    ).toMatchObject({ state: "signed-out" });
+    expect(agyUsage.getUsage).toHaveBeenCalledWith({ fresh: true });
+
     const disabled = createProvidersRoutes({
       agyLogin: agyLogin as never,
       enabledProviders: ["codex"],
     });
     expect(
       (await disabled.request("/agy/login", { method: "POST" })).status,
+    ).toBe(404);
+    expect(
+      (
+        await createProvidersRoutes({
+          agyUsage,
+          enabledProviders: ["codex"],
+        }).request("/agy/usage")
+      ).status,
     ).toBe(404);
   });
 

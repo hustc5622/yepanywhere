@@ -124,6 +124,19 @@ export function NewSessionSetupSkeleton({
 }) {
   const { t } = useI18n();
   if (provider === "pi") return <PiGatewayKeySkeleton />;
+  if (provider === "agy") {
+    return (
+      <div
+        className="codex-usage-card codex-usage-card-collapsible"
+        aria-hidden="true"
+      >
+        <div className="codex-usage-disclosure new-session-usage-skeleton">
+          {t("agyUsageTitle")}
+          <Skeleton width="3em" />
+        </div>
+      </div>
+    );
+  }
   if (provider && provider !== "codex") return null;
   return (
     <>

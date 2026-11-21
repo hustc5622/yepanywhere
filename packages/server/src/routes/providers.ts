@@ -14,6 +14,10 @@ import {
   type AgyLoginService,
   getAgyLoginService,
 } from "../sdk/providers/agy-login.js";
+import {
+  type AgyUsageService,
+  getAgyUsageService,
+} from "../sdk/providers/agy-usage.js";
 import type { ClaudeUsageResponse } from "../sdk/providers/claude-control.js";
 import { getCodexModelSourceRegistry } from "../sdk/providers/codex-model-sources.js";
 import { cursorAccountService } from "../sdk/providers/cursor-account.js";
@@ -35,6 +39,8 @@ interface ProviderRouteDeps {
   runtimeController?: RuntimeController;
   /** Test seam for Antigravity sign-in. */
   agyLogin?: AgyLoginService;
+  /** Test seam for Antigravity quota (`agy -p /usage`). */
+  agyUsage?: Pick<AgyUsageService, "getUsage">;
   getCursorAccount?: (options: {
     fresh?: boolean;
   }) => Promise<CursorAccountResponse>;
@@ -113,6 +119,16 @@ export function createProvidersRoutes(deps: ProviderRouteDeps = {}): Hono {
     const service = await agyLogin();
     return c.json(
       await service.getAccount({ fresh: c.req.query("fresh") === "1" }),
+    );
+  });
+
+  // GET /api/providers/agy/usage - per-group quota and AI credits from
+  // agy's read-only `/usage` and `/credits` print-mode answers.
+  routes.get("/agy/usage", async (c) => {
+    if (agyDisabled()) return c.json({ error: "Provider not found" }, 404);
+    const service = deps.agyUsage ?? getAgyUsageService();
+    return c.json(
+      await service.getUsage({ fresh: c.req.query("fresh") === "1" }),
     );
   });
 

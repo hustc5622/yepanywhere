@@ -10388,10 +10388,49 @@ button.context-usage-indicator--button:focus-visible {
   word-break: break-all;
 }
 
-.agy-account-card {
+.agy-account-body {
+  gap: var(--space-2);
+  padding: var(--space-2);
+}
+
+.agy-account-card .codex-usage-progress-value {
+  background: var(--provider-agy);
+}
+
+.agy-account-body .codex-usage-state {
+  margin: 0;
+}
+
+.agy-usage {
   display: flex;
   flex-direction: column;
+  gap: var(--space-3);
+}
+
+.agy-usage-group .codex-usage-windows {
+  margin-top: var(--space-1);
+}
+
+@container codex-usage (min-width: 32rem) {
+  .agy-usage-group .codex-usage-windows {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
+.agy-usage-group-heading strong {
+  font-size: var(--font-size-sm);
+}
+
+.agy-usage-credits {
+  display: flex;
+  flex-wrap: wrap;
   gap: var(--space-2);
+  margin: 0;
+}
+
+.agy-usage-credits a {
+  color: var(--text-link, var(--text-primary));
+  text-decoration: underline;
 }
 
 .agy-account-install code {

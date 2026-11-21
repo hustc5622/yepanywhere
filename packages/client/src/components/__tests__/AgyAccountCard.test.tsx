@@ -18,6 +18,38 @@ const pending = {
   startedAt: "2026-11-21T10:00:00Z",
 };
 
+const USAGE = {
+  state: "ok" as const,
+  groups: [
+    {
+      name: "Gemini Models",
+      models: ["Gemini 4 Neon", "Gemini 3.8 Flash"],
+      buckets: [
+        {
+          id: "gemini-weekly",
+          name: "Weekly Limit Remaining",
+          window: "weekly",
+          remainingFraction: 0.9,
+          resetTime: "2026-11-28T08:57:53Z",
+        },
+        {
+          id: "gemini-5h",
+          name: "Five Hour Limit Remaining",
+          window: "5h",
+          remainingFraction: 0.66,
+          resetTime: "2026-11-21T13:57:53Z",
+        },
+      ],
+    },
+  ],
+  credits: {
+    remaining: 0,
+    upgradeUrl: "https://antigravity.google/g1-upgrade",
+  },
+  message: null,
+  fetchedAt: "2026-11-21T13:00:00Z",
+};
+
 beforeEach(() => {
   localStorage.clear();
   vi.spyOn(api, "getAgyAccount").mockResolvedValue({
@@ -26,16 +58,17 @@ beforeEach(() => {
     agyPath: "/h/.local/bin/agy",
     login: null,
   });
+  vi.spyOn(api, "getAgyUsage").mockResolvedValue(USAGE);
 });
 afterEach(() => {
   cleanup();
   vi.restoreAllMocks();
 });
 
-const renderCard = (onRefresh = vi.fn()) => {
+const renderCard = (onRefresh = vi.fn(), defaultExpanded = true) => {
   render(
     <I18nProvider>
-      <AgyAccountCard onRefresh={onRefresh} />
+      <AgyAccountCard onRefresh={onRefresh} defaultExpanded={defaultExpanded} />
     </I18nProvider>,
   );
   return onRefresh;
@@ -137,5 +170,43 @@ describe("AgyAccountCard", () => {
     expect(screen.queryByRole("button", { name: "Sign in with Google" })).toBe(
       null,
     );
+  });
+
+  it("reads quota only once expanded and shows used percentages", async () => {
+    vi.mocked(api.getAgyAccount).mockResolvedValue({
+      installed: true,
+      authenticated: true,
+      agyPath: "/h/.local/bin/agy",
+      login: null,
+    });
+    renderCard(vi.fn(), false);
+    const toggle = await screen.findByRole("button", {
+      name: /Antigravity usage & account/,
+    });
+    expect(toggle.getAttribute("aria-expanded")).toBe("false");
+    await waitFor(() => expect(api.getAgyAccount).toHaveBeenCalled());
+    expect(api.getAgyUsage).not.toHaveBeenCalled();
+
+    fireEvent.click(toggle);
+    await screen.findByText("Gemini Models");
+    expect(api.getAgyUsage).toHaveBeenCalledWith({ fresh: false });
+    const bars = screen.getAllByRole("progressbar");
+    // 5-hour window first, then weekly; agy's remaining share becomes "used".
+    expect(bars.map((bar) => bar.getAttribute("aria-valuenow"))).toEqual([
+      "34",
+      "10",
+    ]);
+    screen.getByText("AI Credits: 0");
+
+    fireEvent.click(screen.getByRole("button", { name: "Refresh" }));
+    await waitFor(() =>
+      expect(api.getAgyUsage).toHaveBeenCalledWith({ fresh: true }),
+    );
+  });
+
+  it("does not read quota while signed out", async () => {
+    renderCard();
+    await screen.findByText("Not signed in");
+    expect(api.getAgyUsage).not.toHaveBeenCalled();
   });
 });

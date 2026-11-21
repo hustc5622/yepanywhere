@@ -15,7 +15,7 @@ Antigravity CLI（命令 `agy`，provider 名 `agy`）是 Google 面向个人账
 
 ## Yep 内登录
 
-入口：新建会话选中 Antigravity 时的「Antigravity 账号」卡片，以及 设置 → Provider 里 Antigravity 条目下的同一张卡片。
+入口：新建会话选中 Antigravity 时的「Antigravity 用量与账号」折叠卡片，以及 设置 → Provider 里 Antigravity 条目下的同一张卡片（默认展开）。
 
 1. 点击「用 Google 账号登录」（已登录时为「重新登录」）。服务端在 Yep 主机上启动 `agy acp --login`，从 stdout 解析出 Google OAuth 链接返回给客户端（30 秒内没拿到链接就判为失败）。
 2. 用户在当前设备打开链接并授权。落地页（`antigravity.google/oauth-callback`）会显示授权码；把授权码或落地页完整网址粘回卡片，点「提交」。
@@ -25,6 +25,16 @@ Antigravity CLI（命令 `agy`，provider 名 `agy`）是 Google 面向个人账
 约束：同一时间只允许一个登录流程，开始新的登录会取消旧的；15 分钟内没提交授权码就超时；提交后 60 秒内没完成也判为失败。授权码只接受单行，最长 4096 字符，只写入 agy 的 stdin，不记日志，也不回传给客户端；流程结束后不再返回 OAuth 链接。登录在 Web/API 进程里执行，凭证写入主机 keychain，外置 runtime 之后启动的 agy 直接读取。
 
 接口（受 `ENABLED_PROVIDERS` 控制，未启用时返回 404）：`GET /api/providers/agy/account[?fresh=1]`、`POST /api/providers/agy/login`、`GET /api/providers/agy/login`、`POST /api/providers/agy/login/code {code}`、`DELETE /api/providers/agy/login`、`POST /api/providers/agy/logout`。实现：`packages/server/src/sdk/providers/agy-login.ts`、`packages/client/src/components/AgyAccountCard.tsx`。
+
+## 额度与 AI Credits
+
+和 Codex 用量卡片对齐，额度显示在同一张「Antigravity 用量与账号」卡片里：按额度组（`Gemini Models`、`Claude and GPT models`、`Gemini 4 Argon` 等）显示 5 小时和每周窗口的已用百分比（agy 返回剩余比例，Yep 换算成已用）、重置时间和组内模型，另外显示 AI Credits 余额和升级链接。
+
+- 数据来源：Yep 主机上执行 `agy -p /usage --output-format json` 和 `agy -p /credits --output-format json`（工作目录为临时目录）。这两个是 agy 在 print 模式下直接回答的只读 slash 命令，返回 `num_turns: 0`、空 `conversation_id`，不发起对话、不消耗额度，也不留下会话记录。
+- 参数必须保持原样：会话启动用的 `--disable-slash-commands` 会让 `/usage` 变成一次真实的付费对话。解析时如果 `num_turns` 不为 0，或 `command.name` 不是 `usage`/`quota`（`/credits` 要求是 `credits`），直接判为错误，不展示结果。
+- 状态：`ok`、`not-installed`、`signed-out`（输出含 `Please sign in` 等）、`unavailable`（agy 返回 `status: ERROR`，例如企业账号没有分模型额度）、`error`（启动失败、60 秒超时、无法解析）。`/credits` 失败不影响额度展示。
+- 读取时机：卡片展开且已登录时才读取；只缓存成功结果（5 分钟），并发请求共用一次读取；「刷新」带 `fresh=1` 强制重读。一次读取约 6 秒。
+- 接口：`GET /api/providers/agy/usage[?fresh=1]`（受 `ENABLED_PROVIDERS` 控制）。实现：`packages/server/src/sdk/providers/agy-usage.ts`，类型在 `packages/shared/src/agy.ts`。
 
 ## 会话与接管
 
@@ -60,11 +70,11 @@ Antigravity CLI（命令 `agy`，provider 名 `agy`）是 Google 面向个人账
 - 逐字流式显示正文：ACP 会推送正文增量，但为了和磁盘记录对齐，展示层按 step 整段显示。ACP 也不推送 thinking，thinking 只在历史里出现。
 - 多账号：未实现（`--app-data-dir` 能否隔离 keychain 还没验证）。界面也不显示账号邮箱：agy 不对外提供邮箱，只在日志里出现。
 - MCP 注入：ACP 的 `session/new` 支持 `mcpServers`，HTTP 类 MCP 需要 `--process-per-session`，目前尚未接入。
-- 配额与额度（`agy -p /usage`、`/credits`）。
+- 远端代理：agy 遵守 `HTTPS_PROXY`，流量都在 `*.googleapis.com`（推理是 `daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent`）；但 agy 没有类似 Codex `openai_base_url` 的地址覆盖，仅推理走远端需要按域名分流的本地转发，尚未实现。
 - 子 agent transcript 关联（`invoke_subagent`，会话目录里有 `parent_conversation_id`）。
 
 ## 参考与验证
 
-- 单元测试：`packages/server/test/sdk/providers/agy.test.ts`、`agy-login.test.ts`（用模拟 agy 脚本覆盖登录流程）、`packages/server/test/sessions/agy-store.test.ts`、`packages/server/test/routes/providers.test.ts`、`packages/client/src/components/__tests__/AgyAccountCard.test.tsx`。
+- 单元测试：`packages/server/test/sdk/providers/agy.test.ts`、`agy-login.test.ts`（用模拟 agy 脚本覆盖登录流程）、`agy-usage.test.ts`（真实 `/usage`、`/credits` 输出作 fixture）、`packages/server/test/sessions/agy-store.test.ts`、`packages/server/test/routes/providers.test.ts`、`packages/client/src/components/__tests__/AgyAccountCard.test.tsx`。
 - 真实联调：`npx tsx scripts/smoke-agy-provider.ts [cwd]`。依次覆盖新建、续接和工具审批，再做问卷测试，最后用 reader 读回历史。脚本会发起模型请求（默认 Gemini 3.8 Flash low），并在 agy 历史里留下测试会话，运行前需要用户授权。可用环境变量：`SMOKE_RESUME`、`SMOKE_PROMPT`、`SMOKE_DENY=1`、`SMOKE_MODEL`、`SMOKE_EFFORT`、`SMOKE_MODE`、`SMOKE_MODELS=1`、`SMOKE_QUESTION=0`。
 - 升级 `agy` 后，重新运行 `references/antigravity/probe/step*.mjs`（需要登录，会发起少量请求），对比新旧 trace，再核对 `agy*.ts`。

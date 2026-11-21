@@ -223,7 +223,10 @@ export function ProvidersSettings() {
                 )}
                 {provider.id === "agy" &&
                   serverProviders.some((info) => info.name === "agy") && (
-                    <AgyAccountCard onRefresh={refetchProviders} />
+                    <AgyAccountCard
+                      onRefresh={refetchProviders}
+                      defaultExpanded
+                    />
                   )}
               </div>
               {provider.metadata.website && (
