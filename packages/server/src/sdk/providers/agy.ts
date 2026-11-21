@@ -1186,21 +1186,41 @@ function convertApproval(
 }
 
 /**
+ * Hosts agy must reach directly even when a proxy is configured: its ACP
+ * transport and any locally routed endpoint run on this machine.
+ */
+export const DEFAULT_AGY_NO_PROXY =
+  "localhost,127.0.0.1,::1,*.local,169.254.169.254";
+
+/**
  * agy is a static binary, but services launched by launchd do not inherit
  * the shell PATH that holds `~/.local/bin`; agy's own subprocesses (git,
  * shell commands) need a sensible PATH.
+ *
+ * agy's traffic is Google-bound, so a host that reaches Google only through a
+ * proxy sets `YEP_AGY_PROXY` (see `scripts/install-launchagents.sh`). The
+ * variable is agy-only: other providers keep the runtime's own environment,
+ * and without the opt-in nothing is rewritten here.
  */
 export function agySpawnEnv(agyPath: string): Record<string, string> {
   const binDir = dirname(agyPath);
   const current = process.env.PATH ?? "";
   const parts = current.split(delimiter);
-  return {
+  const env: Record<string, string> = {
     PATH: parts.includes(binDir)
       ? current
       : current
         ? `${binDir}${delimiter}${current}`
         : binDir,
   };
+  const proxy = process.env.YEP_AGY_PROXY?.trim();
+  if (proxy) {
+    env.HTTP_PROXY = proxy;
+    env.HTTPS_PROXY = proxy;
+    env.ALL_PROXY = proxy;
+    env.NO_PROXY = process.env.NO_PROXY?.trim() || DEFAULT_AGY_NO_PROXY;
+  }
+  return env;
 }
 
 let cachedAgyPath: { at: number; path: string | null } | null = null;

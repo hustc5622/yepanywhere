@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it } from "vitest";
 import {
   buildAgyModelCatalog,
   parseAgyModelsOutput,
@@ -9,6 +9,8 @@ import {
   planAgyQuestionnaire,
 } from "../../../src/sdk/providers/agy-questions.js";
 import {
+  DEFAULT_AGY_NO_PROXY,
+  agySpawnEnv,
   agyToolResultText,
   convertAgyUpdate,
   recordAgyToolNames,
@@ -285,5 +287,48 @@ describe("agy vendor tool names", () => {
         rawInput: { TargetFile: "/a", TargetContent: "x" },
       }),
     ).toBe("replace_file_content");
+  });
+});
+
+describe("agy spawn env", () => {
+  const keys = [
+    "YEP_AGY_PROXY",
+    "HTTP_PROXY",
+    "HTTPS_PROXY",
+    "ALL_PROXY",
+    "NO_PROXY",
+  ];
+  const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
+
+  afterEach(() => {
+    for (const key of keys) {
+      if (saved[key] === undefined) Reflect.deleteProperty(process.env, key);
+      else process.env[key] = saved[key];
+    }
+  });
+
+  it("routes agy through YEP_AGY_PROXY and keeps local hosts direct", () => {
+    process.env.YEP_AGY_PROXY = "http://127.0.0.1:8485";
+    Reflect.deleteProperty(process.env, "HTTPS_PROXY");
+    Reflect.deleteProperty(process.env, "NO_PROXY");
+    const env = agySpawnEnv("/tmp/agy");
+    expect(env.HTTP_PROXY).toBe("http://127.0.0.1:8485");
+    expect(env.HTTPS_PROXY).toBe("http://127.0.0.1:8485");
+    expect(env.ALL_PROXY).toBe("http://127.0.0.1:8485");
+    expect(env.NO_PROXY).toBe(DEFAULT_AGY_NO_PROXY);
+    expect(env.PATH?.split(":")[0]).toBe("/tmp");
+  });
+
+  it("keeps an explicit NO_PROXY and never invents a proxy", () => {
+    process.env.YEP_AGY_PROXY = "http://127.0.0.1:8485";
+    process.env.NO_PROXY = "localhost,example.test";
+    expect(agySpawnEnv("/tmp/agy").NO_PROXY).toBe("localhost,example.test");
+
+    Reflect.deleteProperty(process.env, "YEP_AGY_PROXY");
+    process.env.HTTPS_PROXY = "http://proxy.example:3128";
+    const env = agySpawnEnv("/tmp/agy");
+    // Without the opt-in agy inherits whatever the host already has.
+    expect(env.HTTPS_PROXY).toBeUndefined();
+    expect(env.HTTP_PROXY).toBeUndefined();
   });
 });

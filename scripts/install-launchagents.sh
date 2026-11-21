@@ -569,6 +569,15 @@ build_provider_env_args() {
   if [[ -n "${SESSION_TITLE_TIMEOUT_MS:-}" ]]; then
     PROVIDER_ENV_ARGS+=("SESSION_TITLE_TIMEOUT_MS" "$SESSION_TITLE_TIMEOUT_MS")
   fi
+  # agy reaches Google; hosts that need a proxy for it (or want agy on a
+  # different route than the rest of the runtime) set YEP_AGY_PROXY. Only agy
+  # subprocesses see it, so other providers keep their own routing.
+  if [[ -n "${YEP_AGY_PROXY:-}" ]]; then
+    PROVIDER_ENV_ARGS+=("YEP_AGY_PROXY" "$YEP_AGY_PROXY")
+  fi
+  if [[ -n "${NO_PROXY:-}" ]]; then
+    PROVIDER_ENV_ARGS+=("NO_PROXY" "$NO_PROXY")
+  fi
 }
 
 # Control-plane wiring the shell needs to reach an external runtime worker.
