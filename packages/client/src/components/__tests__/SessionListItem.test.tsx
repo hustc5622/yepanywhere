@@ -13,17 +13,21 @@ import { ToastProvider } from "../../contexts/ToastContext";
 import { I18nProvider } from "../../i18n";
 import { SessionListItem } from "../SessionListItem";
 
-const { mockGenerateSessionTitle, mockUpdateSessionMetadata } = vi.hoisted(
-  () => ({
-    mockGenerateSessionTitle: vi.fn(),
-    mockUpdateSessionMetadata: vi.fn(),
-  }),
-);
+const {
+  mockGenerateSessionTitle,
+  mockUpdateSessionMetadata,
+  mockGetSessionSourceFile,
+} = vi.hoisted(() => ({
+  mockGenerateSessionTitle: vi.fn(),
+  mockUpdateSessionMetadata: vi.fn(),
+  mockGetSessionSourceFile: vi.fn(),
+}));
 
 vi.mock("../../api/client", () => ({
   api: {
     generateSessionTitle: mockGenerateSessionTitle,
     updateSessionMetadata: mockUpdateSessionMetadata,
+    getSessionSourceFile: mockGetSessionSourceFile,
   },
 }));
 
@@ -55,6 +59,7 @@ describe("SessionListItem actions", () => {
 
   beforeEach(() => {
     consoleErrorSpy = vi.spyOn(console, "error").mockImplementation(() => {});
+    mockGetSessionSourceFile.mockResolvedValue({ path: null });
   });
 
   afterEach(() => {
@@ -146,6 +151,9 @@ describe("SessionListItem actions", () => {
     });
 
     const projectId = toUrlProjectId("/Users/someone/work/alpha");
+    mockGetSessionSourceFile.mockResolvedValue({
+      path: "/Users/someone/.codex/sessions/2026/05/01/rollout-abc.jsonl",
+    });
     renderItem({
       projectId,
       projectName: "Project Alpha",
@@ -161,15 +169,17 @@ describe("SessionListItem actions", () => {
     });
     const copiedText = writeText.mock.calls[0]?.[0] as string;
     // The copied block must be self-locating: a bare session id cannot be
-    // resolved back to a project by any API, route or CLI.
+    // resolved back to a project by any API, route or CLI, and only the file
+    // path identifies which transcript on disk this actually is.
     expect(copiedText).toBe(
       [
         "Title: Session title",
         "Session ID: session-1",
         "Provider: codex",
         "Project: /Users/someone/work/alpha",
+        "File: /Users/someone/.codex/sessions/2026/05/01/rollout-abc.jsonl",
         `Link: ${window.location.origin}/projects/${projectId}/sessions/session-1`,
-        `Transcript: ${window.location.origin}/api/projects/${projectId}/sessions/session-1/transcript`,
+        `Live transcript: ${window.location.origin}/api/projects/${projectId}/sessions/session-1/transcript`,
       ].join("\n"),
     );
   });

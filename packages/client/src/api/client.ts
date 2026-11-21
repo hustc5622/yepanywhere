@@ -54,6 +54,7 @@ import type {
   SessionRetryStatus,
   SessionRuntime,
   SessionSavedFileContent,
+  SessionSourceFileResponse,
   SessionThinkingDetail,
   SessionToolGroupDetailPage,
   SlashCommand,
@@ -1554,6 +1555,17 @@ export const api = {
       pendingInputRequest?: InputRequest | null;
       slashCommands?: SlashCommand[] | null;
     }>(`/projects/${projectId}/sessions/${sessionId}/metadata`),
+
+  /**
+   * Absolute provider file backing this session, resolved on demand.
+   *
+   * Lives outside the session payload so the session list never pays a
+   * filesystem stat per row; "copy session info" is the only consumer.
+   */
+  getSessionSourceFile: (projectId: string, sessionId: string) =>
+    fetchJSON<SessionSourceFileResponse>(
+      `/projects/${projectId}/sessions/${encodeURIComponent(sessionId)}/source-file`,
+    ),
 
   /**
    * Get a structured context-window breakdown for a session.

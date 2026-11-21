@@ -446,6 +446,7 @@ export type {
   SessionLocation,
   SessionLocationSource,
   SessionLocateResponse,
+  SessionSourceFileResponse,
 } from "./session/index.js";
 
 // Lightweight, read-only session display projection.

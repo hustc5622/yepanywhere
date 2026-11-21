@@ -1,4 +1,3 @@
-import { stat } from "node:fs/promises";
 import { dirname, join, relative } from "node:path";
 import { SideConversationRequestSchema } from "@yep-anywhere/shared";
 import {
@@ -118,12 +117,19 @@ import {
   findSessionSummaryAcrossProviders,
   resolveSessionSources,
 } from "../sessions/provider-resolution.js";
-import { locateSession } from "../sessions/session-locator.js";
+import {
+  isLocatableSessionId,
+  locateSession,
+} from "../sessions/session-locator.js";
 import {
   deriveSessionRuntime,
   pendingInputTypeFromProcess,
   pendingInputTypeFromRequest,
 } from "../sessions/session-runtime.js";
+import {
+  findOwningRemoteExecutor,
+  resolveSessionSourceFile,
+} from "../sessions/session-source-file.js";
 import type { ISessionReader } from "../sessions/types.js";
 import { isUserPromptMessage } from "../sessions/user-prompt-message.js";
 import type { ExternalSessionTracker } from "../supervisor/ExternalSessionTracker.js";
@@ -703,34 +709,13 @@ async function resolveArchiveTarget(
   return null;
 }
 
-async function findArchiveSessionFilePath(
+function findArchiveSessionFilePath(
   project: Project,
   reader: ISessionReader,
   sourceSessionDir: string,
   sessionId: string,
 ): Promise<string | null> {
-  const direct = await reader.getSessionFilePath?.(sessionId);
-  if (direct) return direct;
-
-  const dirs = [
-    sourceSessionDir,
-    project.sessionDir,
-    ...(project.mergedSessionDirs ?? []),
-  ];
-  const seen = new Set<string>();
-  for (const dir of dirs) {
-    if (seen.has(dir)) continue;
-    seen.add(dir);
-    const candidate = join(dir, `${sessionId}.jsonl`);
-    try {
-      const stats = await stat(candidate);
-      if (stats.isFile()) return candidate;
-    } catch {
-      // Try next candidate.
-    }
-  }
-
-  return null;
+  return resolveSessionSourceFile(project, reader, sourceSessionDir, sessionId);
 }
 
 function archiveHttpStatus(error: ArchiveError): 400 | 404 | 409 | 500 {
@@ -1077,6 +1062,56 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       },
     });
   });
+
+  // GET /api/projects/:projectId/sessions/:sessionId/source-file - Physical
+  // provider file backing this session.
+  //
+  // "Copy session info" hands a session to an agent on another machine. A bare
+  // id plus a UI link is not openable there, and the client cannot derive the
+  // path: each provider has its own layout, and only the owning reader knows
+  // it. Resolved on demand so session lists never pay a filesystem stat per row.
+  routes.get(
+    "/projects/:projectId/sessions/:sessionId/source-file",
+    async (c) => {
+      const projectId = c.req.param("projectId");
+      if (!isUrlProjectId(projectId)) {
+        return c.json({ error: "Invalid project ID format" }, 400);
+      }
+      const requestedSessionId = c.req.param("sessionId");
+      if (!isLocatableSessionId(requestedSessionId)) {
+        return c.json({ error: "Invalid session id" }, 400);
+      }
+      const project = await deps.scanner.getOrCreateProject(projectId);
+      if (!project) {
+        return c.json({ error: "Project not found" }, 404);
+      }
+      // Mirrors the detail route: a page can still carry a provider's
+      // temporary bootstrap id after it was swapped for the durable one.
+      const sessionId =
+        deps.sessionMetadataService?.getCanonicalSessionId?.(
+          requestedSessionId,
+        ) ?? requestedSessionId;
+
+      const reader = await resolveReaderForSession(deps, project, sessionId);
+      const path = await resolveSessionSourceFile(
+        project,
+        reader,
+        project.sessionDir,
+        sessionId,
+      );
+      const executor = path
+        ? findOwningRemoteExecutor(
+            path,
+            deps.serverSettingsService?.getSetting("remoteExecutors"),
+          )
+        : undefined;
+
+      return c.json({
+        path,
+        ...(executor && { remoteHost: executor.host }),
+      });
+    },
+  );
 
   // GET /api/projects/:projectId/agent-commands?provider=&sessionId= -
   // Commands and skills for the composer. Works without a session (new

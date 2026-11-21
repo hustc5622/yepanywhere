@@ -16,4 +16,5 @@ export type {
   SessionLocateResponse,
   SessionLocation,
   SessionLocationSource,
+  SessionSourceFileResponse,
 } from "./SessionLocation.js";

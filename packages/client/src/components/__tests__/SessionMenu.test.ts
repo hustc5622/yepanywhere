@@ -32,8 +32,52 @@ describe("buildSessionInfoText", () => {
       Provider: "pi",
       Project: PROJECT_PATH,
       Link: `${window.location.origin}/projects/${PROJECT_ID}/sessions/${SESSION_ID}`,
-      Transcript: `${window.location.origin}/api/projects/${PROJECT_ID}/sessions/${SESSION_ID}/transcript`,
+      "Live transcript": `${window.location.origin}/api/projects/${PROJECT_ID}/sessions/${SESSION_ID}/transcript`,
     });
+  });
+
+  it("carries the provider file so it can be opened on disk", () => {
+    const sourceFile =
+      "/Users/someone/.yep-anywhere/pi-agent/sessions/2026-05-01T10-00-00_abc.jsonl";
+    const rows = parse(
+      buildSessionInfoText({
+        sessionId: SESSION_ID,
+        projectId: PROJECT_ID,
+        title: "T",
+        provider: "pi",
+        sourceFile,
+      }),
+    );
+
+    expect(rows.File).toBe(sourceFile);
+  });
+
+  it("marks a remote executor's file as living on that machine", () => {
+    const rows = parse(
+      buildSessionInfoText({
+        sessionId: SESSION_ID,
+        projectId: PROJECT_ID,
+        sourceFile:
+          "/Users/someone/Desktop/file/UTM/claude/projects/-x/abc.jsonl",
+        sourceFileHost: "192.168.64.4",
+      }),
+    );
+
+    expect(rows.File).toBe(
+      "/Users/someone/Desktop/file/UTM/claude/projects/-x/abc.jsonl (on 192.168.64.4, not this machine)",
+    );
+  });
+
+  it("drops the File row instead of guessing a path", () => {
+    const text = buildSessionInfoText({
+      sessionId: SESSION_ID,
+      projectId: PROJECT_ID,
+      sourceFile: null,
+      sourceFileHost: null,
+    });
+
+    expect(text).not.toContain("File:");
+    expect(text).toContain(`Session ID: ${SESSION_ID}`);
   });
 
   it("keeps row order stable", () => {
@@ -42,6 +86,7 @@ describe("buildSessionInfoText", () => {
       projectId: PROJECT_ID,
       title: "T",
       provider: "codex",
+      sourceFile: "/tmp/s.jsonl",
     });
 
     expect(text.split("\n").map((line) => line.split(": ")[0])).toEqual([
@@ -49,8 +94,9 @@ describe("buildSessionInfoText", () => {
       "Session ID",
       "Provider",
       "Project",
+      "File",
       "Link",
-      "Transcript",
+      "Live transcript",
     ]);
   });
 

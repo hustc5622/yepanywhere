@@ -43,3 +43,18 @@ export interface SessionLocation {
 export interface SessionLocateResponse {
   session: SessionLocation;
 }
+
+/**
+ * Physical provider file backing one session, from
+ * `GET /api/projects/:projectId/sessions/:sessionId/source-file`.
+ */
+export interface SessionSourceFileResponse {
+  /** Absolute path on the machine that holds the file; null when unknown. */
+  path: string | null;
+  /**
+   * SSH host when the file lives on a configured remote executor. The path is
+   * then the remote machine's path, not necessarily readable from the Yep
+   * server's filesystem (`ssh-replica` storage keeps only a copy).
+   */
+  remoteHost?: string;
+}

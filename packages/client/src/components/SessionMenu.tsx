@@ -62,6 +62,18 @@ export function buildSessionInfoText(input: {
   projectId: string;
   title?: string | null;
   provider?: string;
+  /**
+   * Absolute provider file for this session, as resolved by the server. Omitted
+   * for sessions the provider cannot name (in-flight turns, bridge-only
+   * sessions), and the row disappears with it rather than printing a guess.
+   */
+  sourceFile?: string | null;
+  /**
+   * Set when the file lives on a remote executor's machine. `sourceFile` is
+   * then that machine's path, which this host may not be able to open, so the
+   * row says so instead of silently implying a local file.
+   */
+  sourceFileHost?: string | null;
 }): string {
   const { sessionId, projectId, title, provider } = input;
   const rows: Array<[string, string | undefined]> = [
@@ -70,6 +82,14 @@ export function buildSessionInfoText(input: {
     ["Provider", provider],
     ["Project", decodeProjectPath(projectId)],
     [
+      "File",
+      input.sourceFile
+        ? input.sourceFileHost
+          ? `${input.sourceFile} (on ${input.sourceFileHost}, not this machine)`
+          : input.sourceFile
+        : undefined,
+    ],
+    [
       "Link",
       `${window.location.origin}${appPath(
         `/projects/${projectId}/sessions/${sessionId}`,
@@ -77,7 +97,7 @@ export function buildSessionInfoText(input: {
     ],
     // The link above is a UI page. An agent on another machine cannot read the
     // provider's files there, but it can fetch this plain-text export.
-    ["Transcript", buildSessionTranscriptUrl(projectId, sessionId)],
+    ["Live transcript", buildSessionTranscriptUrl(projectId, sessionId)],
   ];
 
   return rows
@@ -317,8 +337,21 @@ export function SessionMenu({
     setDropdownPosition(null);
     triggerRef.current?.blur();
     try {
+      // Best-effort: a provider that cannot name its file yet (in-flight turn,
+      // bridge-only session) must not take the whole copy down with it, so the
+      // File row simply drops out.
+      const sourceFile = await api
+        .getSessionSourceFile(projectId, sessionId)
+        .catch(() => null);
       await writeClipboardText(
-        buildSessionInfoText({ sessionId, projectId, title, provider }),
+        buildSessionInfoText({
+          sessionId,
+          projectId,
+          title,
+          provider,
+          sourceFile: sourceFile?.path ?? null,
+          sourceFileHost: sourceFile?.remoteHost ?? null,
+        }),
       );
       showToast(t("sessionMenuInfoCopied"), "success");
     } catch (error) {
