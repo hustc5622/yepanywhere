@@ -199,6 +199,12 @@ interface PiRuntimeRef {
    * `compaction_end` is processed, so the entry is remembered here.
    */
   pendingCompactionEntry?: JsonRecord;
+  /**
+   * Steering prompts accepted by Pi and not yet echoed under their persisted
+   * entry id. Pi delivers them mid-turn, after the current tool batch, so the
+   * echo cannot ride the prompt's own `message_end`.
+   */
+  pendingSteers: PiPendingUserPrompt[];
 }
 
 interface PiCompactJob {
@@ -1099,6 +1105,7 @@ export class PiProvider implements AgentProvider {
       models: [],
       routes: new Map(),
       controlJobs: new AsyncEventQueue<PiCompactJob>(),
+      pendingSteers: [],
     };
     const iterator = this.runSession(
       options,
@@ -1161,6 +1168,7 @@ export class PiProvider implements AgentProvider {
       abort: () => {
         abortController.abort();
         queue.close();
+        runtime.pendingSteers = [];
         const client = runtime.client;
         if (client?.isAlive()) {
           void client.send({ type: "abort" }).catch(() => undefined);
@@ -1180,6 +1188,14 @@ export class PiProvider implements AgentProvider {
           type: "steer",
           message: projection.internalPrompt,
           images: this.imagesFromUserMessage(message),
+        });
+        // Delivered later in this turn; the echo at delivery keeps the display
+        // projection keyed to the optimistic row the client already shows.
+        runtime.pendingSteers.push({
+          uuid: message.uuid ?? `pi-steer-${Date.now()}`,
+          ...(message.tempId ? { tempId: message.tempId } : {}),
+          internalPrompt: projection.internalPrompt,
+          publicPrompt: projection.publicPrompt,
         });
         return true;
       },
@@ -1620,6 +1636,8 @@ export class PiProvider implements AgentProvider {
           }
           if (event.type === "agent_settled") {
             settled = true;
+            // Steering still queued here was dropped by the provider.
+            runtime.pendingSteers = [];
             // A settled turn cannot still be backing off. Clear defensively in
             // case the provider skipped `auto_retry_end` (an aborted turn does).
             options.onRetryStatus?.(undefined);
@@ -2058,6 +2076,31 @@ export class PiProvider implements AgentProvider {
           sessionId,
         );
         return echo ? [echo] : [];
+      }
+      if (message.role === "user" && runtime) {
+        // A steering prompt delivered mid-turn: same echo, keyed by text
+        // because Pi drops Yep's uuid when it queues it. Pi may expand skill
+        // or template text, so fall back to the single outstanding steer.
+        const text = piUserEntryText({ message });
+        const index = runtime.pendingSteers.findIndex(
+          (pending) => pending.internalPrompt === text,
+        );
+        const pending =
+          index >= 0
+            ? runtime.pendingSteers.splice(index, 1)[0]
+            : runtime.pendingSteers.length === 1
+              ? runtime.pendingSteers.shift()
+              : undefined;
+        if (pending) {
+          const echo = await this.persistedUserEchoSdkMessage(
+            client,
+            runtime,
+            pending,
+            message,
+            sessionId,
+          );
+          return echo ? [echo] : [];
+        }
       }
       return [];
     }

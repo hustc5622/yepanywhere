@@ -246,7 +246,7 @@ function nativeThoughtCovers(native: string, live: string): boolean {
   return stored.includes(streamed);
 }
 
-function cursorPromptBody(message: RecordValue): string {
+function userPromptBody(message: RecordValue): string {
   const content = messageContent(message);
   if (typeof content === "string") return content.trim();
   if (!Array.isArray(content)) return "";
@@ -261,8 +261,8 @@ function cursorPromptBody(message: RecordValue): string {
     .trim();
 }
 
-/** ACP does not echo the user prompt; the injected copy is a plain user message. */
-function isCursorUserPrompt(message: RecordValue): boolean {
+/** A user prompt row, never a tool result or an injected tool payload. */
+function isUserPromptRow(message: RecordValue): boolean {
   if (message.type !== "user") return false;
   const content = messageContent(message);
   if (
@@ -270,11 +270,11 @@ function isCursorUserPrompt(message: RecordValue): boolean {
     content.some((value) => asRecord(value)?.type === "tool_result")
   )
     return false;
-  return cursorPromptBody(message).length > 0;
+  return userPromptBody(message).length > 0;
 }
 
 /** Drop the attachment manifest so a live prompt matches its stored query. */
-function cursorPromptIdentity(text: string): string {
+function userPromptIdentity(text: string): string {
   return text
     .replace(/\n+User uploaded files:[\s\S]*$/, "")
     .replace(/\s+/g, " ")
@@ -282,15 +282,15 @@ function cursorPromptIdentity(text: string): string {
 }
 
 /** Same user text. A shorter prompt must not match just because it is contained. */
-function cursorPromptsMatch(native: string, live: string): boolean {
-  const left = cursorPromptIdentity(native);
-  const right = cursorPromptIdentity(live);
+function userPromptsMatch(native: string, live: string): boolean {
+  const left = userPromptIdentity(native);
+  const right = userPromptIdentity(live);
   return left.length > 0 && left === right;
 }
 
 function cursorPromptDigest(message: RecordValue): string {
   return createHash("sha256")
-    .update(cursorPromptIdentity(cursorPromptBody(message)))
+    .update(userPromptIdentity(userPromptBody(message)))
     .digest("hex");
 }
 
@@ -299,7 +299,7 @@ function rememberCursorPrompt(entry: Entry, message: RecordValue): boolean {
   if (
     typeof turnId !== "string" ||
     typeof cursorTurnIndex !== "number" ||
-    !isCursorUserPrompt(message)
+    !isUserPromptRow(message)
   )
     return false;
   const identity = message.clientUserMessageId ?? message.uuid ?? message.id;
@@ -323,7 +323,7 @@ function rememberCursorPrompt(entry: Entry, message: RecordValue): boolean {
 }
 
 function mergeCursorPrompt(entry: Entry, message: Message): Message {
-  if (typeof message.turnId !== "string" || !isCursorUserPrompt(message))
+  if (typeof message.turnId !== "string" || !isUserPromptRow(message))
     return message;
   const live = entry.cursorPrompts.get(message.turnId);
   if (!live || live.digest !== cursorPromptDigest(message)) return message;
@@ -350,15 +350,15 @@ function insertCursorPrompt(
     return [...messages];
   const stored = prompt as Message;
   const index = prompt.cursorTurnIndex;
-  const body = cursorPromptBody(prompt);
+  const body = userPromptBody(prompt);
   if (typeof index === "number") {
     const native = messages.find(
       (message) =>
         message.cursorTurnIndex === index &&
         message.type === "user" &&
-        cursorPromptBody(message).length > 0,
+        userPromptBody(message).length > 0,
     );
-    if (native && cursorPromptsMatch(cursorPromptBody(native), body))
+    if (native && userPromptsMatch(userPromptBody(native), body))
       return [...messages];
     // This index already belongs to a different prompt. Appending keeps the
     // new question from being inserted into that earlier turn.
@@ -370,10 +370,69 @@ function insertCursorPrompt(
     return [...messages.slice(0, at), stored, ...messages.slice(at)];
   }
   const hasPrompt = messages.some(
-    (message) =>
-      message.type === "user" && cursorPromptBody(message).length > 0,
+    (message) => message.type === "user" && userPromptBody(message).length > 0,
   );
   return hasPrompt ? [...messages, stored] : [stored, ...messages];
+}
+
+/**
+ * Re-key persisted prompts to the live prompt they came from.
+ *
+ * Pi and MiniMax Code never persist Yep's client identity, so a live prompt
+ * cannot be matched to its stored row by id once the session file is read. The
+ * text is the only shared key: the stored row adopts the client identity (one
+ * question node that keeps its tempId) and the live copy leaves the overlay
+ * instead of being replayed as a second turn.
+ */
+function claimLivePrompts(
+  entry: Entry,
+  messages: readonly Message[],
+): Message[] {
+  const live = [...entry.overlay]
+    .filter(([, message]) => message.type === "user")
+    .flatMap(([key, message]) =>
+      userPromptBody(message) ? [{ key, message }] : [],
+    );
+  if (!live.length) return [...messages];
+  return messages.map((message) => {
+    if (!isUserPromptRow(message)) return message;
+    const body = userPromptBody(message);
+    const index = live.findIndex(({ message: candidate }) =>
+      userPromptsMatch(body, userPromptBody(candidate)),
+    );
+    const claimed = index === -1 ? undefined : live.splice(index, 1)[0];
+    if (!claimed) return message;
+    const identity =
+      claimed.message.clientUserMessageId ??
+      claimed.message.uuid ??
+      claimed.message.id;
+    const tempId = claimed.message.tempId;
+    entry.overlay.delete(claimed.key);
+    return {
+      ...message,
+      ...(typeof identity === "string"
+        ? { clientUserMessageId: identity }
+        : {}),
+      ...(typeof tempId === "string" ? { tempId } : {}),
+    };
+  });
+}
+
+/** A prompt the provider never persisted is a dropped insert, not live news. */
+function dropUnclaimedPrompts(entry: Entry, activity: unknown): void {
+  if (activity === "running" || activity === "hold") return;
+  // A prompt is published before the provider writes it; a refresh that lands
+  // in that window must not drop it. The insert is stale only after a while.
+  const cutoff = Date.now() - 5_000;
+  for (const [key, message] of entry.overlay) {
+    if (message.type !== "user" || !userPromptBody(message)) continue;
+    const timestamp =
+      typeof message.timestamp === "string"
+        ? Date.parse(message.timestamp)
+        : Number.NaN;
+    if (!(timestamp < cutoff)) continue;
+    entry.overlay.delete(key);
+  }
 }
 
 function hasToolInvocation(messages: readonly Message[]): boolean {
@@ -1008,7 +1067,7 @@ export class SessionDisplayService {
               );
           }
           this.rememberBody(entry, message);
-          if (isCursorUserPrompt(message) || message.type === "result") {
+          if (isUserPromptRow(message) || message.type === "result") {
             for (const thought of pendingThoughts) {
               thought.cursorThinkingBefore ??= { fallback: true };
             }
@@ -1266,7 +1325,7 @@ export class SessionDisplayService {
     compact: RecordValue,
   ): void {
     if (!isCursorTrackedMessage(compact, entry.provider)) return;
-    if (isCursorUserPrompt(compact) || compact.type === "result") {
+    if (isUserPromptRow(compact) || compact.type === "result") {
       for (const thoughtId of entry.cursorPendingThoughts) {
         const thought = entry.overlay.get(thoughtId);
         if (thought) thought.cursorThinkingBefore ??= { fallback: true };
@@ -1520,16 +1579,22 @@ export class SessionDisplayService {
         // providers; stable tool ids stream while source reads reconcile prose.
         const content = messageContent(compact);
         if (compact.type !== "system" && compact.type !== "result") {
-          const tools = Array.isArray(content)
-            ? content.filter((value) => {
-                const block = asRecord(value);
-                return (
-                  block?.type === "tool_use" || block?.type === "tool_result"
-                );
-              })
-            : [];
-          if (!tools.length) return;
-          compact.message = { ...asRecord(compact.message), content: tools };
+          const blocks = Array.isArray(content) ? content.map(asRecord) : [];
+          // A user prompt is a turn boundary, not prose: stream it so a
+          // mid-turn insert shows immediately and its optimistic row can be
+          // re-keyed to the persisted one (same client identity) instead of
+          // appearing only after the next source read.
+          if (
+            compact.type !== "user" ||
+            blocks.some((block) => block?.type === "tool_result")
+          ) {
+            const tools = blocks.filter(
+              (block) =>
+                block?.type === "tool_use" || block?.type === "tool_result",
+            );
+            if (!tools.length) return;
+            compact.message = { ...asRecord(compact.message), content: tools };
+          }
         }
       }
       // Codex turn/completed carries a turn id but no message id. Retain it
@@ -1742,22 +1807,22 @@ export class SessionDisplayService {
       const promptTexts: string[] = [];
       for (const message of page.messages) {
         if (message.type !== "user") continue;
-        const body = cursorPromptBody(message);
+        const body = userPromptBody(message);
         if (!body) continue;
         promptTexts.push(body);
         if (typeof message.cursorTurnIndex === "number")
           promptedTurns.set(message.cursorTurnIndex, body);
       }
       for (const [id, message] of entry.bootstrapReplay) {
-        if (!isCursorUserPrompt(message)) continue;
-        const body = cursorPromptBody(message);
+        if (!isUserPromptRow(message)) continue;
+        const body = userPromptBody(message);
         const index = message.cursorTurnIndex;
         const native =
           typeof index === "number" ? promptedTurns.get(index) : undefined;
-        if (native && cursorPromptsMatch(native, body)) continue;
+        if (native && userPromptsMatch(native, body)) continue;
         if (
           typeof index !== "number" &&
-          promptTexts.some((stored) => cursorPromptsMatch(stored, body))
+          promptTexts.some((stored) => userPromptsMatch(stored, body))
         )
           continue;
         entry.overlay.set(id, message);
@@ -1773,9 +1838,13 @@ export class SessionDisplayService {
     if (page.provider === "cursor") {
       restored = restored.map((message) => mergeCursorPrompt(entry, message));
       for (const message of entry.overlay.values()) {
-        if (isCursorUserPrompt(message))
+        if (isUserPromptRow(message))
           restored = insertCursorPrompt(restored, message);
       }
+    }
+    if (page.provider === "pi" || page.provider === "mcode") {
+      restored = claimLivePrompts(entry, restored);
+      dropUnclaimedPrompts(entry, page.activity);
     }
     model.restore(restored, page.turnStatuses, page.turnCompletedAt);
     if (!page.messages.length)
@@ -1792,19 +1861,22 @@ export class SessionDisplayService {
       if (page.provider === "pi" || page.provider === "mcode") {
         if (message.type !== "system" && message.type !== "result") {
           const content = messageContent(message);
-          const tools = Array.isArray(content)
-            ? content.filter((value) =>
-                ["tool_use", "tool_result"].includes(
-                  String(asRecord(value)?.type),
-                ),
-              )
-            : [];
-          if (tools.length)
-            model.message({
-              ...message,
-              message: { ...asRecord(message.message), content: tools },
-            });
-          continue;
+          const blocks = Array.isArray(content) ? content.map(asRecord) : [];
+          // Prompts replay as turn boundaries; assistant prose is persisted.
+          if (
+            message.type !== "user" ||
+            blocks.some((block) => block?.type === "tool_result")
+          ) {
+            const tools = blocks.filter((block) =>
+              ["tool_use", "tool_result"].includes(String(block?.type)),
+            );
+            if (tools.length)
+              model.message({
+                ...message,
+                message: { ...asRecord(message.message), content: tools },
+              });
+            continue;
+          }
         }
       }
       model.message(message);
@@ -1931,7 +2003,7 @@ export class SessionDisplayService {
         };
         const content = messageContent(message);
         if (message.type === "user") {
-          const body = cursorPromptBody(message);
+          const body = userPromptBody(message);
           if (body) {
             turn.prompt = body;
             cursorPromptTexts.push(body);
@@ -2030,10 +2102,10 @@ export class SessionDisplayService {
       // identical reply must never erase output from a new turn.
       if (
         page.provider === "cursor" &&
-        isCursorUserPrompt(message) &&
+        isUserPromptRow(message) &&
         typeof message.cursorTurnIndex !== "number" &&
         cursorPromptTexts.some((native) =>
-          cursorPromptsMatch(native, cursorPromptBody(message)),
+          userPromptsMatch(native, userPromptBody(message)),
         )
       ) {
         entry.overlay.delete(key);
@@ -2065,7 +2137,7 @@ export class SessionDisplayService {
         const samePrompt =
           message.type === "user" &&
           cursorTurn.prompt.length > 0 &&
-          cursorPromptsMatch(cursorTurn.prompt, cursorPromptBody(message));
+          userPromptsMatch(cursorTurn.prompt, userPromptBody(message));
         if (
           samePrompt ||
           settledThinking ||
