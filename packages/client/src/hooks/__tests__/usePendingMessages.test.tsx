@@ -199,4 +199,50 @@ describe("usePendingMessages", () => {
     rerender({ messages: [userMessage("do the thing")] });
     expect(result.current.pendingMessages).toHaveLength(0);
   });
+
+  it("keeps a mid-turn insert until the transcript shows it", () => {
+    const { result, rerender } = renderHook(
+      ({ messages }: { messages: Message[] }) => usePendingMessages(messages),
+      { initialProps: { messages: [] as Message[] } },
+    );
+
+    let tempId = "";
+    act(() => {
+      tempId = result.current.addPendingMessage("insert this");
+      result.current.updatePendingMessage(tempId, {
+        status: "Inserted · waiting for the turn",
+        awaitingTurn: true,
+      });
+    });
+
+    // The provider echo does not prove visibility for such a prompt.
+    act(() =>
+      result.current.confirmPendingMessage(userMessage("insert this", tempId)),
+    );
+    expect(result.current.pendingMessages).toHaveLength(1);
+
+    // The transcript entry does.
+    rerender({ messages: [userMessage("insert this")] });
+    expect(result.current.pendingMessages).toHaveLength(0);
+  });
+
+  it("releases only settled insert bubbles when the turn ends", () => {
+    const { result } = renderHook(() => usePendingMessages([]));
+    let plain = "";
+    let inserted = "";
+    act(() => {
+      plain = result.current.addPendingMessage("plain send");
+      inserted = result.current.addPendingMessage("mid-turn insert");
+      result.current.updatePendingMessage(inserted, {
+        status: "Inserted · waiting for the turn",
+        awaitingTurn: true,
+      });
+    });
+
+    act(() => result.current.clearAwaitingTurnMessages());
+
+    expect(result.current.pendingMessages.map((m) => m.tempId)).toEqual([
+      plain,
+    ]);
+  });
 });

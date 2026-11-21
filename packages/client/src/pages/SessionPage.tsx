@@ -81,6 +81,7 @@ import { isDisplaySchemaMismatchError } from "../lib/displaySchemaMismatch";
 import { normalizeExternalHttpUrl } from "../lib/externalUrl";
 import { getMessageId } from "../lib/mergeMessages";
 import { isStalePendingInputError } from "../lib/pendingInputError";
+import { pendingPromptStatusKey } from "../lib/pendingPromptFeedback";
 import {
   MAX_PI_COMPACT_INSTRUCTIONS_LENGTH,
   parsePiSlashCommand,
@@ -332,6 +333,7 @@ function SessionPageContent({
     addPendingMessage,
     removePendingMessage,
     updatePendingMessage,
+    clearAwaitingTurnMessages,
     deferredMessages,
     slashCommandDetails,
     setSessionModel,
@@ -389,6 +391,18 @@ function SessionPageContent({
 
   // Effective provider for immediate display before session data loads
   const effectiveProvider = session?.provider ?? initialProvider;
+  // Pi and MiniMax Code never confirm their prose echo from the live stream, so
+  // an insert bubble is released when the turn settles and the persisted
+  // transcript takes over. Providers that expand the prompt before persisting
+  // it would otherwise leave the bubble behind for good.
+  const pendingTurnStateRef = useRef(processState);
+  useEffect(() => {
+    const wasRunning = pendingTurnStateRef.current !== "idle";
+    pendingTurnStateRef.current = processState;
+    if (!wasRunning || processState !== "idle") return;
+    if (effectiveProvider !== "pi" && effectiveProvider !== "mcode") return;
+    clearAwaitingTurnMessages();
+  }, [clearAwaitingTurnMessages, effectiveProvider, processState]);
   const approvalAgentName = getApprovalAgentName(effectiveProvider);
   // dsh sessions are displayed read-only; the embedded dsh page owns input.
   const isReadOnlySession = isReadOnlyProvider(effectiveProvider);
@@ -1344,6 +1358,21 @@ function SessionPageContent({
 
     // Add to pending queue and get tempId to pass to server
     const tempId = addPendingMessage(text);
+    // Mid-turn input is steered into the running turn: Pi and MiniMax Code only
+    // pick it up after the current tool calls finish, and their live display
+    // transport drops the prose echo. Say what the prompt is waiting for so the
+    // bubble does not vanish into an empty transcript.
+    const pendingStatusKey = pendingPromptStatusKey(
+      effectiveProvider,
+      status.owner,
+      processState,
+    );
+    const pendingStatus = pendingStatusKey ? t(pendingStatusKey) : undefined;
+    if (pendingStatus)
+      updatePendingMessage(tempId, {
+        status: pendingStatus,
+        awaitingTurn: true,
+      });
     let historicalEditPostAttempted = false;
     let historicalEditRequestStarted = false;
     setProcessState("in-turn"); // Optimistic: show processing indicator immediately
@@ -1371,7 +1400,7 @@ function SessionPageContent({
       // started after send was clicked.
       const sentIds = new Set(currentAttachments.map((a) => a.id));
       setAttachments((prev) => prev.filter((a) => !sentIds.has(a.id)));
-      updatePendingMessage(tempId, { status: undefined });
+      updatePendingMessage(tempId, { status: pendingStatus });
     } else {
       setAttachments([]);
     }
@@ -1738,9 +1767,10 @@ function SessionPageContent({
       );
       const sentIds = new Set(currentAttachments.map((a) => a.id));
       setAttachments((prev) => prev.filter((a) => !sentIds.has(a.id)));
-      updatePendingMessage(tempId, { status: undefined });
+      updatePendingMessage(tempId, { status: t("sessionQueuedWaiting") });
     } else {
       setAttachments([]);
+      updatePendingMessage(tempId, { status: t("sessionQueuedWaiting") });
     }
 
     try {
@@ -1760,7 +1790,9 @@ function SessionPageContent({
         true, // deferred
         resolvedCodexInputs.length > 0 ? resolvedCodexInputs : undefined,
       );
-      removePendingMessage(tempId);
+      // Keep the bubble until the server's deferred-queue snapshot carries the
+      // tempId: the queued prompt is then visible and cancellable right away
+      // instead of disappearing while the round trip completes.
       draftControlsRef.current?.clearDraft();
     } catch (err) {
       console.error("Failed to queue deferred message:", err);

@@ -9,6 +9,12 @@ export interface PendingMessage {
   timestamp: string;
   /** Display status text (e.g. "Uploading...", "Sending..."). Defaults to "Sending..." */
   status?: string;
+  /**
+   * Waiting on the provider rather than the network (mid-turn insert). Such an
+   * entry is only released by the transcript, never by a stream echo, because
+   * some providers never publish that echo as visible content.
+   */
+  awaitingTurn?: boolean;
 }
 
 function getUserMessageText(message: Message): string | null {
@@ -107,6 +113,8 @@ export interface UsePendingMessagesResult {
     tempId: string,
     updates: Partial<PendingMessage>,
   ) => void;
+  /** Release mid-turn insert bubbles whose turn has settled. */
+  clearAwaitingTurnMessages: () => void;
 }
 
 /**
@@ -178,12 +186,14 @@ export function usePendingMessages(
 
   const confirmPendingMessage = useCallback((message: Message) => {
     setPendingMessages((prev) => {
-      const index = prev.findIndex((pending) =>
-        isPendingMessageConfirmed(
-          pending,
-          message,
-          visibleAtSubmission.current.get(pending.tempId),
-        ),
+      const index = prev.findIndex(
+        (pending) =>
+          pending.awaitingTurn !== true &&
+          isPendingMessageConfirmed(
+            pending,
+            message,
+            visibleAtSubmission.current.get(pending.tempId),
+          ),
       );
       const confirmed = prev[index];
       if (!confirmed) return prev;
@@ -201,11 +211,23 @@ export function usePendingMessages(
     [],
   );
 
+  const clearAwaitingTurnMessages = useCallback(() => {
+    setPendingMessages((prev) => {
+      const next = prev.filter((pending) => {
+        if (pending.awaitingTurn !== true) return true;
+        visibleAtSubmission.current.delete(pending.tempId);
+        return false;
+      });
+      return next.length === prev.length ? prev : next;
+    });
+  }, []);
+
   return {
     pendingMessages,
     confirmPendingMessage,
     addPendingMessage,
     removePendingMessage,
     updatePendingMessage,
+    clearAwaitingTurnMessages,
   };
 }

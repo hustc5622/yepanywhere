@@ -432,6 +432,8 @@
   "sessionUploading": "Uploading...",
   "sessionSendFailed": "Failed to send message: {message}",
   "sessionQueueFailed": "Failed to queue message: {message}",
+  "sessionInsertWaiting": "Inserted · sent after this turn's tool calls finish",
+  "sessionQueuedWaiting": "Queued · sent after this turn",
   "sessionSwitchedModel": "Switched to {model}",
   "sessionApproveFailed": "Failed to approve",
   "sessionDenyFailed": "Failed to deny",

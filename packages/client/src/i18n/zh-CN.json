@@ -432,6 +432,8 @@
   "sessionUploading": "上传中...",
   "sessionSendFailed": "发送消息失败：{message}",
   "sessionQueueFailed": "加入队列失败：{message}",
+  "sessionInsertWaiting": "已插入当前轮 · 工具执行结束后送达",
+  "sessionQueuedWaiting": "已排队 · 本轮结束后发送",
   "sessionSwitchedModel": "已切换到 {model}",
   "sessionApproveFailed": "批准失败",
   "sessionDenyFailed": "拒绝失败",

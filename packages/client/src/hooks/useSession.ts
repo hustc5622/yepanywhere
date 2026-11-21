@@ -782,6 +782,7 @@ export function useSession(
     addPendingMessage,
     removePendingMessage,
     updatePendingMessage,
+    clearAwaitingTurnMessages,
   } = usePendingMessages(acceptedPrompts, deferredMessages);
 
   const processStateRef = useRef(processState);
@@ -2170,6 +2171,7 @@ export function useSession(
     addPendingMessage, // Add to pending queue, returns tempId
     removePendingMessage, // Remove from pending by tempId
     updatePendingMessage, // Update pending message fields (e.g. status)
+    clearAwaitingTurnMessages, // Release insert bubbles after the turn settles
     deferredMessages, // Messages queued server-side waiting for agent turn to end
     slashCommands, // Available slash commands from init message
     slashCommandDetails, // Same commands with description/source
