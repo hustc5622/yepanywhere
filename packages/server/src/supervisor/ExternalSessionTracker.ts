@@ -12,6 +12,10 @@ import {
 import { getCodexSubagentMetadata } from "../codex/subagent.js";
 import { decodeProjectId, encodeProjectId } from "../projects/paths.js";
 import type { ProjectScanner } from "../projects/scanner.js";
+import {
+  agySessionIdFromWatchPath,
+  findAgySessionRecord,
+} from "../sessions/agy-store.js";
 import { cursorSessionIdFromWatchPath } from "../sessions/cursor-reader.js";
 import { parseCursorMetaJson } from "../sessions/cursor-store.js";
 import {
@@ -542,6 +546,11 @@ export class ExternalSessionTracker {
       return;
     }
 
+    if (event.provider === "agy") {
+      await this.handleAgyFileChange(event);
+      return;
+    }
+
     if (event.provider === "dsh") {
       await this.handleDshFileChange(event);
       return;
@@ -679,6 +688,46 @@ export class ExternalSessionTracker {
       provider: "mcode",
       projectId: encodeProjectId(record.cwd),
       sessionFilePath: record.messagesPath,
+    });
+  }
+
+  /**
+   * Antigravity transcripts change when a terminal `agy` (or another ACP
+   * client) runs a turn. The catalog row supplies the cwd (project).
+   */
+  private async handleAgyFileChange(event: FileChangeEvent): Promise<void> {
+    const sessionId = agySessionIdFromWatchPath(event.path);
+    if (!sessionId) return;
+
+    const process = this.supervisor.getProcessForSession(sessionId);
+    const runtimeProcess = process
+      ? null
+      : await this.getRuntimeProcess?.(sessionId);
+    if (runtimeProcess) this.runtimeOwnedSessions.add(sessionId);
+    else this.runtimeOwnedSessions.delete(sessionId);
+
+    if (process || runtimeProcess) {
+      this.removeExternal(sessionId);
+      if (this.getSessionSummary) {
+        const getSessionSummary = this.getSessionSummary;
+        const projectId = process?.projectId ?? runtimeProcess?.projectId;
+        if (!projectId) return;
+        this.sessionParser.enqueue(sessionId, () =>
+          getSessionSummary(sessionId, projectId),
+        );
+      }
+      return;
+    }
+
+    if (this.isInAbortGracePeriod(sessionId)) return;
+
+    const record = await findAgySessionRecord(sessionId);
+    if (!record) return;
+
+    await this.handleUnownedSessionActivity(sessionId, {
+      provider: "agy",
+      projectId: encodeProjectId(record.cwd),
+      sessionFilePath: record.transcriptPath,
     });
   }
 

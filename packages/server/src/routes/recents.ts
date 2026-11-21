@@ -8,6 +8,7 @@ import { Hono } from "hono";
 import type { ISessionIndexService } from "../indexes/types.js";
 import type { SessionMetadataService } from "../metadata/index.js";
 import type { NotificationService } from "../notifications/index.js";
+import type { AgySessionScanner } from "../projects/agy-scanner.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { CursorSessionScanner } from "../projects/cursor-scanner.js";
 import type { DshSessionScanner } from "../projects/dsh-scanner.js";
@@ -17,6 +18,7 @@ import { decodeProjectId, getProjectName } from "../projects/paths.js";
 import type { PiSessionScanner } from "../projects/pi-scanner.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { RecentsService } from "../recents/index.js";
+import type { AgySessionReader } from "../sessions/agy-reader.js";
 import type { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { CursorSessionReader } from "../sessions/cursor-reader.js";
 import type { DshSessionReader } from "../sessions/dsh-reader.js";
@@ -45,8 +47,10 @@ export interface RecentsDeps {
   piReaderFactory?: (projectPath: string) => PiSessionReader;
   cursorScanner?: CursorSessionScanner;
   mcodeScanner?: McodeSessionScanner;
+  agyScanner?: AgySessionScanner;
   dshScanner?: DshSessionScanner;
   mcodeReaderFactory?: (projectPath: string) => McodeSessionReader;
+  agyReaderFactory?: (projectPath: string) => AgySessionReader;
   dshReaderFactory?: (projectPath: string) => DshSessionReader;
   cursorSessionsDir?: string;
   cursorReaderFactory?: (projectPath: string) => CursorSessionReader;
@@ -100,6 +104,7 @@ export function createRecentsRoutes(deps: RecentsDeps): Hono {
           piSessionsDir: deps.piSessionsDir,
           piReaderFactory: deps.piReaderFactory,
           mcodeReaderFactory: deps.mcodeReaderFactory,
+          agyReaderFactory: deps.agyReaderFactory,
           dshReaderFactory: deps.dshReaderFactory,
           cursorSessionsDir: deps.cursorSessionsDir,
           cursorReaderFactory: deps.cursorReaderFactory,

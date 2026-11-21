@@ -24,6 +24,7 @@ import {
   type RequestPermissionRequest,
   type RequestPermissionResponse,
   type SessionConfigOption,
+  type SessionModeState,
   type SessionNotification,
   type SetSessionConfigOptionResponse,
   ndJsonStream,
@@ -92,6 +93,8 @@ export class ACPClient {
   private log = getLogger();
   /** Latest config options reported by the agent, keyed by session id. */
   private sessionConfigOptions = new Map<string, SessionConfigOption[]>();
+  /** Latest mode state reported by new/load/resume, keyed by session id. */
+  private sessionModes = new Map<string, SessionModeState>();
 
   /** OS PID of the spawned ACP agent child process */
   get pid(): number | undefined {
@@ -121,6 +124,8 @@ export class ACPClient {
   private onSessionUpdate: SessionUpdateCallback | null = null;
   private onPermissionRequest: PermissionRequestCallback | null = null;
   private onElicitationRequest: ElicitationRequestCallback | null = null;
+  private onRawMessage: ((message: Record<string, unknown>) => void) | null =
+    null;
   private onExtensionRequest:
     | ((
         method: string,
@@ -135,6 +140,18 @@ export class ACPClient {
     ) => Promise<Record<string, unknown>>,
   ): void {
     this.onExtensionRequest = callback;
+  }
+
+  /**
+   * Observe every JSON-RPC frame the agent writes, before the SDK validates
+   * it. The SDK's schemas drop vendor fields (agy's `tool_call.name`), so a
+   * provider that needs them records them here. Must be set before connect().
+   * Frames reach this observer before the SDK dispatches them.
+   */
+  setRawMessageObserver(
+    observer: (message: Record<string, unknown>) => void,
+  ): void {
+    this.onRawMessage = observer;
   }
 
   /**
@@ -198,6 +215,35 @@ export class ACPClient {
 
     if (!this.process.stdin || !this.process.stdout) {
       throw new Error("Failed to get stdin/stdout from spawned ACP process");
+    }
+
+    if (this.onRawMessage) {
+      const observe = this.onRawMessage;
+      let pending = "";
+      // A passive extra 'data' listener sees the same chunks the web stream
+      // below consumes; it never pauses or reads the stream itself.
+      this.process.stdout.on("data", (chunk: Buffer) => {
+        pending += chunk.toString("utf8");
+        let newline = pending.indexOf("\n");
+        while (newline >= 0) {
+          const line = pending.slice(0, newline).trim();
+          pending = pending.slice(newline + 1);
+          newline = pending.indexOf("\n");
+          if (!line) continue;
+          try {
+            const message = JSON.parse(line) as unknown;
+            if (
+              message &&
+              typeof message === "object" &&
+              !Array.isArray(message)
+            ) {
+              observe(message as Record<string, unknown>);
+            }
+          } catch {
+            // Not a JSON-RPC frame; the SDK reports protocol errors.
+          }
+        }
+      });
     }
 
     // Create the NDJSON stream for ACP protocol
@@ -304,6 +350,17 @@ export class ACPClient {
     await this.connection.authenticate({ methodId });
   }
 
+  /**
+   * End the agent's authenticated session (ACP `logout`, unstable). Only call
+   * it when `initialize` advertised `agentCapabilities.auth.logout`.
+   */
+  async logout(): Promise<void> {
+    if (!this.connection) {
+      throw new Error("ACPClient not connected. Call connect() first.");
+    }
+    await this.connection.logout({});
+  }
+
   /** Call a provider's advertised ACP extension without creating a session. */
   async requestExtension(
     method: string,
@@ -345,6 +402,7 @@ export class ACPClient {
     if (result.configOptions) {
       this.sessionConfigOptions.set(result.sessionId, result.configOptions);
     }
+    if (result.modes) this.sessionModes.set(result.sessionId, result.modes);
     return result.sessionId;
   }
 
@@ -367,6 +425,7 @@ export class ACPClient {
     if (result?.configOptions) {
       this.sessionConfigOptions.set(sessionId, result.configOptions);
     }
+    if (result?.modes) this.sessionModes.set(sessionId, result.modes);
   }
 
   /**
@@ -377,6 +436,11 @@ export class ACPClient {
     sessionId: string,
   ): SessionConfigOption[] | undefined {
     return this.sessionConfigOptions.get(sessionId);
+  }
+
+  /** Mode state last reported by new/load/resume (agents may omit it). */
+  getSessionModes(sessionId: string): SessionModeState | undefined {
+    return this.sessionModes.get(sessionId);
   }
 
   /**
@@ -403,6 +467,9 @@ export class ACPClient {
     if (configOptions) {
       this.sessionConfigOptions.set(sessionId, configOptions);
     }
+    const modes = (result as { modes?: SessionModeState | null } | undefined)
+      ?.modes;
+    if (modes) this.sessionModes.set(sessionId, modes);
     return sessionId;
   }
 
@@ -523,5 +590,6 @@ export class ACPClient {
     this.onPermissionRequest = null;
     this.onElicitationRequest = null;
     this.onExtensionRequest = null;
+    this.onRawMessage = null;
   }
 }

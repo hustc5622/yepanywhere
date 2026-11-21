@@ -87,6 +87,7 @@ import type {
   Session,
   SessionSummary,
 } from "../supervisor/types.js";
+import { annotateAgyReplyPhases } from "./agy-store.js";
 import { collectVisibleClaudeEntries } from "./claude-messages.js";
 import { codexEntryAnchor } from "./codex-entry-anchor.js";
 import { applyCodexRollbackMarkers } from "./codex-rollback.js";
@@ -478,6 +479,25 @@ export function normalizeSession(
           ? annotateBranchMessages(messages, loaded.branchState)
           : messages,
       });
+    }
+    case "agy": {
+      const precomputed = loaded.precomputedPiMessages;
+      const deferMedia =
+        options?.deferMedia ?? precomputed?.deferMedia ?? false;
+      const deferThinking =
+        options?.deferThinking ?? precomputed?.deferThinking ?? false;
+      const messages =
+        precomputed &&
+        precomputed.deferMedia === deferMedia &&
+        precomputed.deferThinking === deferThinking
+          ? precomputed.messages
+          : annotateAgyReplyPhases(
+              convertPiSession(data.session, {
+                deferMedia,
+                deferThinking,
+              }).messages,
+            );
+      return sanitizePublicNormalizedSession({ ...summary, messages });
     }
     case "mcode":
     case "dsh": {

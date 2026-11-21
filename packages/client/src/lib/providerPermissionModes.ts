@@ -20,6 +20,8 @@ const FALLBACK_PERMISSION_MODES: Partial<
   cursor: ["default", "plan", "bypassPermissions"],
   // MiniMax Code: Ask / Plan / Auto / Full access (permission + session mode).
   mcode: ["default", "plan", "auto", "bypassPermissions"],
+  // Antigravity: native execution modes plus Yep-approved full access.
+  agy: ["default", "acceptEdits", "auto", "plan", "bypassPermissions"],
 };
 
 const PROVIDER_DEFAULT_PERMISSION_MODES: Partial<
@@ -27,6 +29,7 @@ const PROVIDER_DEFAULT_PERMISSION_MODES: Partial<
 > = {
   cursor: "default",
   mcode: "default",
+  agy: "default",
 };
 
 export function getProviderPermissionModes(

@@ -50,6 +50,7 @@ const PROVIDER_COLORS: Record<LiveProviderName, string> = {
   pi: "var(--provider-pi)",
   cursor: "var(--provider-cursor)",
   mcode: "var(--provider-mcode)",
+  agy: "var(--provider-agy)",
   dsh: "var(--provider-dsh)",
 };
 

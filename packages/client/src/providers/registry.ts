@@ -1,3 +1,4 @@
+import { AgyProvider } from "./implementations/AgyProvider";
 import { ClaudeProvider } from "./implementations/ClaudeProvider";
 import {
   CodexOssProvider,
@@ -19,6 +20,7 @@ const activeProviders: Record<string, Provider> = {
   pi: new PiProvider(),
   cursor: new CursorProvider(),
   mcode: new McodeProvider(),
+  agy: new AgyProvider(),
 };
 
 const providers: Record<string, Provider> = {

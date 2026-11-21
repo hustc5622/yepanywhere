@@ -73,6 +73,10 @@ export {
   type McodeProviderConfig,
 } from "./mcode.js";
 
+// Antigravity CLI provider (uses `agy acp`; Gemini CLI's successor)
+import { agyProvider } from "./agy.js";
+export { AgyProvider, agyProvider, type AgyProviderConfig } from "./agy.js";
+
 /**
  * Get all active provider instances exposed by the provider catalog.
  *
@@ -89,6 +93,7 @@ export function getAllProviders(): AgentProvider[] {
     piProvider,
     cursorProvider,
     mcodeProvider,
+    agyProvider,
   ];
 }
 
@@ -117,6 +122,8 @@ export function getProvider(name: ProviderName | string): AgentProvider | null {
       return cursorProvider;
     case "mcode":
       return mcodeProvider;
+    case "agy":
+      return agyProvider;
     default:
       return null;
   }

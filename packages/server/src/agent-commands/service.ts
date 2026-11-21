@@ -12,12 +12,13 @@ import { type SkillScanProvider, scanSkills } from "./skill-scanner.js";
  * How each provider invokes a skill typed in the composer:
  * - Codex: `$name`, sent as a structured `skill` input (needs `path`).
  * - Pi: `/skill:name`, expanded by Pi.
- * - MiniMax Code, Cursor: `/name`, resolved by the agent.
+ * - MiniMax Code, Cursor, Antigravity: `/name`, resolved by the agent.
  */
 export const SKILL_COMMAND_PREFIX: Partial<Record<string, string>> = {
   pi: "skill:",
   mcode: "",
   cursor: "",
+  agy: "",
 };
 
 export interface AgentCommandSources {
@@ -87,6 +88,7 @@ export class AgentCommandService {
         );
       case "mcode":
       case "cursor":
+      case "agy":
         return this.listSlashProvider(provider, cwd, sources, () =>
           this.readAcpCache(provider, cwd),
         );
@@ -142,7 +144,7 @@ export class AgentCommandService {
   }
 
   private async listSlashProvider(
-    provider: "pi" | "mcode" | "cursor",
+    provider: "pi" | "mcode" | "cursor" | "agy",
     cwd: string,
     sources: AgentCommandSources,
     readCache: () => Promise<SlashCommand[] | null>,

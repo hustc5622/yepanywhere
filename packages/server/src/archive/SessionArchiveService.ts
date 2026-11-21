@@ -430,9 +430,12 @@ function normalizeArchiveProvider(
   provider: ProviderName | string | undefined,
 ): ArchiveProvider | null {
   const group = normalizeProviderGroup(provider);
-  // Gemini, MiniMax Code and DeepSeek Harness own their stores (shared with
-  // their own apps); Yep never moves those files.
-  return group === "gemini" || group === "mcode" || group === "dsh"
+  // Gemini, MiniMax Code, Antigravity and DeepSeek Harness own their stores
+  // (shared with their own apps); Yep never moves those files.
+  return group === "gemini" ||
+    group === "mcode" ||
+    group === "agy" ||
+    group === "dsh"
     ? null
     : group;
 }

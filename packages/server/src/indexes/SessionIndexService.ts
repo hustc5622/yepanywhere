@@ -834,6 +834,13 @@ export class SessionIndexService implements ISessionIndexService {
       return;
     }
 
+    if (event.provider === "agy") {
+      // Antigravity transcripts live per conversation under brain/; the
+      // catalog cwd decides the project scope.
+      this.markMatchingScopesDirty("agy::");
+      return;
+    }
+
     if (event.provider === "dsh") {
       this.markMatchingScopesDirty("dsh::");
     }

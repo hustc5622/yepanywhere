@@ -27,6 +27,7 @@ import {
 import type { ProjectScanner } from "../projects/scanner.js";
 import { isRetiredProviderName } from "../sdk/providers/policy.js";
 import type { Project } from "../supervisor/types.js";
+import type { AgySessionReader } from "./agy-reader.js";
 import type { CodexSessionReader } from "./codex-reader.js";
 import { getCodexSessionManifest } from "./codex-session-manifest.js";
 import type { DshSessionReader } from "./dsh-reader.js";
@@ -53,6 +54,7 @@ export interface SessionLocatorDeps {
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
   mcodeReaderFactory?: (projectPath: string) => McodeSessionReader;
+  agyReaderFactory?: (projectPath: string) => AgySessionReader;
   /**
    * Read-only DeepSeek Harness reader. Without it the fallback scan cannot see
    * dsh sessions at all, since no other source indexes them.
@@ -260,6 +262,7 @@ async function locateViaProviderScan(
     piSessionsDir: deps.piSessionsDir,
     piReaderFactory: deps.piReaderFactory,
     mcodeReaderFactory: deps.mcodeReaderFactory,
+    agyReaderFactory: deps.agyReaderFactory,
     dshReaderFactory: deps.dshReaderFactory,
   };
 

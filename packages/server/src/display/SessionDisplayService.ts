@@ -1574,7 +1574,11 @@ export class SessionDisplayService {
           });
         }
       }
-      if (entry.provider === "pi" || entry.provider === "mcode") {
+      if (
+        entry.provider === "pi" ||
+        entry.provider === "mcode" ||
+        entry.provider === "agy"
+      ) {
         // Prose ids differ between live and persisted entries for these
         // providers; stable tool ids stream while source reads reconcile prose.
         const content = messageContent(compact);
@@ -1842,7 +1846,11 @@ export class SessionDisplayService {
           restored = insertCursorPrompt(restored, message);
       }
     }
-    if (page.provider === "pi" || page.provider === "mcode") {
+    if (
+      page.provider === "pi" ||
+      page.provider === "mcode" ||
+      page.provider === "agy"
+    ) {
       restored = claimLivePrompts(entry, restored);
       dropUnclaimedPrompts(entry, page.activity);
     }
@@ -1858,7 +1866,11 @@ export class SessionDisplayService {
         (page.provider === "cursor" && message.type === "result")
       )
         continue;
-      if (page.provider === "pi" || page.provider === "mcode") {
+      if (
+        page.provider === "pi" ||
+        page.provider === "mcode" ||
+        page.provider === "agy"
+      ) {
         if (message.type !== "system" && message.type !== "result") {
           const content = messageContent(message);
           const blocks = Array.isArray(content) ? content.map(asRecord) : [];

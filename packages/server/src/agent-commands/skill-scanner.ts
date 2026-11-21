@@ -13,11 +13,13 @@ import { PI_AGENT_DIR } from "../sessions/pi-files.js";
  * - Pi: `references/pi/packages/coding-agent/src/core/package-manager.ts`
  * - MiniMax Code: `references/minimax/app/mavis/local-runtime-v2/src/service/skill/registry/roots.ts`
  * - Cursor: `skill-path-utils.ts` in the installed `cursor-agent` bundle
+ * - Antigravity: references/antigravity/docs/md_cli_*.md (`.agents/skills`,
+ *   `~/.gemini/skills`, `~/.gemini/antigravity-cli/skills`)
  *
  * The provider's live list stays authoritative: it also applies enablement
  * config and plugin/package skills, which this scan does not.
  */
-export type SkillScanProvider = "codex" | "pi" | "mcode" | "cursor";
+export type SkillScanProvider = "codex" | "pi" | "mcode" | "cursor" | "agy";
 
 interface SkillRoot {
   path: string;
@@ -113,6 +115,15 @@ export async function skillRootsFor(
         { path: join(dataDir, ".builtin-skills") },
       ];
     }
+    case "agy":
+      return [
+        ...nearestFirst.map((dir) => ({
+          path: join(dir, ".agents", "skills"),
+        })),
+        user(".gemini", "antigravity-cli", "skills"),
+        user(".gemini", "skills"),
+        user(".gemini", "antigravity-cli", "builtin", "skills"),
+      ];
     case "cursor":
       return [
         ...nearestFirst.flatMap((dir) =>

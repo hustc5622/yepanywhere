@@ -32,15 +32,16 @@
 
 `:id` 只接受 `codex`、`pi`、`dsh`。客户端不能指定命令、安装路径、包名或版本。
 
-## 通过终端维护五种 CLI
+## 通过终端维护六种 CLI
 
-Cursor 和 MiniMax Code 尚未接入上面的更新 API。自定义包装脚本也需要维护其背后的真实安装，不要覆盖代理、登录或模型路由配置。CLI 更新与桌面 App 更新是独立操作。
+Cursor、MiniMax Code 和 Antigravity CLI 尚未接入上面的更新 API。自定义包装脚本也需要维护其背后的真实安装，不要覆盖代理、登录或模型路由配置。CLI 更新与桌面 App 更新是独立操作。
 
 | Harness | 原安装渠道的更新命令 |
 | --- | --- |
 | Codex | npm 安装用 `npm install -g @openai/codex@latest`；Homebrew cask 用 `brew upgrade --cask codex` |
 | Pi | `npm install -g @earendil-works/pi-coding-agent@latest --ignore-scripts` |
 | Cursor CLI | `agent update`（旧命令名也可用 `cursor-agent update`） |
+| Antigravity CLI | 自带后台自更新；手动更新用 `agy update`，或重新运行官方安装脚本 `curl -fsSL https://antigravity.google/cli/install.sh \| bash` |
 | MiniMax Code | `mcode update`；npm 手动安装必须使用 `--registry=https://npmmirror.xaminim.com/`，并允许包所需的原生依赖安装脚本 |
 | dsh | `npm install -g @deepseek-ai/dsh@latest`；先核对目标版本的 `engines.node`，以及实际启动 dsh 的 Node |
 

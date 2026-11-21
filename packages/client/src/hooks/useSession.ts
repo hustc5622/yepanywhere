@@ -270,7 +270,7 @@ export function shouldRefreshSettledAuthoritativeSnapshot(
   expectedSessionId: string,
 ): boolean {
   return (
-    (provider === "pi" || provider === "mcode") &&
+    (provider === "pi" || provider === "mcode" || provider === "agy") &&
     owner === "self" &&
     processState === "idle" &&
     eventSessionId === expectedSessionId
@@ -284,7 +284,7 @@ export function shouldRefreshSettledAuthoritativeSnapshot(
 function hasUncorrelatedPersistedIds(
   provider: Session["provider"] | undefined,
 ): boolean {
-  return provider === "pi" || provider === "mcode";
+  return provider === "pi" || provider === "mcode" || provider === "agy";
 }
 
 /**
@@ -333,7 +333,7 @@ export function shouldDeferUncorrelatedPersistedSync(
   processState: ProcessState | undefined,
 ): boolean {
   return (
-    (provider === "pi" || provider === "mcode") &&
+    (provider === "pi" || provider === "mcode" || provider === "agy") &&
     owner === "self" &&
     processState !== "idle"
   );
@@ -347,6 +347,7 @@ export function shouldRefreshFullPersistedSession(
     provider === "codex-oss" ||
     provider === "pi" ||
     provider === "mcode" ||
+    provider === "agy" ||
     provider === "dsh"
   );
 }
@@ -800,7 +801,7 @@ export function useSession(
   const scheduleAuthoritativeSnapshotRefresh = useCallback(() => {
     if (preferDisplayHistory) return;
     const provider = session?.provider;
-    if (provider !== "pi" && provider !== "mcode") {
+    if (provider !== "pi" && provider !== "mcode" && provider !== "agy") {
       return;
     }
 
@@ -1122,7 +1123,9 @@ export function useSession(
           signalHistoryRewriteSync();
         }
         if (
-          (session?.provider === "pi" || session?.provider === "mcode") &&
+          (session?.provider === "pi" ||
+            session?.provider === "mcode" ||
+            session?.provider === "agy") &&
           processState === "idle"
         ) {
           scheduleAuthoritativeSnapshotRefresh();
@@ -1923,7 +1926,8 @@ export function useSession(
           // authoritative replacement.
         } else if (
           connectedProvider === "pi" ||
-          connectedProvider === "mcode"
+          connectedProvider === "mcode" ||
+          connectedProvider === "agy"
         ) {
           scheduleAuthoritativeSnapshotRefresh();
         } else if (!(isFirstConnectedEvent && isCodexProvider)) {

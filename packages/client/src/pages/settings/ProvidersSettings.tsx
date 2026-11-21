@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useState } from "react";
 import { type OhMyRouterThroughputStatus, api } from "../../api/client";
+import { AgyAccountCard } from "../../components/AgyAccountCard";
 import { SettingsListSkeleton } from "../../components/SettingsSkeleton";
 import { Skeleton } from "../../components/Skeleton";
 import { useProviders } from "../../hooks/useProviders";
@@ -167,8 +168,11 @@ function OhMyRouterThroughputBenchmark() {
 
 export function ProvidersSettings() {
   const { t } = useI18n();
-  const { providers: serverProviders, loading: providersLoading } =
-    useProviders();
+  const {
+    providers: serverProviders,
+    loading: providersLoading,
+    refetch: refetchProviders,
+  } = useProviders();
 
   // Merge server detection status with client-side metadata
   const registeredProviders = getAllProviders();
@@ -217,6 +221,10 @@ export function ProvidersSettings() {
                     ))}
                   </ul>
                 )}
+                {provider.id === "agy" &&
+                  serverProviders.some((info) => info.name === "agy") && (
+                    <AgyAccountCard onRefresh={refetchProviders} />
+                  )}
               </div>
               {provider.metadata.website && (
                 <a

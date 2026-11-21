@@ -29,6 +29,7 @@ import type { SessionIndexService } from "../indexes/index.js";
 import { getLogger } from "../logging/logger.js";
 import type { SessionMetadataService } from "../metadata/SessionMetadataService.js";
 import type { NotificationService } from "../notifications/index.js";
+import type { AgySessionScanner } from "../projects/agy-scanner.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { CursorSessionScanner } from "../projects/cursor-scanner.js";
 import type { DshSessionScanner } from "../projects/dsh-scanner.js";
@@ -37,6 +38,7 @@ import type { McodeSessionScanner } from "../projects/mcode-scanner.js";
 import type { PiSessionScanner } from "../projects/pi-scanner.js";
 import type { ProjectScanner } from "../projects/scanner.js";
 import type { RuntimeController } from "../runtime/types.js";
+import type { AgySessionReader } from "../sessions/agy-reader.js";
 import type { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { DshSessionReader } from "../sessions/dsh-reader.js";
 import type { GeminiSessionReader } from "../sessions/gemini-reader.js";
@@ -78,8 +80,10 @@ export interface InboxDeps {
   piReaderFactory?: (projectPath: string) => PiSessionReader;
   cursorScanner?: CursorSessionScanner;
   mcodeScanner?: McodeSessionScanner;
+  agyScanner?: AgySessionScanner;
   dshScanner?: DshSessionScanner;
   mcodeReaderFactory?: (projectPath: string) => McodeSessionReader;
+  agyReaderFactory?: (projectPath: string) => AgySessionReader;
   dshReaderFactory?: (projectPath: string) => DshSessionReader;
   codexBridgeService?: CodexBridgeController;
 }
@@ -230,6 +234,7 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
       piScanner: deps.piScanner,
       cursorScanner: deps.cursorScanner,
       mcodeScanner: deps.mcodeScanner,
+      agyScanner: deps.agyScanner,
       dshScanner: deps.dshScanner,
     });
     const bridgeSessionViews = await listBridgeSessionViews(deps);
@@ -264,6 +269,7 @@ export function createInboxRoutes(deps: InboxDeps): Hono {
               piSessionsDir: deps.piSessionsDir,
               piReaderFactory: deps.piReaderFactory,
               mcodeReaderFactory: deps.mcodeReaderFactory,
+              agyReaderFactory: deps.agyReaderFactory,
               dshReaderFactory: deps.dshReaderFactory,
               allowStaleSessionCache: true,
             },

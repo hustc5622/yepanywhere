@@ -386,6 +386,11 @@ export class SessionContentIndexService {
       return;
     }
 
+    if (event.provider === "agy") {
+      this.markMatchingScopesDirty("agy::");
+      return;
+    }
+
     if (event.provider === "dsh") {
       this.markMatchingScopesDirty("dsh::");
     }

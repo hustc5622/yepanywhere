@@ -61,6 +61,7 @@ export interface Project {
   hasPiSessions?: boolean; // whether this project also has Pi sessions
   hasCursorSessions?: boolean; // whether this project also has Cursor ACP sessions
   hasMcodeSessions?: boolean; // whether this project also has MiniMax Code sessions
+  hasAgySessions?: boolean; // whether this project also has Antigravity CLI sessions
   hasDshSessions?: boolean; // whether this project also has read-only DeepSeek Harness sessions
   activeOwnedCount: number; // sessions owned by this server
   activeExternalCount: number; // sessions controlled by external processes

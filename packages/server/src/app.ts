@@ -48,6 +48,7 @@ import {
   requireCustomHeader,
 } from "./middleware/security.js";
 import type { NotificationService } from "./notifications/index.js";
+import { AgySessionScanner } from "./projects/agy-scanner.js";
 import {
   CODEX_SESSIONS_DIR,
   CodexSessionScanner,
@@ -143,6 +144,8 @@ import { SessionTitleService } from "./services/SessionTitleService.js";
 import type { SharingService } from "./services/SharingService.js";
 import { SessionShareService } from "./session-shares/SessionShareService.js";
 import { createInProcessSessionPayloadLoader } from "./session-shares/session-payload-loader.js";
+import { AgySessionReader } from "./sessions/agy-reader.js";
+import { AGY_BRAIN_DIR, AGY_DATA_DIR } from "./sessions/agy-store.js";
 import { CodexSessionReader } from "./sessions/codex-reader.js";
 import { resolveExistingCodexRolloutPath } from "./sessions/codex-rollout-file.js";
 import {
@@ -509,6 +512,9 @@ export function createApp(options: AppOptions): AppResult {
   const mcodeScanner = providerEnabled("mcode")
     ? new McodeSessionScanner()
     : undefined;
+  const agyScanner = providerEnabled("agy")
+    ? new AgySessionScanner()
+    : undefined;
   // DeepSeek Harness is read-only: sessions are listed and displayed, while
   // the embedded dsh Web UI owns every mutation.
   const dshScanner = providerEnabled("dsh")
@@ -523,12 +529,14 @@ export function createApp(options: AppOptions): AppResult {
     piScanner,
     cursorScanner,
     mcodeScanner,
+    agyScanner,
     dshScanner,
     enableCodex: codexEnabled,
     enableGemini: geminiEnabled,
     enablePi: Boolean(piScanner),
     enableCursor: Boolean(cursorScanner),
     enableMcode: Boolean(mcodeScanner),
+    enableAgy: Boolean(agyScanner),
     enableDsh: Boolean(dshScanner),
     projectMetadataService: options.projectMetadataService,
     eventBus: options.eventBus,
@@ -666,6 +674,20 @@ export function createApp(options: AppOptions): AppResult {
               projectPath: project.path,
             }),
         );
+      case "agy": {
+        const mis = options.modelInfoService;
+        return getOrCreateReader(
+          `agy::${AGY_DATA_DIR}::${project.path}`,
+          () =>
+            new AgySessionReader({
+              projectPath: project.path,
+              getContextWindow: mis
+                ? (model, provider, sessionId) =>
+                    mis.getCachedContextWindow(model, provider, sessionId)
+                : undefined,
+            }),
+        );
+      }
       case "mcode": {
         const mis = options.modelInfoService;
         return getOrCreateReader(
@@ -808,6 +830,17 @@ export function createApp(options: AppOptions): AppResult {
         });
       },
     );
+  const agyReaderFactory = (projectPath: string): AgySessionReader =>
+    getOrCreateReader(`agy-extra::${AGY_DATA_DIR}::${projectPath}`, () => {
+      const mis = options.modelInfoService;
+      return new AgySessionReader({
+        projectPath,
+        getContextWindow: mis
+          ? (model, provider, sessionId) =>
+              mis.getCachedContextWindow(model, provider, sessionId)
+          : undefined,
+      });
+    });
   const dshReaderFactory = dshScanner
     ? (projectPath: string): DshSessionReader =>
         getOrCreateReader(
@@ -837,6 +870,7 @@ export function createApp(options: AppOptions): AppResult {
         piSessionsDir: PI_SESSIONS_DIR,
         piReaderFactory,
         mcodeReaderFactory,
+        agyReaderFactory,
         dshReaderFactory,
         cursorSessionsDir: CURSOR_ACP_SESSIONS_DIR,
         cursorReaderFactory,
@@ -913,6 +947,7 @@ export function createApp(options: AppOptions): AppResult {
     piSessionsDir: PI_SESSIONS_DIR,
     piReaderFactory,
     mcodeReaderFactory,
+    agyReaderFactory,
     dshReaderFactory,
     enabledProviders: options.enabledProviders,
   });
@@ -974,6 +1009,7 @@ export function createApp(options: AppOptions): AppResult {
             piSessionsDir: PI_SESSIONS_DIR,
             piReaderFactory,
             mcodeReaderFactory,
+            agyReaderFactory,
             dshReaderFactory,
           },
           options.sessionMetadataService?.getProvider(sessionId),
@@ -1035,6 +1071,7 @@ export function createApp(options: AppOptions): AppResult {
         piScanner,
         cursorScanner,
         mcodeScanner,
+        agyScanner,
         dshScanner,
       });
       const roots = {
@@ -1051,6 +1088,7 @@ export function createApp(options: AppOptions): AppResult {
         piSessionsDir: PI_SESSIONS_DIR,
         piReaderFactory,
         mcodeReaderFactory,
+        agyReaderFactory,
         dshReaderFactory,
         cursorSessionsDir: CURSOR_ACP_SESSIONS_DIR,
         cursorReaderFactory,
@@ -1367,10 +1405,12 @@ export function createApp(options: AppOptions): AppResult {
       piScanner,
       cursorScanner,
       mcodeScanner,
+      agyScanner,
       dshScanner,
       piSessionsDir: PI_SESSIONS_DIR,
       piReaderFactory,
       mcodeReaderFactory,
+      agyReaderFactory,
       dshReaderFactory,
       codexBridgeService: options.codexBridgeService,
     }),
@@ -1401,10 +1441,12 @@ export function createApp(options: AppOptions): AppResult {
       piScanner,
       cursorScanner,
       mcodeScanner,
+      agyScanner,
       dshScanner,
       piSessionsDir: PI_SESSIONS_DIR,
       piReaderFactory,
       mcodeReaderFactory,
+      agyReaderFactory,
       dshReaderFactory,
       serverSettingsService: options.serverSettingsService,
       modelInfoService: options.modelInfoService,
@@ -1458,6 +1500,11 @@ export function createApp(options: AppOptions): AppResult {
               reader: mcodeReaderFactory(project.path),
               sessionDir: MCODE_SESSIONS_DIR,
             };
+          case "agy":
+            return {
+              reader: agyReaderFactory(project.path),
+              sessionDir: AGY_BRAIN_DIR,
+            };
           default:
             return {
               reader: readerFactory(project),
@@ -1490,10 +1537,12 @@ export function createApp(options: AppOptions): AppResult {
       piScanner,
       cursorScanner,
       mcodeScanner,
+      agyScanner,
       dshScanner,
       piSessionsDir: PI_SESSIONS_DIR,
       piReaderFactory,
       mcodeReaderFactory,
+      agyReaderFactory,
       dshReaderFactory,
       codexBridgeService: options.codexBridgeService,
     }),
@@ -1521,10 +1570,12 @@ export function createApp(options: AppOptions): AppResult {
       piScanner,
       cursorScanner,
       mcodeScanner,
+      agyScanner,
       dshScanner,
       piSessionsDir: PI_SESSIONS_DIR,
       piReaderFactory,
       mcodeReaderFactory,
+      agyReaderFactory,
       dshReaderFactory,
       eventBus: options.eventBus,
       codexBridgeService: options.codexBridgeService,
@@ -1554,10 +1605,12 @@ export function createApp(options: AppOptions): AppResult {
         piScanner,
         cursorScanner,
         mcodeScanner,
+        agyScanner,
         dshScanner,
         piSessionsDir: PI_SESSIONS_DIR,
         piReaderFactory,
         mcodeReaderFactory,
+        agyReaderFactory,
         dshReaderFactory,
         cursorSessionsDir: CURSOR_ACP_SESSIONS_DIR,
         cursorReaderFactory,
@@ -1591,10 +1644,12 @@ export function createApp(options: AppOptions): AppResult {
         piScanner,
         cursorScanner,
         mcodeScanner,
+        agyScanner,
         dshScanner,
         piSessionsDir: PI_SESSIONS_DIR,
         piReaderFactory,
         mcodeReaderFactory,
+        agyReaderFactory,
         dshReaderFactory,
         cursorSessionsDir: CURSOR_ACP_SESSIONS_DIR,
         cursorReaderFactory,

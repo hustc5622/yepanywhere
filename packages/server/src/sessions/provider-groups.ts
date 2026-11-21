@@ -14,6 +14,7 @@ export type ProviderGroup =
   | "pi"
   | "cursor"
   | "mcode"
+  | "agy"
   | "dsh";
 
 export function normalizeProviderGroup(
@@ -25,6 +26,7 @@ export function normalizeProviderGroup(
   if (provider === "pi") return "pi";
   if (provider === "cursor") return "cursor";
   if (provider === "mcode") return "mcode";
+  if (provider === "agy") return "agy";
   if (provider === "dsh") return "dsh";
   if (provider === "claude" || provider === "claude-ollama") return "claude";
   return null;

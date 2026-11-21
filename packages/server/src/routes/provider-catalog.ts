@@ -1,4 +1,5 @@
 import type { CodexSessionCatalog } from "../codex-history/CodexSessionCatalog.js";
+import type { AgySessionScanner } from "../projects/agy-scanner.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { CursorSessionScanner } from "../projects/cursor-scanner.js";
 import type { DshSessionScanner } from "../projects/dsh-scanner.js";
@@ -15,6 +16,7 @@ export interface ProviderCatalogDeps {
   piScanner?: PiSessionScanner;
   cursorScanner?: CursorSessionScanner;
   mcodeScanner?: McodeSessionScanner;
+  agyScanner?: AgySessionScanner;
   dshScanner?: DshSessionScanner;
   projects?: Project[];
   codexSessionCatalog?: CodexSessionCatalog;
@@ -26,6 +28,7 @@ export interface ProviderProjectCatalog {
   piPaths: Set<string>;
   cursorPaths: Set<string>;
   mcodePaths?: Set<string>;
+  agyPaths?: Set<string>;
   dshPaths?: Set<string>;
   geminiHashToCwd?: Promise<Map<string, string>>;
   codexSessionsByPath?: Map<string, SessionSummary[]>;
@@ -40,12 +43,38 @@ export interface ProviderProjectCatalog {
 export async function buildProviderProjectCatalog(
   deps: ProviderCatalogDeps,
 ): Promise<ProviderProjectCatalog> {
-  const [base, mcodePaths, dshPaths] = await Promise.all([
+  const [base, mcodePaths, agyPaths, dshPaths] = await Promise.all([
     buildBaseProviderProjectCatalog(deps),
     buildMcodeProjectPaths(deps),
+    buildAgyProjectPaths(deps),
     buildDshProjectPaths(deps),
   ]);
-  return { ...base, mcodePaths, dshPaths };
+  return { ...base, mcodePaths, agyPaths, dshPaths };
+}
+
+/** Antigravity CLI paths; empty when the provider is disabled. */
+async function buildAgyProjectPaths(
+  deps: ProviderCatalogDeps,
+): Promise<Set<string>> {
+  const paths = new Set<string>();
+  if (!deps.agyScanner) return paths;
+  for (const project of deps.projects ?? []) {
+    if (project.hasAgySessions === true || project.provider === "agy") {
+      paths.add(canonicalizeProjectPath(project.path));
+    }
+  }
+  const needsScan =
+    !deps.projects ||
+    deps.projects.some(
+      (project) =>
+        project.provider !== "agy" && project.hasAgySessions === undefined,
+    );
+  if (needsScan) {
+    for (const project of await deps.agyScanner.listProjects()) {
+      paths.add(canonicalizeProjectPath(project.path));
+    }
+  }
+  return paths;
 }
 
 /** Read-only DeepSeek Harness paths; empty when the provider is disabled. */

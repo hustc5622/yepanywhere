@@ -14,6 +14,7 @@ import {
   tryMapLocalPathToRemote,
   tryMapRemotePathToLocal,
 } from "../sdk/remote-path-mapping.js";
+import { AGY_BRAIN_DIR } from "../sessions/agy-store.js";
 import { CURSOR_ACP_SESSIONS_DIR } from "../sessions/cursor-reader.js";
 import { DSH_SESSIONS_DIR } from "../sessions/dsh-store.js";
 import { MCODE_SESSIONS_DIR } from "../sessions/mcode-store.js";
@@ -21,6 +22,7 @@ import { PI_SESSIONS_DIR } from "../sessions/pi-files.js";
 import type { Project } from "../supervisor/types.js";
 import { atomicWriteText } from "../utils/atomic-json-file.js";
 import type { EventBus, FileChangeEvent } from "../watcher/index.js";
+import { AgySessionScanner } from "./agy-scanner.js";
 import { CODEX_SESSIONS_DIR, CodexSessionScanner } from "./codex-scanner.js";
 import { CursorSessionScanner } from "./cursor-scanner.js";
 import { DshSessionScanner } from "./dsh-scanner.js";
@@ -47,6 +49,7 @@ export interface ScannerOptions {
   piScanner?: PiSessionScanner | null; // shared provider scanner
   cursorScanner?: CursorSessionScanner | null; // shared provider scanner
   mcodeScanner?: McodeSessionScanner | null; // shared provider scanner
+  agyScanner?: AgySessionScanner | null; // shared provider scanner
   dshScanner?: DshSessionScanner | null; // shared provider scanner
   enableCodex?: boolean; // whether to include Codex projects (default: true)
   enableGemini?: boolean; // whether to include Gemini projects (default: true)
@@ -57,6 +60,11 @@ export interface ScannerOptions {
    * shared scanner is injected, so tests never read the real ~/.minimax DB.
    */
   enableMcode?: boolean;
+  /**
+   * Whether to include Antigravity CLI projects. Defaults to true only when a
+   * shared scanner is injected, so tests never read ~/.gemini/antigravity-cli.
+   */
+  enableAgy?: boolean;
   /**
    * Whether to include read-only DeepSeek Harness projects. Defaults to true
    * only when a shared scanner is injected, so tests never read ~/.dsh.
@@ -108,6 +116,7 @@ export class ProjectScanner {
   private piScanner: PiSessionScanner | null;
   private cursorScanner: CursorSessionScanner | null;
   private mcodeScanner: McodeSessionScanner | null;
+  private agyScanner: AgySessionScanner | null;
   private dshScanner: DshSessionScanner | null;
   private enableCodex: boolean;
   private enableGemini: boolean;
@@ -162,6 +171,10 @@ export class ProjectScanner {
     this.mcodeScanner =
       (options.enableMcode ?? Boolean(options.mcodeScanner))
         ? (options.mcodeScanner ?? new McodeSessionScanner())
+        : null;
+    this.agyScanner =
+      (options.enableAgy ?? Boolean(options.agyScanner))
+        ? (options.agyScanner ?? new AgySessionScanner())
         : null;
     this.dshScanner =
       (options.enableDsh ?? Boolean(options.dshScanner))
@@ -413,6 +426,8 @@ export class ProjectScanner {
       this.cursorScanner?.invalidateCache();
     } else if (event.provider === "mcode") {
       this.mcodeScanner?.invalidateCache();
+    } else if (event.provider === "agy") {
+      this.agyScanner?.invalidateCache();
     } else if (event.provider === "dsh") {
       this.dshScanner?.invalidateCache();
     }
@@ -719,6 +734,41 @@ export class ProjectScanner {
       }
     }
 
+    if (this.agyScanner) {
+      const agyProjects = await this.agyScanner.listProjects();
+      for (const agyProject of agyProjects) {
+        const projectPath = canonicalizeProjectPath(agyProject.path);
+        const existing = projects.find(
+          (project) => canonicalizeProjectPath(project.path) === projectPath,
+        );
+        if (existing) {
+          existing.hasAgySessions = true;
+          existing.sessionCount += agyProject.sessionCount;
+          if (
+            agyProject.lastActivity &&
+            (!existing.lastActivity ||
+              agyProject.lastActivity > existing.lastActivity)
+          ) {
+            existing.lastActivity = agyProject.lastActivity;
+          }
+          continue;
+        }
+        seenPaths.add(projectPath);
+        projects.push({
+          ...agyProject,
+          id: encodeProjectId(projectPath),
+          path: projectPath,
+          name: basename(projectPath),
+          hasCodexSessions: false,
+          hasGeminiSessions: false,
+          hasPiSessions: false,
+          hasCursorSessions: false,
+          hasMcodeSessions: false,
+          hasAgySessions: true,
+        });
+      }
+    }
+
     if (this.dshScanner) {
       const dshProjects = await this.dshScanner.listProjects();
       for (const dshProject of dshProjects) {
@@ -749,6 +799,7 @@ export class ProjectScanner {
           hasPiSessions: false,
           hasCursorSessions: false,
           hasMcodeSessions: false,
+          hasAgySessions: false,
           hasDshSessions: true,
         });
       }
@@ -998,6 +1049,14 @@ export class ProjectScanner {
         }
       }
 
+      if (provider === "claude" && this.agyScanner) {
+        const agySessions =
+          await this.agyScanner.getSessionsForProject(projectPath);
+        if (agySessions.length > 0) {
+          provider = "agy";
+        }
+      }
+
       if (provider === "claude" && this.dshScanner) {
         const dshSessions =
           await this.dshScanner.getSessionsForProject(projectPath);
@@ -1021,6 +1080,8 @@ export class ProjectScanner {
       sessionDir = CURSOR_ACP_SESSIONS_DIR;
     } else if (provider === "mcode") {
       sessionDir = MCODE_SESSIONS_DIR;
+    } else if (provider === "agy") {
+      sessionDir = AGY_BRAIN_DIR;
     } else if (provider === "dsh") {
       sessionDir = DSH_SESSIONS_DIR;
     } else {
@@ -1038,6 +1099,7 @@ export class ProjectScanner {
       hasPiSessions: provider === "pi",
       hasCursorSessions: provider === "cursor",
       hasMcodeSessions: provider === "mcode",
+      hasAgySessions: provider === "agy",
       hasDshSessions: provider === "dsh",
       activeOwnedCount: 0,
       activeExternalCount: 0,

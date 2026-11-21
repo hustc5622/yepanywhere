@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import { stat } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 import type { UrlProjectId } from "@yep-anywhere/shared";
+import { findAgySessionRecord } from "../sessions/agy-store.js";
 import { CURSOR_ACP_SESSIONS_DIR } from "../sessions/cursor-reader.js";
 import { findDshSessionRecord } from "../sessions/dsh-store.js";
 import { findMcodeSessionRecord } from "../sessions/mcode-store.js";
@@ -15,6 +16,7 @@ type WatchProvider =
   | "pi"
   | "cursor"
   | "mcode"
+  | "agy"
   | "dsh";
 type ChangeSource = "fs-watch" | "poll";
 
@@ -445,6 +447,14 @@ export class FocusedSessionWatchManager {
         continue;
       }
 
+      if (provider === "agy") {
+        const record = await findAgySessionRecord(target.sessionId);
+        if (record && (await this.fileExists(record.transcriptPath))) {
+          return { filePath: record.transcriptPath, provider };
+        }
+        continue;
+      }
+
       if (provider === "dsh") {
         const record = await findDshSessionRecord(target.sessionId);
         if (record && (await this.fileExists(record.logPath))) {
@@ -474,6 +484,7 @@ export class FocusedSessionWatchManager {
     pushCandidate("pi");
     pushCandidate("cursor");
     pushCandidate("mcode");
+    pushCandidate("agy");
     pushCandidate("dsh");
     return candidates;
   }

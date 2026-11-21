@@ -68,6 +68,12 @@ export type UnifiedSession =
    */
   | { provider: "mcode"; session: PiSessionContent }
   /**
+   * Antigravity CLI steps (`~/.gemini/antigravity-cli/brain/<id>/
+   * .system_generated/logs/transcript_full.jsonl`) are adapted into a linear
+   * Pi session by the agy reader.
+   */
+  | { provider: "agy"; session: PiSessionContent }
+  /**
    * DeepSeek Harness logs (`~/.dsh/sessions/.../session.v*.jsonl.zstd`) are
    * projected into a linear Pi session by the read-only dsh reader.
    */

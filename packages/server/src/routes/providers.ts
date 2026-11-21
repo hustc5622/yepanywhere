@@ -10,6 +10,10 @@ import { Hono } from "hono";
 import { canonicalizeProjectPath, decodeProjectId } from "../projects/paths.js";
 import { getCursorRuntimeAvailability } from "../runtime/cursor-availability.js";
 import type { RuntimeController } from "../runtime/types.js";
+import {
+  type AgyLoginService,
+  getAgyLoginService,
+} from "../sdk/providers/agy-login.js";
 import type { ClaudeUsageResponse } from "../sdk/providers/claude-control.js";
 import { getCodexModelSourceRegistry } from "../sdk/providers/codex-model-sources.js";
 import { cursorAccountService } from "../sdk/providers/cursor-account.js";
@@ -29,6 +33,8 @@ import type { ModelInfoService } from "../services/ModelInfoService.js";
 
 interface ProviderRouteDeps {
   runtimeController?: RuntimeController;
+  /** Test seam for Antigravity sign-in. */
+  agyLogin?: AgyLoginService;
   getCursorAccount?: (options: {
     fresh?: boolean;
   }) => Promise<CursorAccountResponse>;
@@ -95,6 +101,61 @@ export function createProvidersRoutes(deps: ProviderRouteDeps = {}): Hono {
       deps.getCursorAccount ??
       ((options) => cursorAccountService.getAccount(options));
     return c.json(await getAccount({ fresh: c.req.query("fresh") === "1" }));
+  });
+
+  // Antigravity CLI sign-in on the Yep host (`agy acp --login`): the client
+  // opens the Google URL, then posts back the code or landing URL.
+  const agyLogin = () => deps.agyLogin ?? getAgyLoginService();
+  const agyDisabled = () => !isProviderEnabled("agy", deps.enabledProviders);
+
+  routes.get("/agy/account", async (c) => {
+    if (agyDisabled()) return c.json({ error: "Provider not found" }, 404);
+    const service = await agyLogin();
+    return c.json(
+      await service.getAccount({ fresh: c.req.query("fresh") === "1" }),
+    );
+  });
+
+  routes.post("/agy/login", async (c) => {
+    if (agyDisabled()) return c.json({ error: "Provider not found" }, 404);
+    try {
+      const login = await (await agyLogin()).startLogin();
+      return c.json({ login, error: null });
+    } catch (error) {
+      return c.json({ login: null, error: errorText(error) }, 400);
+    }
+  });
+
+  routes.get("/agy/login", async (c) => {
+    if (agyDisabled()) return c.json({ error: "Provider not found" }, 404);
+    return c.json({ login: (await agyLogin()).getLoginState() });
+  });
+
+  routes.post("/agy/login/code", async (c) => {
+    if (agyDisabled()) return c.json({ error: "Provider not found" }, 404);
+    const body = await readJsonObject(c);
+    try {
+      const login = await (await agyLogin()).submitCode(body.code);
+      return c.json({ login, error: null });
+    } catch (error) {
+      return c.json({ login: null, error: errorText(error) }, 400);
+    }
+  });
+
+  routes.delete("/agy/login", async (c) => {
+    if (agyDisabled()) return c.json({ error: "Provider not found" }, 404);
+    (await agyLogin()).cancelLogin();
+    return c.json({ ok: true });
+  });
+
+  routes.post("/agy/logout", async (c) => {
+    if (agyDisabled()) return c.json({ error: "Provider not found" }, 404);
+    try {
+      await (await agyLogin()).logout();
+      return c.json({ ok: true });
+    } catch (error) {
+      return c.json({ error: errorText(error) }, 400);
+    }
   });
 
   routes.post("/cursor/prepare", async (c) => {
@@ -256,4 +317,8 @@ function cursorPrepareCwd(body: Record<string, unknown>): string | null {
     return canonicalizeProjectPath(body.cwd);
   }
   return null;
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }

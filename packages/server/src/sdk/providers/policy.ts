@@ -19,6 +19,7 @@ const LIVE_PROVIDER_NAMES = new Set([
   "pi",
   "cursor",
   "mcode",
+  "agy",
   "dsh",
 ]);
 

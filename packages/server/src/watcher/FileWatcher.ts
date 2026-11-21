@@ -346,6 +346,11 @@ export class FileWatcher {
         return /(?:^|[\\/])messages\.jsonl$/.test(relativePath)
           ? "session"
           : "other";
+      case "agy":
+        // ~/.gemini/antigravity-cli/brain/<id>/.system_generated/logs/transcript_full.jsonl
+        return /(?:^|[\\/])transcript_full\.jsonl$/.test(relativePath)
+          ? "session"
+          : "other";
       case "dsh":
         // ~/.dsh/sessions/<encoded-cwd>/<session-id>/session.v<N>.jsonl[.<codec>]
         return /(?:^|[\\/])session(?:\.v\d+)?\.jsonl(?:\.[a-z]+)?$/.test(

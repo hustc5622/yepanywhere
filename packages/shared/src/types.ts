@@ -7,6 +7,8 @@
  * - "pi": Pi coding agent via its JSONL RPC mode
  * - "cursor": Cursor CLI via Agent Client Protocol (`agent acp`)
  * - "mcode": MiniMax Code CLI via Agent Client Protocol (`mcode acp`)
+ * - "agy": Google Antigravity CLI via Agent Client Protocol (`agy acp`); the
+ *   successor of Gemini CLI for personal Google accounts
  * - "dsh": DeepSeek Harness. Read-only: Yep lists and displays sessions from
  *   `~/.dsh`; continuing a conversation happens in the embedded dsh Web UI.
  */
@@ -20,6 +22,7 @@ export type ProviderName =
   | "pi"
   | "cursor"
   | "mcode"
+  | "agy"
   | "dsh";
 
 /** Providers that can be registered or selected by the current product. */
@@ -47,6 +50,7 @@ export const ALL_PROVIDERS: readonly LiveProviderName[] = [
   "pi",
   "cursor",
   "mcode",
+  "agy",
   "dsh",
 ] as const;
 

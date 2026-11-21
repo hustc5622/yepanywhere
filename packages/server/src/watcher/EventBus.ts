@@ -24,6 +24,7 @@ export type WatchProvider =
   | "pi"
   | "cursor"
   | "mcode"
+  | "agy"
   | "dsh";
 
 export interface FileChangeEvent {

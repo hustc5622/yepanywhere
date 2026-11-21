@@ -14,6 +14,68 @@ function deferred() {
 }
 
 describe("provider routes", () => {
+  it("drives Antigravity sign-in through the login service", async () => {
+    const pending = {
+      status: "pending" as const,
+      authUrl: "https://accounts.google.com/x",
+      error: null,
+      startedAt: "2026-11-21T10:00:00Z",
+    };
+    const agyLogin = {
+      getAccount: vi.fn(async () => ({
+        installed: true,
+        authenticated: false,
+        agyPath: "/h/agy",
+        login: null,
+      })),
+      startLogin: vi.fn(async () => pending),
+      getLoginState: vi.fn(() => pending),
+      submitCode: vi.fn(async (code: unknown) => {
+        if (code !== "good") throw new Error("Malformed auth code.");
+        return { ...pending, status: "completed" as const, authUrl: null };
+      }),
+      cancelLogin: vi.fn(),
+      logout: vi.fn(async () => undefined),
+    };
+    const app = createProvidersRoutes({ agyLogin: agyLogin as never });
+
+    expect(
+      await (await app.request("/agy/account?fresh=1")).json(),
+    ).toMatchObject({ installed: true, authenticated: false });
+    expect(agyLogin.getAccount).toHaveBeenCalledWith({ fresh: true });
+    expect(
+      await (await app.request("/agy/login", { method: "POST" })).json(),
+    ).toEqual({ login: pending, error: null });
+
+    const ok = await app.request("/agy/login/code", {
+      method: "POST",
+      body: JSON.stringify({ code: "good" }),
+    });
+    expect((await ok.json()).login.status).toBe("completed");
+    const bad = await app.request("/agy/login/code", {
+      method: "POST",
+      body: JSON.stringify({ code: "bad" }),
+    });
+    expect(bad.status).toBe(400);
+    expect(await bad.json()).toEqual({
+      login: null,
+      error: "Malformed auth code.",
+    });
+
+    await app.request("/agy/login", { method: "DELETE" });
+    expect(agyLogin.cancelLogin).toHaveBeenCalled();
+    await app.request("/agy/logout", { method: "POST" });
+    expect(agyLogin.logout).toHaveBeenCalled();
+
+    const disabled = createProvidersRoutes({
+      agyLogin: agyLogin as never,
+      enabledProviders: ["codex"],
+    });
+    expect(
+      (await disabled.request("/agy/login", { method: "POST" })).status,
+    ).toBe(404);
+  });
+
   it("serves Cursor account usage and flags a runtime that predates Cursor", async () => {
     const getCursorAccount = vi.fn(async () => ({
       installed: true,

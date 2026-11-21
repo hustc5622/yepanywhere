@@ -1024,6 +1024,35 @@ export const api = {
         : "/providers/cursor/account",
     ),
 
+  // Antigravity CLI sign-in on the Yep host (`agy acp --login`).
+  getAgyAccount: (options?: { fresh?: boolean }) =>
+    fetchJSON<import("@yep-anywhere/shared").AgyAccountResponse>(
+      options?.fresh
+        ? "/providers/agy/account?fresh=1"
+        : "/providers/agy/account",
+    ),
+  startAgyLogin: () =>
+    fetchJSON<{
+      login: import("@yep-anywhere/shared").AgyLoginState | null;
+      error: string | null;
+    }>("/providers/agy/login", { method: "POST" }),
+  getAgyLogin: () =>
+    fetchJSON<{ login: import("@yep-anywhere/shared").AgyLoginState | null }>(
+      "/providers/agy/login",
+    ),
+  submitAgyLoginCode: (code: string) =>
+    fetchJSON<{
+      login: import("@yep-anywhere/shared").AgyLoginState | null;
+      error: string | null;
+    }>("/providers/agy/login/code", {
+      method: "POST",
+      body: JSON.stringify({ code }),
+    }),
+  cancelAgyLogin: () =>
+    fetchJSON<{ ok: boolean }>("/providers/agy/login", { method: "DELETE" }),
+  logoutAgy: () =>
+    fetchJSON<{ ok: boolean }>("/providers/agy/logout", { method: "POST" }),
+
   getCodexUsage: (options?: { fresh?: boolean }) =>
     fetchJSON<CodexUsageResponse>(
       options?.fresh ? "/codex-bridge/usage?fresh=1" : "/codex-bridge/usage",

@@ -3,7 +3,7 @@ import { useCallback, useEffect, useRef, useState } from "react";
 import { api } from "../api/client";
 
 /** Providers whose commands/skills Yep can list without a running process. */
-const LISTABLE_PROVIDERS = new Set(["codex", "pi", "mcode", "cursor"]);
+const LISTABLE_PROVIDERS = new Set(["codex", "pi", "mcode", "cursor", "agy"]);
 const REFRESH_THROTTLE_MS = 15_000;
 
 interface Options {

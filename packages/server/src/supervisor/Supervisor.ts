@@ -226,6 +226,7 @@ function newSessionIdWait(providerName: string): {
       return { timeoutMs: CODEX_SESSION_ID_TIMEOUT_MS, strict: true };
     case "cursor":
     case "mcode":
+    case "agy":
       return { timeoutMs: CURSOR_SESSION_ID_TIMEOUT_MS, strict: true };
     case "pi":
       return { timeoutMs: PI_SESSION_ID_TIMEOUT_MS, strict: true };
@@ -882,7 +883,8 @@ export class Supervisor {
       isForkedResume ||
       activeProvider.name === "codex" ||
       activeProvider.name === "cursor" ||
-      activeProvider.name === "mcode";
+      activeProvider.name === "mcode" ||
+      activeProvider.name === "agy";
 
     // A known Codex ID does not mean thread/resume succeeded. Wait for init
     // on ordinary resumes too, so writer-lock failures reach the HTTP caller

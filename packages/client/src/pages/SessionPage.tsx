@@ -188,6 +188,8 @@ function getApprovalAgentName(
       return "Cursor";
     case "mcode":
       return "MiniMax Code";
+    case "agy":
+      return "Antigravity";
     case "dsh":
       return "dsh";
     default:
@@ -400,7 +402,12 @@ function SessionPageContent({
     const wasRunning = pendingTurnStateRef.current !== "idle";
     pendingTurnStateRef.current = processState;
     if (!wasRunning || processState !== "idle") return;
-    if (effectiveProvider !== "pi" && effectiveProvider !== "mcode") return;
+    if (
+      effectiveProvider !== "pi" &&
+      effectiveProvider !== "mcode" &&
+      effectiveProvider !== "agy"
+    )
+      return;
     clearAwaitingTurnMessages();
   }, [clearAwaitingTurnMessages, effectiveProvider, processState]);
   const approvalAgentName = getApprovalAgentName(effectiveProvider);

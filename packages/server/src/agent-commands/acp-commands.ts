@@ -1,16 +1,19 @@
 import type { SlashCommand } from "@yep-anywhere/shared";
 import { writeAgentCommandCache } from "./command-cache.js";
 
-export type AcpCommandProvider = "mcode" | "cursor";
+export type AcpCommandProvider = "mcode" | "cursor" | "agy";
 
 /**
  * Commands an ACP agent advertises that do nothing useful through Yep:
  * - MiniMax Code `/new` only says "start a new thread in your ACP client".
  * - Cursor `/copy-request-id` writes to the clipboard of the agent host.
+ * - Antigravity `/browser` drives a browser on the agent host and `/swarm`,
+ *   `/teamwork` open TUI-only boards; they still run, so keep them listed.
  */
 const UNUSABLE: Record<AcpCommandProvider, ReadonlySet<string>> = {
   mcode: new Set(["new"]),
   cursor: new Set(["copy-request-id"]),
+  agy: new Set(),
 };
 
 const MCODE_SKILL_PREFIX = /^\[Skill\]\s*/u;

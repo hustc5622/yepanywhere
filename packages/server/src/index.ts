@@ -87,6 +87,7 @@ import {
   ServerSettingsService,
   SharingService,
 } from "./services/index.js";
+import { AGY_BRAIN_DIR } from "./sessions/agy-store.js";
 import { CURSOR_ACP_SESSIONS_DIR } from "./sessions/cursor-reader.js";
 import { DSH_SESSIONS_DIR } from "./sessions/dsh-store.js";
 import { MCODE_SESSIONS_DIR } from "./sessions/mcode-store.js";
@@ -461,7 +462,15 @@ console.log(
 // Helper to create watcher if directory exists
 function createWatcherIfExists(
   watchDir: string,
-  provider: "claude" | "gemini" | "codex" | "pi" | "cursor" | "mcode" | "dsh",
+  provider:
+    | "claude"
+    | "gemini"
+    | "codex"
+    | "pi"
+    | "cursor"
+    | "mcode"
+    | "agy"
+    | "dsh",
   ensureDirectory = false,
   persistent = false,
   periodicRescanOverrideMs?: number,
@@ -551,6 +560,10 @@ createWatcherIfExists(
 );
 if (isProviderEnabled("mcode", config.enabledProviders)) {
   createWatcherIfExists(MCODE_SESSIONS_DIR, "mcode", false, true);
+}
+if (isProviderEnabled("agy", config.enabledProviders)) {
+  // Antigravity CLI transcripts (brain/<id>/.system_generated/logs/...).
+  createWatcherIfExists(AGY_BRAIN_DIR, "agy", false, true);
 }
 if (isProviderEnabled("dsh", config.enabledProviders)) {
   // Read-only DeepSeek Harness logs; dsh Web and the dsh CLI append here.

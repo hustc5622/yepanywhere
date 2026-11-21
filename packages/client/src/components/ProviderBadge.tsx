@@ -13,6 +13,7 @@ const PROVIDER_COLORS: Record<LiveProviderName, string> = {
   pi: "var(--provider-pi)", // Pi cyan
   cursor: "var(--provider-cursor)",
   mcode: "var(--provider-mcode)",
+  agy: "var(--provider-agy)",
   dsh: "var(--provider-dsh)",
 };
 
@@ -41,6 +42,7 @@ const PROVIDER_LABELS: Record<LiveProviderName, string> = {
   pi: "Pi",
   cursor: "Cursor",
   mcode: "MiniMax",
+  agy: "Antigravity",
   dsh: "dsh",
 };
 

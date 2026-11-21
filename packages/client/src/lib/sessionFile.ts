@@ -28,6 +28,16 @@ export function extractSessionIdFromFileEvent(
     }
   }
 
+  // Antigravity: <session-id>/.system_generated/logs/transcript_full.jsonl
+  if (event.provider === "agy") {
+    const id = pathParts[0] ?? "";
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(
+      id,
+    )
+      ? id
+      : null;
+  }
+
   // DeepSeek Harness: <encoded-cwd>/<session-id>/session.v<N>.jsonl.zstd
   if (event.provider === "dsh") {
     return pathParts.length >= 2 ? (pathParts.at(-2) ?? null) : null;

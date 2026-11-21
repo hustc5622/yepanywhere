@@ -86,6 +86,7 @@ import {
 } from "../lib/sessionBranching";
 import { getCurrentInstallId } from "../lib/storageKeys";
 import type { PermissionMode, SessionNavigationState } from "../types";
+import { AgyAccountCard } from "./AgyAccountCard";
 import { CodexAccountSelect } from "./CodexAccountSelect";
 import { CodexUsageCard } from "./CodexUsageCard";
 import { ComposerEditor } from "./ComposerEditor";
@@ -140,6 +141,7 @@ const NEW_SESSION_PROVIDER_ACCENTS = {
   pi: "var(--provider-pi)",
   cursor: "var(--provider-cursor)",
   mcode: "var(--provider-mcode)",
+  agy: "var(--provider-agy)",
   dsh: "var(--provider-dsh)",
 } satisfies Record<LiveProviderName, string>;
 
@@ -398,7 +400,12 @@ export function NewSessionForm({
 
   const [cursorCatalog, setCursorCatalog] = useState<ModelInfo[] | null>(null);
   const [cursorCatalogLoading, setCursorCatalogLoading] = useState(false);
-  const [mcodeCatalog, setMcodeCatalog] = useState<ModelInfo[] | null>(null);
+  // MiniMax Code and Antigravity refresh their model catalog in the
+  // background (ACP probe / `agy models`); keep the fresh list per provider.
+  const [freshCatalog, setFreshCatalog] = useState<{
+    provider: string;
+    models: ModelInfo[];
+  } | null>(null);
   const cursorPrepareKeyRef = useRef<string | null>(null);
 
   // Object URLs keep their backing Blob alive for the lifetime of the page.
@@ -475,8 +482,8 @@ export function NewSessionForm({
   // expression stays stuck in one raw dropdown.
   const listedModels = selectedProviderInfo?.models ?? [];
   const availableModels: ModelInfo[] =
-    selectedProvider === "mcode" && mcodeCatalog
-      ? mcodeCatalog
+    freshCatalog && freshCatalog.provider === selectedProvider
+      ? freshCatalog.models
       : selectedProvider === "cursor"
         ? selectCursorModels(listedModels, cursorCatalog)
         : listedModels;
@@ -510,8 +517,10 @@ export function NewSessionForm({
     [selectedModelInfo, selectedProvider],
   );
   // MiniMax Code folds its plain/thinking model variants into an
-  // off + named-effort picker (see server mcode-models.ts).
-  const usesNamedEffortReasoning = selectedProvider === "mcode";
+  // off + named-effort picker (see server mcode-models.ts); Antigravity maps
+  // its per-model thinking level onto the same picker (agy-models.ts).
+  const usesNamedEffortReasoning =
+    selectedProvider === "mcode" || selectedProvider === "agy";
   const namedReasoningEfforts = useMemo(
     () =>
       usesNamedEffortReasoning
@@ -844,7 +853,7 @@ export function NewSessionForm({
         providerName === "pi" ? (savedDefaults?.llmGatewayKeyId ?? null) : null,
       );
       setNamedReasoningEffort(
-        providerName === "mcode"
+        providerName === "mcode" || providerName === "agy"
           ? (savedDefaults?.reasoningEffort ?? null)
           : null,
       );
@@ -1446,19 +1455,21 @@ export function NewSessionForm({
       : selectedModelForRequest;
 
   useEffect(() => {
-    if (selectedProvider !== "mcode") {
-      setMcodeCatalog(null);
+    if (selectedProvider !== "mcode" && selectedProvider !== "agy") {
+      setFreshCatalog(null);
       return;
     }
     let cancelled = false;
-    // The shared provider list returns immediately while ACP refreshes in the
-    // background. Consume that refresh even when the previous list was nonempty.
+    // The shared provider list returns immediately while the catalog refreshes
+    // in the background. Consume that refresh even when the previous list was
+    // nonempty.
+    const catalogProvider = selectedProvider;
     api
-      .getProvider("mcode", { fresh: true })
+      .getProvider(catalogProvider, { fresh: true })
       .then(({ provider }) => {
         if (cancelled) return;
         const models = provider.models ?? [];
-        setMcodeCatalog(models);
+        setFreshCatalog({ provider: catalogProvider, models });
         setSelectedModel((current) => getPreferredModelId(models, current));
       })
       .catch(() => undefined);
@@ -1942,7 +1953,8 @@ export function NewSessionForm({
   const reasoningEffortDefaultsMatch =
     selectedProvider === "codex" ||
     selectedProvider === "pi" ||
-    selectedProvider === "mcode"
+    selectedProvider === "mcode" ||
+    selectedProvider === "agy"
       ? (savedProviderDefaults?.reasoningEffort ?? undefined) ===
         selectedReasoningEffort
       : true;
@@ -2212,6 +2224,9 @@ export function NewSessionForm({
         />
       )}
       {selectedProvider === "codex" && <CodexUsageCard />}
+      {selectedProvider === "agy" && (
+        <AgyAccountCard onRefresh={refetchProviders} />
+      )}
       {selectedProvider === "cursor" && (
         <CursorAccountCard
           providerInfo={selectedProviderInfo}

@@ -24,6 +24,7 @@
   --provider-pi: #0891b2;
   --provider-cursor: #7c3aed;
   --provider-mcode: #e5326b;
+  --provider-agy: #c026d3;
   --provider-dsh: #4d6bfe;
 
   /* Semantic Colors */
@@ -10387,6 +10388,56 @@ button.context-usage-indicator--button:focus-visible {
   word-break: break-all;
 }
 
+.agy-account-card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.agy-account-install code {
+  display: block;
+  font-family: var(--font-mono);
+  overflow-wrap: anywhere;
+  padding: var(--space-2);
+  border-radius: var(--radius-sm);
+  background: var(--bg-code);
+}
+
+.agy-account-steps {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.agy-account-steps li {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: var(--space-2);
+}
+
+.agy-account-code-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  width: 100%;
+}
+
+.agy-account-code-form input {
+  width: 100%;
+  min-width: 0;
+  padding: var(--space-2);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-code);
+  color: var(--text-primary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-input);
+}
+
 .codex-account-code {
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
@@ -10601,6 +10652,10 @@ button.context-usage-indicator--button:focus-visible {
 
 .provider-option-dot.provider-mcode {
   background: var(--provider-mcode);
+}
+
+.provider-option-dot.provider-agy {
+  background: var(--provider-agy);
 }
 
 .provider-option-dot.provider-dsh {

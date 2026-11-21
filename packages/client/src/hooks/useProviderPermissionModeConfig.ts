@@ -52,6 +52,29 @@ export function useProviderPermissionModeConfig(
     };
   }
 
+  if (provider === "agy") {
+    return {
+      labels: {
+        ...genericLabels,
+        default: t("modeAgyDefaultLabel"),
+        acceptEdits: t("modeAgyAcceptEditsLabel"),
+        auto: t("modeAgyAutoLabel"),
+        plan: t("modeAgyPlanLabel"),
+        bypassPermissions: t("modeAgyFullAccessLabel"),
+      },
+      descriptions: {
+        ...genericDescriptions,
+        default: t("modeAgyDefaultDescription"),
+        acceptEdits: t("modeAgyAcceptEditsDescription"),
+        auto: t("modeAgyAutoDescription"),
+        plan: t("modeAgyPlanDescription"),
+        bypassPermissions: t("modeAgyFullAccessDescription"),
+      },
+      title: t("newSessionAgyPermissionTitle"),
+      description: t("newSessionAgyPermissionDescription"),
+    };
+  }
+
   if (provider === "cursor") {
     return {
       labels: {

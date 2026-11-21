@@ -413,11 +413,14 @@ export function buildAgentCommandCatalog({
     ];
   }
 
-  // MiniMax Code and Cursor report their built-ins and skills over ACP;
-  // everything in that list is resolved by the agent itself.
-  if (provider === "mcode" || provider === "cursor") {
-    // Only MiniMax Code can switch models mid-session through Yep.
-    addYep("model", provider === "mcode" && ownsProcess);
+  // MiniMax Code, Antigravity and Cursor report their built-ins and skills
+  // over ACP; everything in that list is resolved by the agent itself.
+  if (provider === "mcode" || provider === "cursor" || provider === "agy") {
+    // MiniMax Code and Antigravity can switch models mid-session through Yep.
+    addYep(
+      "model",
+      (provider === "mcode" || provider === "agy") && ownsProcess,
+    );
     return [slashGroup(labels.slashCommands, mergeCommands(yepCommands, live))];
   }
 

@@ -2,6 +2,8 @@ import type { ProviderName, UrlProjectId } from "@yep-anywhere/shared";
 import type { ISessionIndexService } from "../indexes/types.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
 import type { Project, SessionSummary } from "../supervisor/types.js";
+import { AgySessionReader } from "./agy-reader.js";
+import { AGY_BRAIN_DIR } from "./agy-store.js";
 import { CodexSessionReader } from "./codex-reader.js";
 import {
   CURSOR_ACP_SESSIONS_DIR,
@@ -29,6 +31,8 @@ export interface ProviderProjectCatalog {
   cursorPaths: Set<string>;
   /** Optional so older catalog builders/tests remain valid. */
   mcodePaths?: Set<string>;
+  /** Projects with Antigravity CLI conversations. */
+  agyPaths?: Set<string>;
   /** Projects with read-only DeepSeek Harness sessions. */
   dshPaths?: Set<string>;
   geminiHashToCwd?: Promise<Map<string, string>>;
@@ -49,6 +53,7 @@ export interface ProviderResolutionDeps {
   cursorReaderFactory?: (projectPath: string) => CursorSessionReader;
   mcodeSessionsDir?: string;
   mcodeReaderFactory?: (projectPath: string) => McodeSessionReader;
+  agyReaderFactory?: (projectPath: string) => AgySessionReader;
   /**
    * Read-only DeepSeek Harness reader. Absent when the provider is disabled;
    * unlike other providers there is no fallback reader.
@@ -68,7 +73,15 @@ export interface SessionSource {
   provider: ProviderName;
   reader: ISessionReader;
   sessionDir: string;
-  kind: "primary" | "codex" | "gemini" | "pi" | "cursor" | "mcode" | "dsh";
+  kind:
+    | "primary"
+    | "codex"
+    | "gemini"
+    | "pi"
+    | "cursor"
+    | "mcode"
+    | "agy"
+    | "dsh";
 }
 
 export interface ResolvedSessionSummary {
@@ -135,6 +148,17 @@ function mayHaveMcodeSessions(
   }
   // Without a catalog, any non-mcode project may also hold MiniMax Code
   // sessions; the reader filters by cwd, so a miss only costs one query.
+  return normalizeProviderGroup(project.provider) !== null;
+}
+
+function mayHaveAgySessions(
+  project: Project,
+  catalog?: ProviderProjectCatalog,
+): boolean {
+  if (catalog?.agyPaths) {
+    return catalog.agyPaths.has(canonicalizeProjectPath(project.path));
+  }
+  // The reader filters by cwd, so a miss only costs one catalog query.
   return normalizeProviderGroup(project.provider) !== null;
 }
 
@@ -253,6 +277,9 @@ function buildCandidateGroups(
   if (mayHaveMcodeSessions(project, catalog)) {
     pushGroup("mcode");
   }
+  if (mayHaveAgySessions(project, catalog)) {
+    pushGroup("agy");
+  }
   if (mayHaveDshSessions(project, catalog)) {
     pushGroup("dsh");
   }
@@ -279,6 +306,8 @@ function getSourceForGroup(
       return createCursorSource(project, deps);
     case "mcode":
       return createMcodeSource(project, deps);
+    case "agy":
+      return createAgySource(project, deps);
     case "dsh":
       return createDshSource(project, deps);
   }
@@ -295,6 +324,21 @@ function createDshSource(
     reader,
     sessionDir: DSH_SESSIONS_DIR,
     kind: "dsh",
+  };
+}
+
+function createAgySource(
+  project: Project,
+  deps: ProviderResolutionDeps,
+): SessionSource {
+  const reader =
+    deps.agyReaderFactory?.(project.path) ??
+    new AgySessionReader({ projectPath: project.path });
+  return {
+    provider: "agy",
+    reader,
+    sessionDir: AGY_BRAIN_DIR,
+    kind: "agy",
   };
 }
 

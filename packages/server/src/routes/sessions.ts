@@ -62,6 +62,7 @@ import {
 import { getLogger } from "../logging/logger.js";
 import type { SessionMetadataService } from "../metadata/index.js";
 import type { NotificationService } from "../notifications/index.js";
+import type { AgySessionScanner } from "../projects/agy-scanner.js";
 import type { CodexSessionScanner } from "../projects/codex-scanner.js";
 import type { CursorSessionScanner } from "../projects/cursor-scanner.js";
 import type { DshSessionScanner } from "../projects/dsh-scanner.js";
@@ -92,6 +93,7 @@ import {
   ManualSessionTitleError,
   type SessionTitleService,
 } from "../services/SessionTitleService.js";
+import type { AgySessionReader } from "../sessions/agy-reader.js";
 import { CodexSessionReader } from "../sessions/codex-reader.js";
 import type { DshSessionReader } from "../sessions/dsh-reader.js";
 import { cloneClaudeSession, cloneCodexSession } from "../sessions/fork.js";
@@ -213,8 +215,10 @@ export interface SessionsDeps {
   piReaderFactory?: (projectPath: string) => PiSessionReader;
   cursorScanner?: CursorSessionScanner;
   mcodeScanner?: McodeSessionScanner;
+  agyScanner?: AgySessionScanner;
   dshScanner?: DshSessionScanner;
   mcodeReaderFactory?: (projectPath: string) => McodeSessionReader;
+  agyReaderFactory?: (projectPath: string) => AgySessionReader;
   dshReaderFactory?: (projectPath: string) => DshSessionReader;
   /** Server-wide settings service */
   serverSettingsService?: ServerSettingsService;
@@ -669,6 +673,7 @@ function toProviderResolutionDeps(deps: SessionsDeps): ProviderResolutionDeps {
     piSessionsDir: deps.piSessionsDir,
     piReaderFactory: deps.piReaderFactory,
     mcodeReaderFactory: deps.mcodeReaderFactory,
+    agyReaderFactory: deps.agyReaderFactory,
     dshReaderFactory: deps.dshReaderFactory,
   };
 }
@@ -849,7 +854,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     if (provider === "pi") {
       return readPiCommandCache(projectPath).catch(() => null);
     }
-    if (provider === "mcode" || provider === "cursor") {
+    if (provider === "mcode" || provider === "cursor" || provider === "agy") {
       return readAgentCommandCache(provider, projectPath).catch(() => null);
     }
     return null;
@@ -884,6 +889,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       piSessionsDir: deps.piSessionsDir,
       piReaderFactory: deps.piReaderFactory,
       mcodeReaderFactory: deps.mcodeReaderFactory,
+      agyReaderFactory: deps.agyReaderFactory,
       dshReaderFactory: deps.dshReaderFactory,
     });
   const getCodexReader = (projectPath: string): CodexSessionReader | null =>
@@ -3206,6 +3212,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         deps.codexScanner?.invalidateCache();
         deps.cursorScanner?.invalidateCache();
         deps.mcodeScanner?.invalidateCache();
+        deps.agyScanner?.invalidateCache();
         emitArchiveFileEvents(deps, record, "delete");
         archiveResult = { physical: true, action: "archive", record };
       } catch (error) {
@@ -3221,11 +3228,13 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         } else if (
           error instanceof ArchiveError &&
           error.code === "unsupported_provider" &&
-          (target.provider === "mcode" || target.provider === "dsh")
+          (target.provider === "mcode" ||
+            target.provider === "agy" ||
+            target.provider === "dsh")
         ) {
-          // MiniMax Code and DeepSeek Harness share their stores with their
-          // own apps; Yep only hides the session through metadata and never
-          // moves their files.
+          // MiniMax Code, Antigravity and DeepSeek Harness share their stores
+          // with their own apps; Yep only hides the session through metadata
+          // and never moves their files.
         } else if (error instanceof ArchiveError) {
           return c.json(
             { error: error.message, code: error.code },
@@ -3245,6 +3254,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         deps.codexScanner?.invalidateCache();
         deps.cursorScanner?.invalidateCache();
         deps.mcodeScanner?.invalidateCache();
+        deps.agyScanner?.invalidateCache();
         emitArchiveFileEvents(deps, record, "create");
         archiveResult = { physical: true, action: "restore", record };
       } catch (error) {

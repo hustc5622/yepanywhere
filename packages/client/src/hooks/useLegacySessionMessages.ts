@@ -1262,6 +1262,7 @@ export function useLegacySessionMessages(
       if (
         data.session.provider === "pi" ||
         data.session.provider === "mcode" ||
+        data.session.provider === "agy" ||
         data.session.provider === "dsh"
       ) {
         // Pi and MiniMax Code cannot correlate their persisted entry ids with live
@@ -1286,6 +1287,7 @@ export function useLegacySessionMessages(
       if (
         data.session.provider !== "pi" &&
         data.session.provider !== "mcode" &&
+        data.session.provider !== "agy" &&
         data.session.provider !== "dsh"
       ) {
         applySessionMetadata(data.session);

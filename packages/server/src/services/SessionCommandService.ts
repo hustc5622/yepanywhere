@@ -74,6 +74,7 @@ import type {
   PermissionMode,
   UserMessage,
 } from "../sdk/types.js";
+import type { AgySessionReader } from "../sessions/agy-reader.js";
 import { CodexSessionReader } from "../sessions/codex-reader.js";
 import { computeCodexRollbackNumTurns } from "../sessions/codex-rollback.js";
 import type { DshSessionReader } from "../sessions/dsh-reader.js";
@@ -126,6 +127,7 @@ export interface SessionCommandServiceDeps {
   piSessionsDir?: string;
   piReaderFactory?: (projectPath: string) => PiSessionReader;
   mcodeReaderFactory?: (projectPath: string) => McodeSessionReader;
+  agyReaderFactory?: (projectPath: string) => AgySessionReader;
   dshReaderFactory?: (projectPath: string) => DshSessionReader;
   enabledProviders?: readonly string[];
   /** Uploads root that attachment references resolve against. */
@@ -2557,6 +2559,7 @@ export class SessionCommandService {
       piSessionsDir: this.deps.piSessionsDir,
       piReaderFactory: this.deps.piReaderFactory,
       mcodeReaderFactory: this.deps.mcodeReaderFactory,
+      agyReaderFactory: this.deps.agyReaderFactory,
       dshReaderFactory: this.deps.dshReaderFactory,
       sessionMetadataService: this.deps.sessionMetadataService,
     };
