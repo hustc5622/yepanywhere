@@ -47,6 +47,29 @@ function isLocalFilePath(href: string): boolean {
   return basename.includes(".");
 }
 
+/**
+ * Convert a `file://` URL (as emitted by Codex and other agents) into the
+ * absolute local path it names, so it renders like a plain absolute path link.
+ * Only local hosts (`file:///...`, `file://localhost/...`) are accepted.
+ */
+function fileUrlToLocalPath(href: string): string | null {
+  const match = /^file:\/\/(?:localhost)?(\/[^?#]*)$/i.exec(href.trim());
+  if (!match?.[1]) return null;
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(match[1]);
+  } catch {
+    return null;
+  }
+  if (decoded.startsWith("//") || /\p{C}/u.test(decoded)) return null;
+  return isLocalFilePath(decoded) ? decoded : null;
+}
+
+/** Link destination with `file://` URLs normalized to absolute local paths. */
+function normalizeLocalHref(href: string): string {
+  return fileUrlToLocalPath(href) ?? href;
+}
+
 /** Relative file links are resolved against the session project by the client. */
 function getRelativeFilePath(href: string): string | null {
   let decoded: string;
@@ -308,7 +331,8 @@ function createRenderer(
       return renderCodespan(text, options.linkStyle);
     },
     link(this: RendererThis<string, string>, token: Tokens.Link) {
-      const { href, title } = token;
+      const { title } = token;
+      const href = normalizeLocalHref(token.href);
       if (options.linkStyle === "document") {
         return renderDocumentLink(this.parser.parseInline(token.tokens), token);
       }
@@ -342,7 +366,8 @@ function createRenderer(
       return `<a href="${escapedHref}"${titleAttr}>${renderedText}</a>`;
     },
     image(token: Tokens.Image) {
-      const { href, title, text } = token;
+      const { title, text } = token;
+      const href = normalizeLocalHref(token.href);
       const documentStyle = options.linkStyle === "document";
       // Check for local file paths first — rewrite to clickable media placeholder
       if (isLocalFilePath(href)) {
@@ -389,7 +414,8 @@ function createRenderer(
 
 /** Standard Markdown link rendering for previewed documents. */
 function renderDocumentLink(renderedLabel: string, token: Tokens.Link): string {
-  const { href, title } = token;
+  const { title } = token;
+  const href = normalizeLocalHref(token.href);
   if (isLocalFilePath(href)) {
     const mediaType = getMediaPreviewKind(href.trim());
     if (mediaType) {

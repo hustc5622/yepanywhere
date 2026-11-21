@@ -185,6 +185,34 @@ describe("markdown content preservation", () => {
     expect(html).toContain(">[Run](https://example.com/runs/10577)</a>");
     expect(html).toContain(">[报告](/tmp/report.md)</a>");
   });
+
+  it("treats local file:// URLs as absolute local file links", () => {
+    const source =
+      "[下载简历.docx](<file:///Users/me/out/崔杰-简历%20v2.docx>)";
+    const html = renderSafeMarkdown(source);
+    expect(html).toContain('class="local-file-link"');
+    expect(html).toContain('data-file-path="/Users/me/out/崔杰-简历 v2.docx"');
+    expect(html).toContain(
+      ">[下载简历.docx](&lt;file:///Users/me/out/崔杰-简历%20v2.docx&gt;)</a>",
+    );
+
+    const media = renderSafeMarkdown("[图](file://localhost/tmp/a.png)");
+    expect(media).toContain('class="local-media-link"');
+    expect(media).toContain("path=%2Ftmp%2Fa.png");
+
+    const doc = renderSafeMarkdown("[简历](file:///tmp/cv.docx)", {
+      linkStyle: "document",
+    });
+    expect(doc).toContain('data-file-path="/tmp/cv.docx"');
+    expect(doc).toContain(">简历</a>");
+  });
+
+  it.each(["[远程](file://server/share/a.docx)", "[目录](file:///tmp/dir)"])(
+    "keeps unsupported file URLs inert: %s",
+    (markdown) => {
+      expect(renderSafeMarkdown(markdown)).toBe(`<p>${markdown}</p>`);
+    },
+  );
 });
 
 describe("document link style (file previews)", () => {
