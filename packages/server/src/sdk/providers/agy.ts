@@ -63,6 +63,7 @@ import {
   parseAgyModelsOutput,
   resolveAgyModelChoice,
 } from "./agy-models.js";
+import { ensureAgySplitProxy } from "./agy-network.js";
 import {
   buildAgyElicitationContent,
   planAgyQuestionnaire,
@@ -548,7 +549,7 @@ export class AgyProvider implements AgentProvider {
       const { stdout } = await execFileAsync(agyPath, ["models"], {
         timeout: MODELS_TIMEOUT_MS,
         maxBuffer: 4 * 1024 * 1024,
-        env: { ...process.env, ...agySpawnEnv(agyPath) },
+        env: { ...process.env, ...(await agySpawnEnv(agyPath)) },
       });
       const models = buildAgyModelCatalog(parseAgyModelsOutput(stdout));
       if (models.length > 0) return { models, authenticated: true };
@@ -708,7 +709,7 @@ export class AgyProvider implements AgentProvider {
         command: agyPath,
         args: ["acp"],
         cwd: options.cwd,
-        env: agySpawnEnv(agyPath),
+        env: await agySpawnEnv(agyPath),
       });
       await client.initialize(AGY_CLIENT_CAPABILITIES);
 
@@ -1197,12 +1198,18 @@ export const DEFAULT_AGY_NO_PROXY =
  * the shell PATH that holds `~/.local/bin`; agy's own subprocesses (git,
  * shell commands) need a sensible PATH.
  *
- * agy's traffic is Google-bound, so a host that reaches Google only through a
- * proxy sets `YEP_AGY_PROXY` (see `scripts/install-launchagents.sh`). The
- * variable is agy-only: other providers keep the runtime's own environment,
- * and without the opt-in nothing is rewritten here.
+ * agy's model traffic is Google-bound, so a host that wants it on a specific
+ * exit sets `YEP_AGY_PROXY` (see `scripts/install-launchagents.sh`). agy is
+ * then pointed at a loopback split proxy (`agy-network.ts`): only Google
+ * endpoints use `YEP_AGY_PROXY`, while the tools and MCP servers agy starts,
+ * which inherit the variable, keep this machine's direct network. Generic
+ * HTTP/ALL proxy variables are cleared for the same reason. Other providers
+ * keep the runtime's own environment, and without the opt-in nothing is
+ * rewritten here.
  */
-export function agySpawnEnv(agyPath: string): Record<string, string> {
+export async function agySpawnEnv(
+  agyPath: string,
+): Promise<Record<string, string>> {
   const binDir = dirname(agyPath);
   const current = process.env.PATH ?? "";
   const parts = current.split(delimiter);
@@ -1215,10 +1222,12 @@ export function agySpawnEnv(agyPath: string): Record<string, string> {
   };
   const proxy = process.env.YEP_AGY_PROXY?.trim();
   if (proxy) {
-    env.HTTP_PROXY = proxy;
-    env.HTTPS_PROXY = proxy;
-    env.ALL_PROXY = proxy;
-    env.NO_PROXY = process.env.NO_PROXY?.trim() || DEFAULT_AGY_NO_PROXY;
+    const split = await ensureAgySplitProxy(proxy);
+    env.HTTPS_PROXY = env.https_proxy = split;
+    env.HTTP_PROXY = env.http_proxy = "";
+    env.ALL_PROXY = env.all_proxy = "";
+    env.NO_PROXY = env.no_proxy =
+      process.env.NO_PROXY?.trim() || DEFAULT_AGY_NO_PROXY;
   }
   return env;
 }

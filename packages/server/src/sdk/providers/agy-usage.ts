@@ -55,7 +55,7 @@ const defaultRunner: AgyCommandRunner = async (agyPath, command) => {
       timeout: COMMAND_TIMEOUT_MS,
       maxBuffer: 4 * 1024 * 1024,
       encoding: "utf-8",
-      env: { ...process.env, ...agySpawnEnv(agyPath) },
+      env: { ...process.env, ...(await agySpawnEnv(agyPath)) },
     },
   );
   return { stdout, stderr };

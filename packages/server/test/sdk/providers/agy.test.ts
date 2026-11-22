@@ -297,6 +297,10 @@ describe("agy spawn env", () => {
     "HTTPS_PROXY",
     "ALL_PROXY",
     "NO_PROXY",
+    "http_proxy",
+    "https_proxy",
+    "all_proxy",
+    "no_proxy",
   ];
   const saved = Object.fromEntries(keys.map((key) => [key, process.env[key]]));
 
@@ -307,26 +311,33 @@ describe("agy spawn env", () => {
     }
   });
 
-  it("routes agy through YEP_AGY_PROXY and keeps local hosts direct", () => {
+  it("routes agy through a loopback split proxy and clears generic proxies", async () => {
     process.env.YEP_AGY_PROXY = "http://127.0.0.1:8485";
     Reflect.deleteProperty(process.env, "HTTPS_PROXY");
     Reflect.deleteProperty(process.env, "NO_PROXY");
-    const env = agySpawnEnv("/tmp/agy");
-    expect(env.HTTP_PROXY).toBe("http://127.0.0.1:8485");
-    expect(env.HTTPS_PROXY).toBe("http://127.0.0.1:8485");
-    expect(env.ALL_PROXY).toBe("http://127.0.0.1:8485");
+    const env = await agySpawnEnv("/tmp/agy");
+    // agy and the tools it starts see the local splitter, never the upstream.
+    expect(env.HTTPS_PROXY).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
+    expect(env.https_proxy).toBe(env.HTTPS_PROXY);
+    expect(env.HTTPS_PROXY).not.toContain("8485");
+    expect(env.HTTP_PROXY).toBe("");
+    expect(env.ALL_PROXY).toBe("");
     expect(env.NO_PROXY).toBe(DEFAULT_AGY_NO_PROXY);
     expect(env.PATH?.split(":")[0]).toBe("/tmp");
+    // One splitter per process and upstream.
+    expect((await agySpawnEnv("/tmp/agy")).HTTPS_PROXY).toBe(env.HTTPS_PROXY);
   });
 
-  it("keeps an explicit NO_PROXY and never invents a proxy", () => {
+  it("keeps an explicit NO_PROXY and never invents a proxy", async () => {
     process.env.YEP_AGY_PROXY = "http://127.0.0.1:8485";
     process.env.NO_PROXY = "localhost,example.test";
-    expect(agySpawnEnv("/tmp/agy").NO_PROXY).toBe("localhost,example.test");
+    expect((await agySpawnEnv("/tmp/agy")).NO_PROXY).toBe(
+      "localhost,example.test",
+    );
 
     Reflect.deleteProperty(process.env, "YEP_AGY_PROXY");
     process.env.HTTPS_PROXY = "http://proxy.example:3128";
-    const env = agySpawnEnv("/tmp/agy");
+    const env = await agySpawnEnv("/tmp/agy");
     // Without the opt-in agy inherits whatever the host already has.
     expect(env.HTTPS_PROXY).toBeUndefined();
     expect(env.HTTP_PROXY).toBeUndefined();

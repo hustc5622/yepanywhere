@@ -118,7 +118,7 @@ export class AgyLoginService {
 
     const child = spawn(agyPath, ["acp", "--login"], {
       stdio: ["pipe", "pipe", "pipe"],
-      env: { ...process.env, ...agySpawnEnv(agyPath) },
+      env: { ...process.env, ...(await agySpawnEnv(agyPath)) },
     });
     const login: ActiveLogin = {
       state: {
@@ -236,7 +236,7 @@ export class AgyLoginService {
         command: agyPath,
         args: ["acp"],
         cwd: process.cwd(),
-        env: agySpawnEnv(agyPath),
+        env: await agySpawnEnv(agyPath),
       });
       const init = await client.initialize({});
       const auth = (init.agentCapabilities as { auth?: { logout?: unknown } })

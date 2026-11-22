@@ -36,20 +36,32 @@ Antigravity CLI（命令 `agy`，provider 名 `agy`）是 Google 面向个人账
 - 读取时机：卡片展开且已登录时才读取；只缓存成功结果（5 分钟），并发请求共用一次读取；「刷新」带 `fresh=1` 强制重读。一次读取约 6 秒。
 - 接口：`GET /api/providers/agy/usage[?fresh=1]`（受 `ENABLED_PROVIDERS` 控制）。实现：`packages/server/src/sdk/providers/agy-usage.ts`，类型在 `packages/shared/src/agy.ts`。
 
-## 代理
+## 代理（只有模型流量走远端）
 
-agy 的流量全在 Google 域名下。有些主机（例如国内网络）只有通过代理才能到 Google，而 launchd 启动的 Yep 进程不继承 shell 里的 `HTTPS_PROXY`。这种情况下在 `.env.deploy.local` 写：
+agy 的模型、登录和额度流量都在 Google 域名下（推理是 `daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent`）。有的主机只能通过代理访问 Google，有的需要固定出口地区。另外，launchd 启动的 Yep 进程不会继承 shell 里的 `HTTPS_PROXY`。遇到这些情况，在 `.env.deploy.local` 里写：
 
 ```bash
-YEP_AGY_PROXY=http://127.0.0.1:8485
+YEP_AGY_PROXY=http://127.0.0.1:8486          # 或带认证的远端 http://user:pass@host:port
 NO_PROXY=localhost,127.0.0.1,::1,*.local,api.deepseek.com
 ```
 
-`scripts/install-launchagents.sh` 把这两个变量写进 server 和 runtime 的 LaunchAgent，`agySpawnEnv` 再折成 `HTTP_PROXY`/`HTTPS_PROXY`/`ALL_PROXY`，只传给 agy 子进程（会话、登录、`/usage`、`/credits`）。因此：
+`scripts/install-launchagents.sh` 会把这两个变量写进 server 和 runtime 的 LaunchAgent。agy 是闭源程序，没有类似 Codex `openai_base_url` 的地址覆盖，而且它启动的 shell 命令和 MCP 会继承全部代理变量。因此 Yep 不把 `YEP_AGY_PROXY` 直接交给 agy，而是在进程内起一个只监听 `127.0.0.1` 的分流 CONNECT 代理（`packages/server/src/sdk/providers/agy-network.ts`，每个进程一个，首次启动 agy 时创建）：
 
-- 其他 provider（Claude、Codex、Pi 等）继续用 runtime 自己的网络环境，不会被 agy 的代理牵走。
+| 目标 | 路径 |
+| --- | --- |
+| `googleapis.com`、`google.com`、`gstatic.com`、`googleusercontent.com` 及其子域 | 分流代理 → `YEP_AGY_PROXY` |
+| 其他域名（MCP、工具访问的站点、内网地址） | 分流代理 → 本机直连 |
+
+`agySpawnEnv` 只把分流代理地址设为 agy 子进程（会话、登录、`/usage`、`/credits`）的 `HTTPS_PROXY`/`https_proxy`，同时清空 `HTTP_PROXY`/`ALL_PROXY`（大小写两种写法）。因此：
+
+- agy 启动的工具即使继承了 `HTTPS_PROXY`，访问非 Google 域名时也走本机网络，不会被带到远端出口。工具访问 Google 域名时会和 agy 一样走远端。
+- 远端代理连不上或拒绝时，分流代理返回 502，不会改成直连，避免模型请求在你不知情时换了出口。
+- 分流代理只处理 CONNECT（HTTPS），没有认证。它只监听回环地址，远端代理的凭据只保存在 Yep 进程里，不会出现在 agy 的环境变量中。
+- 其他 provider（Claude、Codex、Pi 等）继续用 runtime 自己的网络环境。
 - 没设 `YEP_AGY_PROXY` 时不改写任何变量，agy 继承宿主已有的代理设置。
-- `NO_PROXY` 没设时用内置默认值（本机回环与 `*.local` 直连），避免本地 ACP 或网关被代理绕一圈。
+- `NO_PROXY` 没设时用内置默认值（本机回环与 `*.local` 直连）。
+
+本机与 home 的实际部署（2026-11）：home 的 NinjaDesktop（mihomo）在「覆写增强 → 覆写配置」里加了一个 `listeners` 条目 `agy-us`（`127.0.0.1:8486`，`proxy` 固定为美国节点）。home 的 tinyproxy（`18485`，经 frp 暴露在 `47.95.254.240:18485`）用按域名的 `upstream` 把上表的 Google 域名转到 8486，其余仍转到 Clash 的规则端口 8485（Codex 走这里，出口是新加坡）。home 的 Yep 用 `YEP_AGY_PROXY=http://127.0.0.1:8486`。本机 Yep 用与 Codex 相同的那个带认证的 `47.95.254.240:18485` 地址，凭据从 `~/.codex_proxy_env` 复制到 git-ignored 的 `.env.deploy.local`，不提交到仓库。
 
 ## 会话与接管
 
@@ -85,11 +97,10 @@ NO_PROXY=localhost,127.0.0.1,::1,*.local,api.deepseek.com
 - 逐字流式显示正文：ACP 会推送正文增量，但为了和磁盘记录对齐，展示层按 step 整段显示。ACP 也不推送 thinking，thinking 只在历史里出现。
 - 多账号：未实现（`--app-data-dir` 能否隔离 keychain 还没验证）。界面也不显示账号邮箱：agy 不对外提供邮箱，只在日志里出现。
 - MCP 注入：ACP 的 `session/new` 支持 `mcpServers`，HTTP 类 MCP 需要 `--process-per-session`，目前尚未接入。
-- 远端代理的按域名分流：agy 遵守 `HTTPS_PROXY`，流量都在 `*.googleapis.com`（推理是 `daily-cloudcode-pa.googleapis.com/v1internal:streamGenerateContent`）。agy 没有类似 Codex `openai_base_url` 的地址覆盖，所以「只有推理走远端、其余直连」仍需要本地按域名分流的转发，尚未实现。整只 agy 走代理见下面「代理」。
 - 子 agent transcript 关联（`invoke_subagent`，会话目录里有 `parent_conversation_id`）。
 
 ## 参考与验证
 
-- 单元测试：`packages/server/test/sdk/providers/agy.test.ts`、`agy-login.test.ts`（用模拟 agy 脚本覆盖登录流程）、`agy-usage.test.ts`（真实 `/usage`、`/credits` 输出作 fixture）、`agy.test.ts` 的 `agy spawn env`（`YEP_AGY_PROXY` 只作用于 agy）、`packages/server/test/sessions/agy-store.test.ts`、`packages/server/test/routes/providers.test.ts`、`packages/client/src/components/__tests__/AgyAccountCard.test.tsx`。
+- 单元测试：`packages/server/test/sdk/providers/agy.test.ts`、`agy-login.test.ts`（用模拟 agy 脚本覆盖登录流程）、`agy-usage.test.ts`（真实 `/usage`、`/credits` 输出作 fixture）、`agy.test.ts` 的 `agy spawn env`（`YEP_AGY_PROXY` 只作用于 agy）、`agy-network.test.ts`（分流代理：Google 域名走认证上游、其余直连、上游失败不回退）、`packages/server/test/sessions/agy-store.test.ts`、`packages/server/test/routes/providers.test.ts`、`packages/client/src/components/__tests__/AgyAccountCard.test.tsx`。
 - 真实联调：`npx tsx scripts/smoke-agy-provider.ts [cwd]`。依次覆盖新建、续接和工具审批，再做问卷测试，最后用 reader 读回历史。脚本会发起模型请求（默认 Gemini 3.8 Flash low），并在 agy 历史里留下测试会话，运行前需要用户授权。可用环境变量：`SMOKE_RESUME`、`SMOKE_PROMPT`、`SMOKE_DENY=1`、`SMOKE_MODEL`、`SMOKE_EFFORT`、`SMOKE_MODE`、`SMOKE_MODELS=1`、`SMOKE_QUESTION=0`。
 - 升级 `agy` 后，重新运行 `references/antigravity/probe/step*.mjs`（需要登录，会发起少量请求），对比新旧 trace，再核对 `agy*.ts`。
