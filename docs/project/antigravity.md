@@ -45,7 +45,7 @@ YEP_AGY_PROXY=http://127.0.0.1:8486          # 或带认证的远端 http://user
 NO_PROXY=localhost,127.0.0.1,::1,*.local,api.deepseek.com
 ```
 
-`scripts/install-launchagents.sh` 会把这两个变量写进 server 和 runtime 的 LaunchAgent。agy 是闭源程序，没有类似 Codex `openai_base_url` 的地址覆盖，而且它启动的 shell 命令和 MCP 会继承全部代理变量。因此 Yep 不把 `YEP_AGY_PROXY` 直接交给 agy，而是在进程内起一个只监听 `127.0.0.1` 的分流 CONNECT 代理（`packages/server/src/sdk/providers/agy-network.ts`，每个进程一个，首次启动 agy 时创建）：
+`scripts/install-launchagents.sh` 会把这两个变量写进 server 和 runtime 的 LaunchAgent。登录、`/usage` 和模型目录在 8022 server 进程里执行，所以只要 server plist 里的值和 `.env.deploy.local` 不一致，`scripts/deploy.sh` 就会在重启 server 前同步它，比较时不会打印代理地址。runtime plist 在 runtime 重启（`--restart-runtime`）时刷新。agy 是闭源程序，没有类似 Codex `openai_base_url` 的地址覆盖，而且它启动的 shell 命令和 MCP 会继承全部代理变量。因此 Yep 不把 `YEP_AGY_PROXY` 直接交给 agy，而是在进程内起一个只监听 `127.0.0.1` 的分流 CONNECT 代理（`packages/server/src/sdk/providers/agy-network.ts`，每个进程一个，首次启动 agy 时创建）：
 
 | 目标 | 路径 |
 | --- | --- |

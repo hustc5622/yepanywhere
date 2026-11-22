@@ -677,6 +677,31 @@ check_reports_preflight() {
   fi
 }
 
+# agy login, /usage and the model catalog run in the 8022 server process, not
+# only in the runtime worker, so a changed YEP_AGY_PROXY/NO_PROXY must reach the
+# server plist too. Values are compared, never printed: the proxy URL may carry
+# credentials.
+check_agy_proxy_preflight() {
+  server_deploy_restarts || return 0
+  [[ -n "${YEP_AGY_PROXY:-}" ]] || return 0
+  [[ "$(uname -s)" == "Darwin" ]] || return 0
+
+  local server_label="${YEP_LAUNCHD_SERVER_LABEL:-com.yueyuan.yepanywhere.server}"
+  local plist="$HOME/Library/LaunchAgents/$server_label.plist"
+  [[ -f "$plist" ]] || return 0
+
+  local key current
+  for key in YEP_AGY_PROXY NO_PROXY; do
+    [[ -n "${!key:-}" ]] || continue
+    current="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$key" "$plist" 2>/dev/null || true)"
+    if [[ "$current" != "${!key}" ]]; then
+      mark_server_launchagent_sync_needed "agy proxy"
+      dim "agy proxy config: LaunchAgent $server_label will be updated ($key changed)"
+      return 0
+    fi
+  done
+}
+
 ensure_server_bundle_for_launchagent_sync() {
   local cli_js="$REPO_ROOT/dist/npm-package/dist/cli.js"
 
@@ -1011,6 +1036,7 @@ if ! $DO_DEV_SERVER; then
   check_session_title_preflight
   log "Checking reports deploy configuration ..."
   check_reports_preflight
+  check_agy_proxy_preflight
 fi
 
 if $DO_DEV_SERVER || { $RUN_CHECKS && { $DO_SERVER || $DO_CODEX_BRIDGE || server_args_contain "--restart-runtime"; }; }; then
