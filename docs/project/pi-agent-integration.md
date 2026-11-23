@@ -151,6 +151,17 @@ Supervisor 先用随机临时 ID 创建 `Process`，Pi 的真实 ID 要等 provi
 `/metadata` 按 `sessionIdAliases` / 进程当前 ID 返回真实 `session.id`；
 访问记录与已读标记在写入时解析别名，并在 ID 变更时迁移。
 
+### agent 自己发起的轮次与轮次状态
+
+扩展可以在 Yep 没有发 prompt 时启动新的一轮：`pi.sendMessage(..., { triggerTurn: true })`，例如 pi-subagents 异步子任务完成后的唤醒、goal 续跑。Pi RPC 照常输出 `agent_start` … `agent_settled`。Provider 在两次提问之间也读取 RPC 事件：
+
+- 空闲时收到 `agent_start`，发出 `system/turn_started`（`origin: "agent"`），`Process` 切到运行中，直到 `agent_settled` 的 `result` 才回到空闲；`agent_settled.aborted` 映射为 `turnStatus: "interrupted"`。空闲时的 `compaction_start` 同样包成一轮。
+- 此前这些事件留在 RPC 队列里没人读：会话显示空闲、transcript 停在一半就被判成中断；下一次提问还会先读到残留的 `agent_settled`，把新的一轮提前结束。
+- 提问一律带 `streamingBehavior: "followUp"`：如果扩展恰好在发送前启动了一轮，提问并入那一轮（Pi 空闲时忽略这个参数），不会被 Pi 以「Agent is already processing」拒绝。
+- 扩展命令（如 `/goal`）回应 `disposition: "handled"` 时没有自己的一轮，Yep 直接发 `result` 收尾；命令触发的一轮按 agent 自己发起的轮次处理。此前这种提问会一直等不到 `agent_settled`。
+
+会话的「上一轮状态」（`lastTurnStatus`）从原生记录派生：`stop`/`length` 为完成，`error` 为失败，`aborted`（以及记成错误的 abort）为**已中断**；记录停在一轮中间（结尾是提问、工具结果或 `toolUse`）为 **`incomplete`（未完成）**。同样的形状在 agent 仍在写入时也会出现，所以 `incomplete` 只在没有进程持有、也没有外部 agent 运行这个会话时展示（`presentLastTurnStatus`）。agy、MiniMax Code、dsh 复用同一套派生。
+
 ## 当前边界
 
 - Yep 创建的 Pi 会话具备 RPC 控制和远程审批；外部终端 Pi 会话可被发现并

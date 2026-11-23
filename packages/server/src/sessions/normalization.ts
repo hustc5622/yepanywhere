@@ -497,7 +497,13 @@ export function normalizeSession(
                 deferThinking,
               }).messages,
             );
-      return sanitizePublicNormalizedSession({ ...summary, messages });
+      return sanitizePublicNormalizedSession({
+        ...summary,
+        branchState: loaded.branchState,
+        messages: loaded.branchState
+          ? annotateBranchMessages(messages, loaded.branchState)
+          : messages,
+      });
     }
     case "mcode":
     case "dsh": {
@@ -888,9 +894,7 @@ function finishPiDerivation(
   const stopReason = accumulator.lastAssistant?.stopReason;
   // Only these stop reasons hand control back to the user. `toolUse` (and the
   // non-final `pending`/`deferred`) mean the agent was still mid-turn, so a
-  // persisted session ending there was cut short rather than completed — it
-  // used to be reported as "completed" because any last assistant message
-  // counted as one.
+  // persisted session ending there stops mid-turn rather than completed.
   const settledStopReason =
     stopReason === "stop" || stopReason === "length" || stopReason === "error";
   // An `error` turn whose message is a cancellation was interrupted, not
@@ -899,19 +903,26 @@ function finishPiDerivation(
   const abortedAsError =
     stopReason === "error" &&
     isPiAbortErrorMessage(accumulator.lastAssistant?.errorMessage);
-  const lastTurnStatus =
+  const endsMidTurn =
     accumulator.lastConversationRole === "user" ||
-    accumulator.lastConversationRole === "toolResult"
-      ? ("interrupted" as const)
-      : stopReason === "error"
-        ? abortedAsError
-          ? ("interrupted" as const)
-          : ("failed" as const)
-        : !accumulator.lastAssistant
-          ? undefined
-          : settledStopReason
-            ? ("completed" as const)
-            : ("interrupted" as const);
+    accumulator.lastConversationRole === "toolResult";
+  // `interrupted` needs an explicit stop on record (`aborted`, or an abort
+  // logged as an error). A history that merely stops mid-turn is
+  // `incomplete`: the same shape is written while the agent is still working,
+  // so only the caller, which knows whether a process is live, may present it.
+  const lastTurnStatus = endsMidTurn
+    ? ("incomplete" as const)
+    : stopReason === "error"
+      ? abortedAsError
+        ? ("interrupted" as const)
+        : ("failed" as const)
+      : !accumulator.lastAssistant
+        ? undefined
+        : settledStopReason
+          ? ("completed" as const)
+          : stopReason === "aborted"
+            ? ("interrupted" as const)
+            : ("incomplete" as const);
 
   return {
     model: accumulator.model,
@@ -1262,6 +1273,11 @@ export function convertPiSession(
                 tool_use_id: message.toolCallId,
                 content,
                 ...(message.isError ? { is_error: true } : {}),
+                ...(typeof message.durationMs === "number" &&
+                Number.isFinite(message.durationMs) &&
+                message.durationMs >= 0
+                  ? { durationMs: message.durationMs }
+                  : {}),
               },
             ],
           },

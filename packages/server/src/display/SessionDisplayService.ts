@@ -455,6 +455,29 @@ function displayTextIdentity(message: RecordValue): string {
   return String(asRecord(message.message)?.id ?? raw);
 }
 
+/**
+ * Earliest live timestamp of each tool call in the overlay. A call can be
+ * re-emitted as its input fills in; the first emission is when it started.
+ */
+function liveToolStarts(messages: Iterable<RecordValue>): Map<string, string> {
+  const starts = new Map<string, string>();
+  for (const message of messages) {
+    if (typeof message.timestamp !== "string") continue;
+    const at = Date.parse(message.timestamp);
+    if (!Number.isFinite(at)) continue;
+    const content = messageContent(message);
+    if (!Array.isArray(content)) continue;
+    for (const value of content) {
+      const block = asRecord(value);
+      if (block?.type !== "tool_use" || typeof block.id !== "string") continue;
+      const previous = starts.get(block.id);
+      if (!previous || at < Date.parse(previous))
+        starts.set(block.id, message.timestamp);
+    }
+  }
+  return starts;
+}
+
 /** Retained replay overlay contains display facts/previews, never raw bodies. */
 export function compactDisplayMessage(message: RecordValue): RecordValue {
   const result: RecordValue = {};
@@ -874,6 +897,7 @@ export class SessionDisplayService {
         state === "completed" ||
         state === "interrupted" ||
         state === "failed" ||
+        state === "incomplete" ||
         state === "unknown"
       )
     ) {
@@ -1860,6 +1884,8 @@ export class SessionDisplayService {
         model.message(message, true);
     entry.bootstrapReplay.clear();
     model.setRuntime(page.activity);
+    if (page.provider === "agy")
+      model.adoptLiveToolStarts(liveToolStarts(entry.overlay.values()));
     for (const message of entry.overlay.values()) {
       if (
         message.subtype === "turn_complete" ||
@@ -1923,7 +1949,7 @@ export class SessionDisplayService {
       model.setRuntime("running");
     if (
       (controlState === "hold" || controlState === "waiting-input") &&
-      !["completed", "interrupted", "failed"].includes(
+      !["completed", "interrupted", "failed", "incomplete"].includes(
         model.snapshot().activity.state,
       )
     )
@@ -2242,6 +2268,34 @@ export class SessionDisplayService {
     entry.snapshot = entry.model.snapshot(entry.snapshot.olderCursor);
     this.emit(entry, "display-patch", patch);
   }
+  private async attachActiveProcess(
+    entry: Entry,
+    requireListeners = true,
+  ): Promise<void> {
+    if (entry.sourceSubscription || entry.selection.branchId) return;
+    const process =
+      !requireListeners || entry.listeners.size
+        ? await this.options.runtime.getProcessForSession(
+            entry.selection.sessionId,
+          )
+        : null;
+    if (!process || entry.controller.signal.aborted || entry.sourceSubscription)
+      return;
+    // A different process started after this projection was built
+    // (idle resume, settings restart). Its buffered events, including
+    // the prompt it was started with, were emitted before this attach
+    // and are absent from native history that persists them late, so
+    // they are live news here. Resubscribing to the same process keeps
+    // treating replay as already-seen history.
+    const unseenProcess = process.id !== entry.sourceProcessId;
+    entry.sourceProcessId = process.id;
+    await this.subscribeSource(entry, (type, data) =>
+      this.event(entry, type, unseenProcess ? asLiveReplay(type, data) : data),
+    );
+    // Reconcile the recovered events against what native history
+    // already persisted, instead of waiting for its next change.
+    if (unseenProcess) await this.refresh(entry, true);
+  }
   private poll(entry: Entry): void {
     if (entry.controller.signal.aborted) return;
     entry.pollTimer = setTimeout(async () => {
@@ -2263,31 +2317,7 @@ export class SessionDisplayService {
         )
           await this.refresh(entry, false);
         if (!entry.sourceSubscription && !entry.selection.branchId) {
-          const process = entry.listeners.size
-            ? await this.options.runtime.getProcessForSession(
-                entry.selection.sessionId,
-              )
-            : null;
-          if (process) {
-            // A different process started after this projection was built
-            // (idle resume, settings restart). Its buffered events, including
-            // the prompt it was started with, were emitted before this attach
-            // and are absent from native history that persists them late, so
-            // they are live news here. Resubscribing to the same process keeps
-            // treating replay as already-seen history.
-            const unseenProcess = process.id !== entry.sourceProcessId;
-            entry.sourceProcessId = process.id;
-            await this.subscribeSource(entry, (type, data) =>
-              this.event(
-                entry,
-                type,
-                unseenProcess ? asLiveReplay(type, data) : data,
-              ),
-            );
-            // Reconcile the recovered events against what native history
-            // already persisted, instead of waiting for its next change.
-            if (unseenProcess) await this.refresh(entry, true);
-          }
+          await this.attachActiveProcess(entry);
         }
       } catch {
         this.emit(entry, "display-sync", { state: "retrying" });
@@ -2325,9 +2355,25 @@ export class SessionDisplayService {
     signal?: AbortSignal,
     known?: SessionDisplayKnownView,
   ): Promise<{ cleanup(): void }> {
-    const entry = await this.get(selection);
+    let cacheState: SessionDisplayCacheState | undefined;
+    const entry = await this.get(selection, {
+      onCacheState: (state) => {
+        cacheState = state;
+      },
+    });
     if (signal?.aborted) return { cleanup() {} };
     clearTimeout(entry.expiry);
+    if (cacheState === "hit") {
+      try {
+        await this.refresh(entry, false);
+        if (!entry.sourceSubscription && !entry.selection.branchId) {
+          await this.attachActiveProcess(entry, false);
+        }
+      } catch {
+        // Keep serving the current snapshot; polling will retry.
+      }
+      if (signal?.aborted) return { cleanup() {} };
+    }
     this.flush(entry);
     const connected = entry.controls.get("connected");
     const status = asRecord(entry.controls.get("status"));
@@ -2403,7 +2449,14 @@ export class SessionDisplayService {
     reset = false,
     observer?: SessionDisplayReadObserver,
   ): Promise<SessionDisplaySnapshot> {
-    const entry = await this.get(selection, observer);
+    let cacheState: SessionDisplayCacheState | undefined;
+    const entry = await this.get(selection, {
+      timing: observer?.timing,
+      onCacheState: (state) => {
+        cacheState = state;
+        observer?.onCacheState?.(state);
+      },
+    });
     if (reset) {
       entry.overlay.clear();
       entry.cursorPendingThoughts.length = 0;
@@ -2412,6 +2465,8 @@ export class SessionDisplayService {
       await timed(observer?.timing, "replay", () =>
         this.recoverCursorHistory(entry),
       );
+    } else if (cacheState === "hit") {
+      await this.refresh(entry, false, observer?.timing);
     }
     this.flush(entry);
     if (!entry.snapshot) throw new Error("Display snapshot is not ready");

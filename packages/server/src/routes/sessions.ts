@@ -127,6 +127,7 @@ import {
   deriveSessionRuntime,
   pendingInputTypeFromProcess,
   pendingInputTypeFromRequest,
+  presentLastTurnStatus,
 } from "../sessions/session-runtime.js";
 import {
   findOwningRemoteExecutor,
@@ -1004,6 +1005,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       return {
         provider: process?.provider ?? bridgeView?.session.provider,
         projectId: process?.projectId ?? bridgeView?.session.projectId,
+        owner: process ? "self" : externalActive ? "external" : "none",
         toolsMayBeActive:
           process?.state === "in-turn" ||
           process?.state === "waiting-input" ||
@@ -1485,7 +1487,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         compactEvents: sessionSummary?.compactEvents,
         lastTurnStatus: bridgedSession
           ? bridgedSession.session.lastTurnStatus
-          : sessionSummary?.lastTurnStatus,
+          : presentLastTurnStatus(sessionSummary?.lastTurnStatus, ownership),
         lastErrorMessage: bridgedSession
           ? bridgedSession.session.lastErrorMessage
           : sessionSummary?.lastErrorMessage,
@@ -2628,7 +2630,7 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             : undefined),
         lastTurnStatus: bridgedSession
           ? bridgedSession.session.lastTurnStatus
-          : session.lastTurnStatus,
+          : presentLastTurnStatus(session.lastTurnStatus, ownership),
         lastErrorMessage: bridgedSession
           ? bridgedSession.session.lastErrorMessage
           : session.lastErrorMessage,
@@ -2705,18 +2707,24 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
     return c.json(result.body, result.status);
   });
 
-  // Dedicated control endpoint: never resume, steer, queue, or acquire parent ownership.
+  // Dedicated control endpoint: never steer, queue, or acquire parent
+  // ownership. Only `create` may restore an inactive parent process (without
+  // a user turn); sessions another process controls are never restored.
   routes.post("/sessions/:sessionId/side-conversation", async (c) => {
     const parsed = SideConversationRequestSchema.safeParse(
       await c.req.json().catch(() => null),
     );
     if (!parsed.success)
       return c.json({ error: "Invalid side conversation request" }, 400);
+    const sessionId = c.req.param("sessionId");
+    const projectId = c.req.query("projectId");
     return c.json(
-      (await runtimeController.sideConversation?.(
-        c.req.param("sessionId"),
-        parsed.data,
-      )) ?? { supported: false, reason: "unsupported" },
+      await sessionCommandService.sideConversation({
+        sessionId,
+        request: parsed.data,
+        ...(projectId && isUrlProjectId(projectId) ? { projectId } : {}),
+        allowRestore: !(deps.externalTracker?.isExternal(sessionId) ?? false),
+      }),
     );
   });
 

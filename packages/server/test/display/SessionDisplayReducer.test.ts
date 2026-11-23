@@ -1042,6 +1042,50 @@ describe("SessionDisplayReducer", () => {
   });
 });
 
+describe("SessionDisplayReducer live tool starts", () => {
+  it("moves a persisted shared start to each call's live start", () => {
+    const model = new SessionDisplayReducer(view, "agy");
+    const planner = {
+      uuid: "planner",
+      type: "assistant",
+      timestamp: "2026-11-22T15:48:29.000Z",
+      message: {
+        role: "assistant",
+        content: ["a", "b", "c"].map((id) => ({
+          type: "tool_use",
+          id,
+          name: "Edit",
+          input: { file_path: `/w/${id}.py` },
+        })),
+      },
+    };
+    const done = {
+      ...result("a"),
+      timestamp: "2026-11-22T15:50:15.000Z",
+    };
+    model.restore([
+      { ...prompt, timestamp: "2026-11-22T15:48:00.000Z" },
+      planner,
+      done,
+    ] as Message[]);
+    model.adoptLiveToolStarts(
+      new Map([
+        ["a", "2026-11-22T15:50:30.000Z"],
+        ["b", "2026-11-22T15:48:54.000Z"],
+        ["c", "2026-11-22T15:48:01.000Z"],
+      ]),
+    );
+    const group = required(groups(model.snapshot())[0]);
+    const steps = required(model.groupSteps(group.id));
+    // A live start after the persisted end would break the call's span.
+    expect(steps[0]).toMatchObject({ timestamp: "2026-11-22T15:50:30.000Z" });
+    expect(steps[0]?.completedAt).toBeUndefined();
+    expect(steps[1]?.timestamp).toBe("2026-11-22T15:48:54.000Z");
+    // Never moves a start earlier than what history recorded.
+    expect(steps[2]?.timestamp).toBe("2026-11-22T15:48:29.000Z");
+  });
+});
+
 function required<T>(value: T | null | undefined): T {
   if (value === null || value === undefined)
     throw new Error("Missing expected fixture value");

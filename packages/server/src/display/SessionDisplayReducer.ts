@@ -38,6 +38,7 @@ const SETTLED_RUNTIME_STATES = new Set<SessionDisplayActivity["state"]>([
   "completed",
   "interrupted",
   "failed",
+  "incomplete",
   "unknown",
 ]);
 /** Visible markers that stay in the timeline when a settled answer folds. */
@@ -414,7 +415,7 @@ export class SessionDisplayReducer {
 
   setRuntime(state: SessionDisplayActivity["state"]): void {
     if (state !== "running" && state !== "unknown") this.stopStreaming();
-    if (["completed", "interrupted", "failed"].includes(state))
+    if (["completed", "interrupted", "failed", "incomplete"].includes(state))
       this.compactionRun = undefined;
     const last = this.nodes.at(-1);
     this.runtime =
@@ -1165,6 +1166,31 @@ export class SessionDisplayReducer {
     }
   }
 
+  /**
+   * Antigravity persists every call of a planner step under that step's
+   * start, so a response that issues many calls would show one shared start
+   * for all of them. The live ACP event still knows when each call began;
+   * prefer it while the overlay retains it. Only moves a start later.
+   */
+  adoptLiveToolStarts(starts: ReadonlyMap<string, string>): void {
+    for (const [rawId, timestamp] of starts) {
+      const tool = this.tools.get(this.rawToolIds.get(rawId) ?? "");
+      if (!tool) continue;
+      const start = Date.parse(timestamp);
+      const current = Date.parse(tool.step.timestamp ?? "");
+      if (!Number.isFinite(start)) continue;
+      if (Number.isFinite(current) && start <= current) continue;
+      const { completedAt, ...step } = tool.step;
+      const end = Date.parse(completedAt ?? "");
+      tool.step = {
+        ...step,
+        timestamp,
+        ...(completedAt && end > start ? { completedAt } : {}),
+        version: tool.step.version + 1,
+      };
+    }
+  }
+
   private groupSegment(group: Group): GroupSegment {
     const tools = this.groupSteps(group.id) ?? [];
     const running = tools.filter((t) => t.status === "running");
@@ -1578,7 +1604,8 @@ export class SessionDisplayReducer {
       isLast &&
       (this.runtime === "completed" ||
         this.runtime === "interrupted" ||
-        this.runtime === "failed")
+        this.runtime === "failed" ||
+        this.runtime === "incomplete")
     )
       return this.runtime;
     return answered ? "completed" : "unknown";

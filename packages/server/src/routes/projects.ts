@@ -399,8 +399,11 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
     const ownedSessions = getOwnedSessionsForProject(projectId, ownedProcesses);
     if (ownedSessions.size === 0) return sessions;
 
-    // Check which owned sessions are already in the list
-    const existingIds = new Set(sessions.map((s) => s.id));
+    // Check which owned sessions are already in the list. A collapsed
+    // edit-fork family lists one member; its other members are present too.
+    const existingIds = new Set(
+      sessions.flatMap((s) => [s.id, ...(s.forkFamilySessionIds ?? [])]),
+    );
 
     // Add missing owned sessions at the beginning (they're new)
     const missingSessions: SessionSummary[] = [];

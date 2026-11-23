@@ -1,4 +1,6 @@
 import {
+  type SideConversationRequest,
+  type SideConversationResponse,
   isReadOnlyProvider,
   parseSideConversationCommand,
 } from "@yep-anywhere/shared";
@@ -160,7 +162,8 @@ export interface ResumeSessionCommandInput {
   /** Internal provider-native action to run after a message-free resume. */
   controlAfterResume?:
     | ResumableCodexControlRequest
-    | { control: "pi/compact"; customInstructions?: string };
+    | { control: "pi/compact"; customInstructions?: string }
+    | { control: "side/restore" };
   /** Internal-only source override used by the Feishu usage-limit router. */
   codexModelProviderOverride?: {
     sourceId: string;
@@ -329,6 +332,15 @@ function commandFailure(
  * Read-only providers (DeepSeek Harness) are displayed by Yep, but their own
  * UI owns every mutation, so Yep never starts or resumes them.
  */
+/** Providers whose resident process hosts side conversations. */
+function providerHasSideConversation(provider: string | undefined): boolean {
+  return provider === "pi" || provider === "codex";
+}
+
+/** How long a freshly restored parent may take to accept side controls. */
+const SIDE_RESTORE_READY_TIMEOUT_MS = 5_000;
+const SIDE_RESTORE_READY_POLL_MS = 150;
+
 function readOnlyProviderFailure(): SessionCommandResult<never> {
   return commandFailure(
     "This session is read-only in Yep. Continue it in the provider's own UI.",
@@ -502,7 +514,7 @@ function resolveCodexModelProviderForStart(
 function supportsResumeSessionAt(
   provider: ProviderName | string | undefined,
 ): boolean {
-  return provider === "claude" || provider === "pi";
+  return provider === "claude" || provider === "pi" || provider === "agy";
 }
 
 function resolveCodexResumeSource(
@@ -1035,6 +1047,10 @@ export class SessionCommandService {
     }
     const controlAfterResume = input.controlAfterResume;
     const piCompaction = controlAfterResume?.control === "pi/compact";
+    // Restores the parent's resident process for a side chat, nothing else.
+    const sideRestore = controlAfterResume?.control === "side/restore";
+    // Message-free restores must not move the session onto a default model.
+    const pinsRecordedModel = piCompaction || sideRestore;
     const persistedProvider =
       this.deps.sessionMetadataService?.getPersistedProvider?.(sessionId) ??
       this.deps.sessionMetadataService?.getProvider(sessionId);
@@ -1148,7 +1164,7 @@ export class SessionCommandService {
     if (
       !providerName ||
       providerName === "codex" ||
-      piCompaction ||
+      pinsRecordedModel ||
       !parsedReasoningEffort.reasoningEffort
     ) {
       const sessionSummaryResult = await findSessionSummaryAcrossProviders(
@@ -1171,12 +1187,16 @@ export class SessionCommandService {
     }
     if (
       controlAfterResume &&
-      providerName !== (piCompaction ? "pi" : "codex")
+      (sideRestore
+        ? !providerHasSideConversation(providerName)
+        : providerName !== (piCompaction ? "pi" : "codex"))
     ) {
       return commandFailure(
-        piCompaction
-          ? "Only Pi sessions can use Pi compaction"
-          : "Only Codex sessions can resume for native controls",
+        sideRestore
+          ? "Side chat is not available for this session's provider"
+          : piCompaction
+            ? "Only Pi sessions can use Pi compaction"
+            : "Only Codex sessions can resume for native controls",
         400,
         { code: "unsupported_provider" },
       );
@@ -1188,7 +1208,7 @@ export class SessionCommandService {
     // token means no named model was selected, not a switch to global defaults.
     const model =
       resolveSessionModel(body.model, providerName) ??
-      (providerName === "codex" || piCompaction
+      (providerName === "codex" || pinsRecordedModel
         ? sessionSummary?.model
         : undefined);
     let effectiveCodexForkExcludedTurns = parsedRollbackNumTurns.value;
@@ -1290,6 +1310,16 @@ export class SessionCommandService {
       (providerRestoresReasoningEffort
         ? sessionSummary?.reasoningEffort
         : undefined);
+    // Pi applies `thinking` on every start; message-free restores carry no
+    // client thinking option, so keep the session's recorded level instead of
+    // writing "off" (which Pi clamps to "minimal") into its history.
+    const resumeThinking =
+      thinking ??
+      (providerName === "pi" && pinsRecordedModel
+        ? resumeReasoningEffort === "off"
+          ? ({ type: "disabled" } as const)
+          : ({ type: "adaptive" } as const)
+        : undefined);
     const resumeServiceTier = this.resolveCodexServiceTier(
       sessionId,
       providerName,
@@ -1339,7 +1369,8 @@ export class SessionCommandService {
     const isSourcePreservingFork =
       (providerName === "codex" &&
         effectiveCodexForkExcludedTurns !== undefined) ||
-      (providerName === "pi" && Boolean(body.resumeSessionAt));
+      (providerName === "pi" && Boolean(body.resumeSessionAt)) ||
+      (providerName === "agy" && Boolean(body.resumeSessionAt));
     const runtimeFailure = await this.validateCursorRuntime(providerName);
     if (runtimeFailure) return runtimeFailure;
     const result = await this.deps.runtimeController.resumeSession({
@@ -1362,7 +1393,7 @@ export class SessionCommandService {
       allowMissingRolloutReplacement: input.allowMissingRolloutReplacement,
       modelSettings: {
         model,
-        thinking,
+        thinking: resumeThinking,
         effort,
         reasoningEffort: normalizeReasoningEffortForProvider(
           providerName,
@@ -1547,6 +1578,44 @@ export class SessionCommandService {
           sessionId,
         );
       }
+      if (providerName === "agy" && body.resumeSessionAt) {
+        // agy keeps no fork lineage, and an edited first prompt starts a
+        // fresh conversation; Yep's sidecar is the only record of the
+        // family and of the exact prompt the fork replaced.
+        const sourceMetadata =
+          this.deps.sessionMetadataService?.getMetadata(sessionId);
+        const forkSourceSummary =
+          sessionSummary ??
+          (
+            await findSessionSummaryAcrossProviders(
+              project,
+              sessionId,
+              resolvedProjectId,
+              this.toProviderResolutionDeps(),
+              providerName,
+            )
+          )?.summary;
+        const familyTitle =
+          sourceMetadata?.forkFamilyTitle ??
+          sourceMetadata?.customTitle ??
+          sourceMetadata?.aiTitle ??
+          forkSourceSummary?.title ??
+          undefined;
+        await this.deps.sessionMetadataService?.setEditForkMetadata?.(
+          actualSessionId,
+          {
+            forkParentSessionId: sessionId,
+            forkTargetMessageId: body.resumeSessionAt,
+            forkFamilyTitle: familyTitle,
+            forkFamilyFullTitle:
+              sourceMetadata?.forkFamilyFullTitle ??
+              sourceMetadata?.customTitle ??
+              sourceMetadata?.aiTitle ??
+              forkSourceSummary?.fullTitle ??
+              familyTitle,
+          },
+        );
+      }
       await this.recordSessionOrigin(actualSessionId, project, input.origin);
     }
 
@@ -1592,6 +1661,20 @@ export class SessionCommandService {
         result.id,
         controlAfterResume.customInstructions,
       );
+    }
+
+    if (sideRestore) {
+      getLogger().info(
+        {
+          event: "side_conversation_parent_restored",
+          sessionId: actualSessionId,
+          processId: result.id,
+          projectId: resolvedProjectId,
+          providerName,
+        },
+        "Restored an inactive parent session for a side conversation",
+      );
+      return commandSuccess(resumeBody);
     }
 
     if (controlAfterResume) {
@@ -1725,6 +1808,98 @@ export class SessionCommandService {
         customInstructions: input.customInstructions,
       },
     });
+  }
+
+  /**
+   * Side conversations run inside the parent's resident provider process.
+   * When that process is gone (idle release, runtime restart), a probe reports
+   * the chat as available instead of "not ready" forever, and the first create
+   * restores the parent without a user turn before forking the side chat.
+   * Only `create` may restore; every other action stays a pure control.
+   */
+  async sideConversation(input: {
+    sessionId: string;
+    request: SideConversationRequest;
+    /** Parent project; required to restore an inactive parent. */
+    projectId?: string;
+    /** False for sessions another process controls: never take them over. */
+    allowRestore: boolean;
+  }): Promise<SideConversationResponse> {
+    const { sessionId, request } = input;
+    const runtime = this.deps.runtimeController;
+    const unsupported: SideConversationResponse = {
+      supported: false,
+      reason: "unsupported",
+    };
+    const execute = async () =>
+      (await runtime.sideConversation?.(sessionId, request)) ?? unsupported;
+    const response = await execute();
+    if (
+      response.supported ||
+      response.reason !== "not_ready" ||
+      !input.allowRestore ||
+      !input.projectId ||
+      (request.action !== "get" && request.action !== "create")
+    )
+      return response;
+    const existing = await runtime.getProcessSnapshotForSession(sessionId);
+    // A live process that is still starting is genuinely not ready yet.
+    if (existing && existing.state !== "terminated") return response;
+    const provider =
+      this.deps.sessionMetadataService?.getPersistedProvider?.(sessionId) ??
+      this.deps.sessionMetadataService?.getProvider(sessionId);
+    if (provider && !providerHasSideConversation(provider)) return response;
+
+    // Probes never start a process; they only report that create can.
+    if (request.action === "get")
+      return { supported: true, capabilities: { images: true } };
+
+    const restored = await this.resume({
+      projectId: input.projectId,
+      sessionId,
+      body: {
+        message: "",
+        ...(provider ? { provider: provider as ProviderName } : {}),
+      },
+      requireImmediate: true,
+      controlAfterResume: { control: "side/restore" },
+    });
+    if (!restored.ok) {
+      getLogger().warn(
+        {
+          event: "side_conversation_parent_restore_failed",
+          sessionId,
+          status: restored.status,
+          error: restored.body.error,
+        },
+        "Could not restore the parent session for a side conversation",
+      );
+      return {
+        supported: true,
+        capabilities: { images: true },
+        error:
+          restored.status === 503 &&
+          restored.body.code === "immediate_start_unavailable"
+            ? "The main session could not start right now. Try again shortly."
+            : restored.body.error,
+      };
+    }
+    if (restored.body.sessionId !== sessionId) {
+      return { ...unsupported, error: "The main session changed identity." };
+    }
+    const deadline = Date.now() + SIDE_RESTORE_READY_TIMEOUT_MS;
+    let next = await execute();
+    while (
+      !next.supported &&
+      next.reason === "not_ready" &&
+      Date.now() < deadline
+    ) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, SIDE_RESTORE_READY_POLL_MS),
+      );
+      next = await execute();
+    }
+    return next;
   }
 
   private async compactPiProcess(

@@ -1578,11 +1578,42 @@ export class PiProvider implements AgentProvider {
       // Wait on user input and manual compactions together. A compaction is
       // only picked up here, between turns, so Pi never sees a prompt while it
       // is compacting; a pending user read survives the compaction.
+      //
+      // Pi events are read here too. An extension can start a run on its own
+      // while Yep is idle (`sendMessage(..., { triggerTurn })`: async subagent
+      // results, goal continuation, schedulers). Those events used to sit in
+      // the RPC queue unread: the session looked idle while Pi worked, and the
+      // next prompt consumed the stale `agent_settled` as its own end.
       const userMessages = queue.generator();
       let pendingUser: ReturnType<typeof userMessages.next> | undefined;
+      let pendingInput:
+        | Promise<
+            | { value: PiCompactJob | null }
+            | { other: Awaited<ReturnType<typeof userMessages.next>> }
+          >
+        | undefined;
       while (!signal.aborted) {
         pendingUser ??= userMessages.next();
-        const next = await runtime.controlJobs.nextOr(pendingUser);
+        pendingInput ??= runtime.controlJobs.nextOr(pendingUser);
+        const raced = await client.nextEventOr(pendingInput);
+        if ("value" in raced) {
+          const event = raced.value;
+          if (!event) {
+            if (signal.aborted) break;
+            throw new Error("Pi RPC exited while the session was idle");
+          }
+          yield* this.runIdleEvent(
+            event,
+            client,
+            runtime,
+            sessionId,
+            options,
+            signal,
+          );
+          continue;
+        }
+        pendingInput = undefined;
+        const next = raced.other;
         if ("value" in next) {
           if (!next.value) break;
           yield* this.runCompactJob(
@@ -1609,11 +1640,25 @@ export class PiProvider implements AgentProvider {
         };
 
         if (signal.aborted) break;
-        await client.send({
+        const promptResponse = await client.send({
           type: "prompt",
           message: projection.internalPrompt,
           images: this.imagesFromQueuedMessage(message),
+          // An extension may have started a run in the instant before this
+          // prompt: Pi rejects a bare prompt while streaming. A follow-up
+          // joins that run (ignored when Pi is idle) and settles with it.
+          streamingBehavior: "followUp",
         });
+        // An extension command (`/goal`, `/subagents ...`) answers the prompt
+        // itself and starts no run of its own, so no `agent_settled` follows.
+        // Any run it triggered arrives as agent-initiated events instead.
+        if (
+          isRecord(promptResponse.data) &&
+          promptResponse.data.disposition === "handled"
+        ) {
+          yield { type: "result", session_id: runtime.sessionId ?? sessionId };
+          continue;
+        }
 
         const stream: PiStreamState = {
           assistantId: null,
@@ -1628,38 +1673,14 @@ export class PiProvider implements AgentProvider {
             publicPrompt: projection.publicPrompt,
           },
         };
-        let settled = false;
-        while (!signal.aborted && !settled) {
-          const event = await client.nextEvent();
-          if (!event) {
-            throw new Error("Pi RPC exited before the turn settled");
-          }
-          if (event.type === "agent_settled") {
-            settled = true;
-            // Steering still queued here was dropped by the provider.
-            runtime.pendingSteers = [];
-            // A settled turn cannot still be backing off. Clear defensively in
-            // case the provider skipped `auto_retry_end` (an aborted turn does).
-            options.onRetryStatus?.(undefined);
-            yield {
-              type: "result",
-              session_id: runtime.sessionId ?? sessionId,
-            };
-            continue;
-          }
-          const emitted = await this.convertEvent(
-            event,
-            runtime.sessionId ?? sessionId,
-            stream,
-            options,
-            client,
-            signal,
-            runtime,
-          );
-          for (const sdkMessage of emitted) {
-            yield sdkMessage;
-          }
-        }
+        yield* this.streamUntilSettled(
+          client,
+          runtime,
+          sessionId,
+          stream,
+          options,
+          signal,
+        );
       }
     } catch (error) {
       if (!signal.aborted) {
@@ -1677,6 +1698,160 @@ export class PiProvider implements AgentProvider {
       }
       runtime.client?.close();
     }
+  }
+
+  /**
+   * Stream one Pi run until `agent_settled`, then close it with a `result`.
+   * `aborted` on the settle event is the authoritative interrupt fact.
+   */
+  private async *streamUntilSettled(
+    client: PiRpcClient,
+    runtime: PiRuntimeRef,
+    fallbackSessionId: string,
+    stream: PiStreamState,
+    options: StartSessionOptions,
+    signal: AbortSignal,
+  ): AsyncGenerator<SDKMessage> {
+    while (!signal.aborted) {
+      const event = await client.nextEvent();
+      if (!event) {
+        if (signal.aborted) return;
+        throw new Error("Pi RPC exited before the turn settled");
+      }
+      if (event.type === "agent_settled") {
+        // Steering still queued here was dropped by the provider.
+        runtime.pendingSteers = [];
+        // A settled turn cannot still be backing off. Clear defensively in
+        // case the provider skipped `auto_retry_end` (an aborted turn does).
+        options.onRetryStatus?.(undefined);
+        yield {
+          type: "result",
+          session_id: runtime.sessionId ?? fallbackSessionId,
+          ...(event.aborted === true
+            ? { turnStatus: "interrupted" as const }
+            : {}),
+        };
+        return;
+      }
+      const emitted = await this.convertEvent(
+        event,
+        runtime.sessionId ?? fallbackSessionId,
+        stream,
+        options,
+        client,
+        signal,
+        runtime,
+      );
+      for (const sdkMessage of emitted) yield sdkMessage;
+    }
+  }
+
+  /**
+   * A Pi event that arrived while Yep had no prompt in flight.
+   *
+   * `agent_start` is a run Pi began on its own (an extension called
+   * `sendMessage(..., { triggerTurn })`). It is announced as an
+   * agent-initiated turn so the process is busy until it settles, exactly
+   * like a Yep prompt. An automatic compaction outside a run is framed the
+   * same way. Anything else (extension UI, queue updates) is converted
+   * without changing the turn state.
+   */
+  private async *runIdleEvent(
+    event: JsonRecord,
+    client: PiRpcClient,
+    runtime: PiRuntimeRef,
+    fallbackSessionId: string,
+    options: StartSessionOptions,
+    signal: AbortSignal,
+  ): AsyncGenerator<SDKMessage> {
+    const sessionId = () => runtime.sessionId ?? fallbackSessionId;
+    const stream: PiStreamState = {
+      assistantId: null,
+      blocks: new Map(),
+      sequence: 0,
+      toolCallOwners: new Map(),
+      toolOutputSnapshots: new Map(),
+    };
+    if (event.type === "agent_start") {
+      getLogger().info(
+        { event: "pi_agent_initiated_turn", sessionId: sessionId() },
+        "Pi started a run without a Yep prompt",
+      );
+      yield {
+        type: "system",
+        subtype: "turn_started",
+        session_id: sessionId(),
+        origin: "agent",
+      };
+      yield* this.streamUntilSettled(
+        client,
+        runtime,
+        fallbackSessionId,
+        stream,
+        options,
+        signal,
+      );
+      return;
+    }
+    if (event.type === "compaction_start") {
+      yield {
+        type: "system",
+        subtype: "turn_started",
+        session_id: sessionId(),
+        origin: "agent",
+      };
+      yield* await this.convertEvent(
+        event,
+        sessionId(),
+        stream,
+        options,
+        client,
+        signal,
+        runtime,
+      );
+      while (!signal.aborted) {
+        const next = await client.nextEvent();
+        if (!next) return;
+        if (next.type === "agent_start") {
+          // Overflow recovery retries the run right after compacting.
+          yield* this.streamUntilSettled(
+            client,
+            runtime,
+            fallbackSessionId,
+            stream,
+            options,
+            signal,
+          );
+          return;
+        }
+        yield* await this.convertEvent(
+          next,
+          sessionId(),
+          stream,
+          options,
+          client,
+          signal,
+          runtime,
+        );
+        if (next.type === "compaction_end") {
+          yield { type: "result", session_id: sessionId() };
+          return;
+        }
+      }
+      return;
+    }
+    // A late `agent_settled` (e.g. after an abort raced the prompt loop) has
+    // no open turn to close.
+    if (event.type === "agent_settled") return;
+    yield* await this.convertEvent(
+      event,
+      sessionId(),
+      stream,
+      options,
+      client,
+      signal,
+      runtime,
+    );
   }
 
   /**

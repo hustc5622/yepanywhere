@@ -6,6 +6,7 @@ import type { AgentActivity } from "../hooks/useFileActivity";
 import { useI18n } from "../i18n";
 import { stripAttachmentTokensForTitle } from "../lib/attachmentTokens";
 import { formatSmartTime } from "../lib/datetime";
+import { resolveSessionStatusBadge } from "../lib/sessionStatusBadge";
 import { formatTokenCount, getEffectiveTokenTotal } from "../lib/tokens";
 import type {
   ContextCompactEvent,
@@ -25,7 +26,7 @@ import { PinIcon } from "./PinIcon";
 import { ProviderBadge } from "./ProviderBadge";
 import { SessionMenu } from "./SessionMenu";
 import { SessionTitleGenerationStatus } from "./SessionTitleGenerationStatus";
-import { SessionStatusBadge } from "./StatusBadge";
+import { SessionStatusBadge, useSessionStatusBadgeView } from "./StatusBadge";
 import { ThinkingIndicator } from "./ThinkingIndicator";
 import { TokenUsageBadge } from "./TokenUsageBadge";
 
@@ -435,62 +436,28 @@ export function SessionListItem({
     onSelect?.(sessionId, e.target.checked);
   };
 
-  // Activity indicator for compact mode
+  // Activity indicator for compact mode: the same resolved status as the
+  // card badge, written out in words instead of abbreviations.
+  const compactState = resolveSessionStatusBadge({
+    pendingInputType,
+    activity,
+    retryStatus,
+    lastTurnStatus,
+    lastErrorMessage,
+    interrupted,
+  });
+  const compactView = useSessionStatusBadgeView(compactState);
   const getCompactActivityIndicator = () => {
-    // Priority 1: Needs input
-    if (pendingInputType || activity === "waiting-input") {
-      const label = pendingInputType === "tool-approval" ? "Appr" : "Q";
-      return (
-        <span className="session-badge session-badge-needs-input">{label}</span>
-      );
-    }
-
-    // Priority 2: Retrying - still working, but surface the backoff
-    if (activity === "in-turn" && retryStatus) {
-      return (
-        <span
-          className="session-badge session-badge-continue"
-          title={retryStatus.message}
-        >
-          {t("statusBadgeRetryShort")}
-        </span>
-      );
-    }
-
-    // Priority 3: In-turn (thinking)
-    if (activity === "in-turn") {
-      return <ThinkingIndicator />;
-    }
-
-    if (activity === "hold") {
-      return <span className="session-badge session-badge-external">Hold</span>;
-    }
-
-    // Priority 4: The last turn failed - surface the provider error
-    if (lastTurnStatus === "failed" || lastErrorMessage) {
-      return (
-        <span
-          className="session-badge session-badge-failed"
-          title={lastErrorMessage}
-        >
-          {t("statusBadgeFailedShort")}
-        </span>
-      );
-    }
-
-    // Priority 5: Interrupted (e.g. by a server restart) - prompt to continue
-    if (interrupted || lastTurnStatus === "interrupted") {
-      return (
-        <span
-          className="session-badge session-badge-continue"
-          title="Session was interrupted — send a message to continue"
-        >
-          Cont
-        </span>
-      );
-    }
-
-    return null;
+    if (compactState?.kind === "running") return <ThinkingIndicator />;
+    if (!compactView) return null;
+    return (
+      <span
+        className={`session-badge session-badge-${compactView.variant}`}
+        title={compactView.title}
+      >
+        {compactView.label}
+      </span>
+    );
   };
 
   // Build CSS classes

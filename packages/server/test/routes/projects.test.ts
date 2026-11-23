@@ -209,4 +209,64 @@ describe("Projects Routes", () => {
       provider: "codex",
     });
   });
+
+  it("does not re-add an owned edit-fork member hidden by family collapse", async () => {
+    const project = createProject();
+    const source = createSummary();
+    const olderFork: SessionSummary = {
+      ...createSummary(),
+      id: "sess-fork-a",
+      forkParentSessionId: "sess-1",
+      updatedAt: new Date("2026-03-10T09:47:00.000Z").toISOString(),
+    };
+    const newerFork: SessionSummary = {
+      ...createSummary(),
+      id: "sess-fork-b",
+      forkParentSessionId: "sess-1",
+      updatedAt: new Date("2026-03-10T09:48:00.000Z").toISOString(),
+    };
+    const codexReader = {
+      listSessions: vi.fn(async () => [source, olderFork, newerFork]),
+    } as unknown as ISessionReader;
+    const routes = createProjectsRoutes({
+      scanner: {
+        getOrCreateProject: vi.fn(async () => project),
+      } as unknown as ProjectScanner,
+      readerFactory: vi.fn(
+        () => ({ listSessions: async () => [] }) as unknown as ISessionReader,
+      ),
+      codexScanner: {
+        listProjects: vi.fn(async () => [{ ...project, provider: "codex" }]),
+      } as unknown as NonNullable<
+        Parameters<typeof createProjectsRoutes>[0]["codexScanner"]
+      >,
+      codexSessionsDir: "/tmp/codex-sessions",
+      codexReaderFactory: vi.fn(
+        () => codexReader as unknown as CodexSessionReader,
+      ),
+      // The older fork's process is still alive after the newer edit.
+      supervisor: {
+        getAllProcesses: () => [
+          {
+            id: "proc-a",
+            sessionId: "sess-fork-a",
+            projectId: project.id,
+            startedAt: new Date("2026-03-10T09:47:00.000Z"),
+            permissionMode: "default",
+            modeVersion: 0,
+            provider: "codex",
+            state: { type: "idle" },
+            getPendingInputRequest: () => null,
+          },
+        ],
+      } as unknown as NonNullable<
+        Parameters<typeof createProjectsRoutes>[0]["supervisor"]
+      >,
+    });
+
+    const json = await (await routes.request("/proj-1/sessions")).json();
+    expect(json.sessions.map((session: { id: string }) => session.id)).toEqual([
+      "sess-fork-b",
+    ]);
+  });
 });

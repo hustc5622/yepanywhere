@@ -1006,9 +1006,13 @@ export const api = {
   sideConversation: (
     sessionId: string,
     request: import("@yep-anywhere/shared").SideConversationRequest,
+    /** Lets the server restore an inactive parent process on create. */
+    projectId?: string,
   ) =>
     fetchJSON<import("@yep-anywhere/shared").SideConversationResponse>(
-      `/sessions/${encodeURIComponent(sessionId)}/side-conversation`,
+      `/sessions/${encodeURIComponent(sessionId)}/side-conversation${
+        projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""
+      }`,
       { method: "POST", body: JSON.stringify(request) },
     ),
   // Version API

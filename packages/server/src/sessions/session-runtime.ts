@@ -2,6 +2,7 @@ import { getSessionArchiveBlock } from "@yep-anywhere/shared";
 import type {
   AgentActivity,
   PendingInputType,
+  SessionLastTurnStatus,
   SessionRetryStatus,
   SessionRuntime,
 } from "@yep-anywhere/shared";
@@ -113,4 +114,21 @@ export function pendingInputRequestIdFromProcess(
   const request =
     process?.pendingInputRequest ?? process?.getPendingInputRequest?.() ?? null;
   return request?.id || undefined;
+}
+
+/**
+ * The persisted last-turn status as the user should see it.
+ *
+ * `incomplete` is read off the transcript's shape: the history stops
+ * mid-turn. A live owner writes exactly that shape while it works, and an
+ * owned process reports how its turns end (including turns the agent starts
+ * on its own) through its live state. So `incomplete` is only shown when
+ * nothing owns or drives the session; explicit outcomes always pass.
+ */
+export function presentLastTurnStatus(
+  status: SessionLastTurnStatus | undefined,
+  liveness: { owner: SessionOwnership["owner"] },
+): SessionLastTurnStatus | undefined {
+  if (status === "incomplete" && liveness.owner !== "none") return undefined;
+  return status;
 }

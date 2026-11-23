@@ -104,6 +104,11 @@ export interface PiToolResultMessage {
   usage?: PiUsage;
   isError: boolean;
   timestamp?: number;
+  /**
+   * Call-to-result time reported by the source. Pi never writes it; adapted
+   * providers (agy) do when the entry timestamp cannot express it.
+   */
+  durationMs?: number;
 }
 
 export interface PiBashExecutionMessage {

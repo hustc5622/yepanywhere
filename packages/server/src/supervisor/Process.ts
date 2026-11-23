@@ -144,6 +144,8 @@ export interface ProcessConstructorOptions extends ProcessOptions {
   abortFn?: () => void;
   /** Check if underlying CLI process is still alive (for stale detection) */
   isProcessAlive?: () => boolean;
+  /** Background work that will wake the agent later (see AgentSession). */
+  hasPendingBackgroundWork?: () => boolean;
   /** Function to change max thinking tokens at runtime (SDK 0.2.7+) */
   setMaxThinkingTokensFn?: (tokens: number | null) => Promise<void>;
   /** Function to interrupt current turn gracefully (SDK 0.2.7+) */
@@ -322,6 +324,7 @@ export class Process {
 
   /** Check if underlying CLI process is still alive (undefined = not available, fall back to time heuristic) */
   private _isProcessAlive: (() => boolean) | null;
+  private _hasPendingBackgroundWork: (() => boolean) | null;
 
   /** OS PID of the spawned agent child process (supports deferred resolution) */
   private _pidResolver: number | (() => number | undefined) | undefined;
@@ -394,6 +397,7 @@ export class Process {
     this.getContextUsageFn = options.getContextUsageFn ?? null;
     this.initializationResultFn = options.initializationResultFn ?? null;
     this._isProcessAlive = options.isProcessAlive ?? null;
+    this._hasPendingBackgroundWork = options.hasPendingBackgroundWork ?? null;
     this._lastMessageTime = new Date();
 
     // Exit promise resolves when the CLI process fully terminates
@@ -496,6 +500,11 @@ export class Process {
    */
   get isProcessAlive(): boolean | undefined {
     return this._isProcessAlive?.();
+  }
+
+  /** The agent has background work that will start a turn on its own. */
+  get hasPendingBackgroundWork(): boolean {
+    return this._hasPendingBackgroundWork?.() === true;
   }
 
   /** OS PID of the spawned agent child process */
@@ -2373,11 +2382,14 @@ export class Process {
           this.setState({ type: "in-turn" });
         }
 
-        // Codex can start a turn on its own (goal continuation, review,
-        // compaction). Without this the session would look idle while the
-        // agent works, and idle reclamation could stop it mid-goal.
+        // Agents start turns on their own: Codex goal continuations, review
+        // and compaction; Pi extension wake-ups (async subagent results, goal
+        // continuation); agy and Cursor background-task completions. The
+        // provider announces such a turn with `turn_started` and closes it
+        // with a `result`. Without this the session would look idle (and its
+        // history "cut short") while the agent works, and idle reclamation
+        // could stop it mid-turn.
         if (
-          this.provider === "codex" &&
           message.type === "system" &&
           message.subtype === "turn_started" &&
           this._state.type === "idle"

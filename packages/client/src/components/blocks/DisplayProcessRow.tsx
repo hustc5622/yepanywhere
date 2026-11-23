@@ -65,6 +65,8 @@ function processTitle(
         return t("sessionProcessInterrupted", { duration });
       case "failed":
         return t("sessionProcessFailed", { duration });
+      case "incomplete":
+        return t("sessionProcessIncomplete", { duration });
       case "unknown":
         return t("sessionProcessWorked", { duration });
     }
@@ -76,6 +78,8 @@ function processTitle(
       return t("sessionProcessInterruptedNoDuration");
     case "failed":
       return t("sessionProcessFailedNoDuration");
+    case "incomplete":
+      return t("sessionProcessIncompleteNoDuration");
     case "unknown":
       return t("sessionProcessWorkedNoDuration");
   }

@@ -99,6 +99,7 @@ describe("Pi session compaction", () => {
           providerName: "pi",
           model: "gateway/original-model",
           reasoningEffort: "high",
+          thinking: { type: "adaptive" },
         }),
       }),
     );

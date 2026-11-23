@@ -9,6 +9,7 @@ import {
   type SessionBranchState,
   type SessionDisplayPage,
   type SessionFileActivityIndex,
+  type SessionLastTurnStatus,
   type SessionQuestionPage,
   SessionQuestionPageSchema,
   type SessionThinkingDetail,
@@ -87,6 +88,7 @@ import {
   collectSessionFileEdits,
   reconstructSessionBaseline,
 } from "../sessions/session-file-changes.js";
+import { presentLastTurnStatus } from "../sessions/session-runtime.js";
 import type { GetSessionOptions, LoadedSession } from "../sessions/types.js";
 import { isUserPromptMessage } from "../sessions/user-prompt-message.js";
 import { compactQuestionText } from "../sessions/user-questions.js";
@@ -122,6 +124,11 @@ export interface SessionDisplayRuntimeState {
   projectId?: string;
   provider?: ProviderName;
   toolsMayBeActive: boolean;
+  /**
+   * Who drives the session. A transcript that stops mid-turn is only shown
+   * as incomplete when nobody does (see `presentLastTurnStatus`).
+   */
+  owner?: "self" | "external" | "none";
   pendingInputRequest?: InputRequest | null;
 }
 
@@ -838,21 +845,20 @@ export function createSessionDisplaySource(
       stats?.size,
       resolved.runtime.toolsMayBeActive,
       resolved.runtime.pendingInputRequest?.id,
+      resolved.runtime.owner,
     ]);
   };
   const activity = (
     resolved: ResolvedDisplaySession,
-    lastTurnStatus?: string,
-  ) =>
-    resolved.runtime.pendingInputRequest
-      ? ("waiting-input" as const)
-      : resolved.runtime.toolsMayBeActive
-        ? ("running" as const)
-        : lastTurnStatus === "completed" ||
-            lastTurnStatus === "failed" ||
-            lastTurnStatus === "interrupted"
-          ? lastTurnStatus
-          : ("unknown" as const);
+    persistedStatus?: SessionLastTurnStatus,
+  ) => {
+    if (resolved.runtime.pendingInputRequest) return "waiting-input" as const;
+    if (resolved.runtime.toolsMayBeActive) return "running" as const;
+    const lastTurnStatus = presentLastTurnStatus(persistedStatus, {
+      owner: resolved.runtime.owner ?? "none",
+    });
+    return lastTurnStatus ?? ("unknown" as const);
+  };
   const encode = (source: "native" | "reader", cursor: string) =>
     Buffer.from(JSON.stringify({ source, cursor })).toString("base64url");
   const decode = (
@@ -1014,6 +1020,8 @@ export function createSessionDisplaySource(
           provider: resolved.source.provider,
           messages: selectedMessages,
           contextUsage: session.contextUsage,
+          // Only recorded outcomes close the run; `incomplete` is a
+          // presentation of the runtime state, applied through `activity`.
           ...(!resolved.runtime.toolsMayBeActive &&
           (statuses === "completed" ||
             statuses === "failed" ||

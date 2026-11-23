@@ -20,6 +20,8 @@ export function useSideConversation(
   sessionId: string,
   enabled: boolean,
   visible: boolean,
+  /** Parent project; lets the server restore an inactive parent on create. */
+  projectId?: string,
 ) {
   const [conversation, setConversation] = useState<SideConversationSnapshot>();
   const [supported, setSupported] = useState(false);
@@ -83,11 +85,15 @@ export function useSideConversation(
       const epoch = revision.current;
       try {
         const current = state.current;
-        const result = await api.sideConversation(sessionId, {
-          action: "get",
-          id: current?.id,
-          version: current?.version,
-        });
+        const result = await api.sideConversation(
+          sessionId,
+          {
+            action: "get",
+            id: current?.id,
+            version: current?.version,
+          },
+          projectId,
+        );
         if (!cancelled && epoch === revision.current) accept(result);
       } catch (err) {
         if (!cancelled && epoch === revision.current) {
@@ -110,7 +116,7 @@ export function useSideConversation(
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [sessionId, enabled, visible, accept]);
+  }, [sessionId, projectId, enabled, visible, accept]);
 
   const request = useCallback(
     async (command: SideConversationRequest) => {
@@ -120,7 +126,11 @@ export function useSideConversation(
       setBusy(true);
       setError(undefined);
       try {
-        const result = await api.sideConversation(sessionId, command);
+        const result = await api.sideConversation(
+          sessionId,
+          command,
+          projectId,
+        );
         accept(result);
         return result;
       } catch (err) {
@@ -135,7 +145,7 @@ export function useSideConversation(
         if (mounted.current) setBusy(false);
       }
     },
-    [sessionId, accept],
+    [sessionId, projectId, accept],
   );
 
   const send = useCallback(

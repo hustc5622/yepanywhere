@@ -30,6 +30,7 @@ import {
   type PiSessionTailActivity,
   readPiSessionTailActivity,
 } from "../sessions/pi-files.js";
+import { presentLastTurnStatus } from "../sessions/session-runtime.js";
 import { readFirstLine } from "../utils/jsonl.js";
 import { BatchProcessor } from "../watcher/BatchProcessor.js";
 import type {
@@ -212,6 +213,11 @@ export class ExternalSessionTracker {
         if (isOwned) {
           this.removeExternal(sessionId);
         }
+        // A transcript read while its owner is still writing it stops
+        // mid-turn; that is not an outcome to publish.
+        summary.lastTurnStatus = presentLastTurnStatus(summary.lastTurnStatus, {
+          owner: isOwned ? "self" : isExternal ? "external" : "none",
+        });
 
         // For owned sessions, we only emit session-updated (supervisor handles session-created).
         // For unowned sessions discovered from files, emit session-created the first time,

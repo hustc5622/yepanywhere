@@ -791,8 +791,22 @@ export interface EnrichedRecentEntry {
   compactEvents?: ContextCompactEvent[];
 }
 
-/** Terminal status of a session's most recent turn (bridge/provider-reported). */
-export type SessionLastTurnStatus = "completed" | "interrupted" | "failed";
+/**
+ * Terminal status of a session's most recent turn.
+ *
+ * - `completed` / `failed`: the provider recorded how the turn ended.
+ * - `interrupted`: an explicit stop is on record (user cancel, provider abort
+ *   marker such as Pi `aborted`, Codex `turn_aborted`, ACP `cancelled`).
+ * - `incomplete`: no end is on record and nothing is running the session; the
+ *   history just stops mid-turn (e.g. the process died with the server). It
+ *   is inferred from the transcript's shape, so it must never be shown while
+ *   a live process may still be working.
+ */
+export type SessionLastTurnStatus =
+  | "completed"
+  | "interrupted"
+  | "failed"
+  | "incomplete";
 
 /** Provider retry/backoff state while a turn is being retried. */
 export interface SessionRetryStatus {
@@ -878,10 +892,9 @@ export interface AppSessionSummary {
   /** Codex-only branch state derived from thread_rolled_back markers. */
   codexBranchState?: CodexBranchState;
   /**
-   * True when the active branch has messages but no trailing `result` message,
-   * indicating the last turn was interrupted (e.g. by a server restart) and the
-   * session can be resumed. Only meaningful when ownership is "none" and the
-   * session is not externally active.
+   * Claude-only legacy flag: the active branch ends mid-turn (no reply, or an
+   * assistant message without a stop reason). Same meaning as
+   * `lastTurnStatus: "incomplete"`, which Claude summaries now also carry.
    */
   interrupted?: boolean;
   /** Terminal status of the most recent turn (bridge-reported). */

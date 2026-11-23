@@ -1562,7 +1562,9 @@ export function useSession(
             void fetchSessionMetadata().catch(() => {});
         } else if (
           activity &&
-          ["completed", "interrupted", "failed"].includes(activity.state ?? "")
+          ["completed", "interrupted", "failed", "incomplete"].includes(
+            activity.state ?? "",
+          )
         )
           setProcessState("idle");
         return;

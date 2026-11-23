@@ -185,12 +185,14 @@ export const SessionTranscript = memo(function SessionTranscript({
                       ? t("sessionDisplayFinishing")
                       : displayActivity.state === "interrupted"
                         ? t("sessionDisplayInterrupted")
-                        : displayActivity.state === "failed"
-                          ? t("sessionDisplayFailed")
-                          : displayActivity.state === "unknown" &&
-                              displayActivity.runningCount > 0
-                            ? t("sessionDisplayUnknown")
-                            : null}
+                        : displayActivity.state === "incomplete"
+                          ? t("sessionDisplayIncomplete")
+                          : displayActivity.state === "failed"
+                            ? t("sessionDisplayFailed")
+                            : displayActivity.state === "unknown" &&
+                                displayActivity.runningCount > 0
+                              ? t("sessionDisplayUnknown")
+                              : null}
                 </div>
               )}
               {displayActivity && displayActivity.tools.length > 0 && (
@@ -346,12 +348,16 @@ export const SessionComposer = memo(function SessionComposer({
     !editRewindActive;
   const canQueue =
     !editRewindActive && status.owner !== "none" && processState !== "idle";
+  // Resume only when no process holds the session; an idle owned process
+  // simply takes the next message.
   const placeholder =
     status.owner === "external"
       ? t("sessionPlaceholderExternal")
-      : processState === "idle"
+      : status.owner === "none"
         ? t("sessionPlaceholderResume")
-        : t("sessionPlaceholderQueue");
+        : processState === "idle"
+          ? t("sessionPlaceholderContinue")
+          : t("sessionPlaceholderQueue");
 
   return (
     <footer className="session-input">

@@ -597,6 +597,74 @@ describe("Sessions API", () => {
       ).toHaveBeenCalledWith("ses_pi_fork", "sess-existing");
     });
 
+    it("returns the Antigravity fork id and records the replaced prompt", async () => {
+      const sessionMetadataService = {
+        getProvider: vi.fn(() => "agy"),
+        getMetadata: vi.fn(() => ({ customTitle: "Pong family" })),
+        getExecutor: vi.fn(() => undefined),
+        setProvider: vi.fn(async () => undefined),
+        setEditForkMetadata: vi.fn(async () => undefined),
+        setCreatedBy: vi.fn(async () => undefined),
+        setProjectLocation: vi.fn(async () => undefined),
+      };
+      const { app, supervisor } = createApp({
+        sdk: mockSdk,
+        projectsDir: testDir,
+        sessionMetadataService:
+          sessionMetadataService as unknown as SessionMetadataService,
+      });
+      const resumeSpy = vi
+        .spyOn(supervisor, "resumeSession")
+        .mockResolvedValue({
+          id: "process-agy-fork",
+          sessionId: "agy-fork-conversation",
+          permissionMode: "default",
+          modeVersion: 1,
+        } as unknown as Awaited<ReturnType<typeof supervisor.resumeSession>>);
+      const boundary = "agy-sess-existing-step-8";
+
+      const res = await app.request(
+        `/api/projects/${projectId}/sessions/sess-existing/resume`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Yep-Anywhere": "true",
+          },
+          body: JSON.stringify({
+            message: "edited agy prompt",
+            resumeSessionAt: boundary,
+          }),
+        },
+      );
+
+      expect(res.status).toBe(200);
+      await expect(res.json()).resolves.toMatchObject({
+        sessionId: "agy-fork-conversation",
+        forkParentSessionId: "sess-existing",
+      });
+      expect(resumeSpy).toHaveBeenCalledWith(
+        "sess-existing",
+        expect.any(String),
+        expect.objectContaining({ text: "edited agy prompt" }),
+        undefined,
+        expect.objectContaining({
+          providerName: "agy",
+          resumeSessionAt: boundary,
+        }),
+        { requireImmediate: true },
+      );
+      expect(sessionMetadataService.setEditForkMetadata).toHaveBeenCalledWith(
+        "agy-fork-conversation",
+        {
+          forkParentSessionId: "sess-existing",
+          forkTargetMessageId: boundary,
+          forkFamilyTitle: "Pong family",
+          forkFamilyFullTitle: "Pong family",
+        },
+      );
+    });
+
     it("returns 400 for non-integer rollbackNumTurns", async () => {
       const { app } = createApp({ sdk: mockSdk, projectsDir: testDir });
 

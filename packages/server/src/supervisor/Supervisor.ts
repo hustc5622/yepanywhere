@@ -142,7 +142,7 @@ export interface ModelSettings {
   permissions?: PermissionRules;
   /**
    * Provider-native edit boundary. Claude resumes through an ancestor UUID;
-   * Pi forks before the native user message ID supplied here.
+   * Pi and Antigravity fork before the native user message ID supplied here.
    */
   resumeSessionAt?: string;
   /**
@@ -616,6 +616,7 @@ export class Supervisor {
       queue,
       abort,
       isProcessAlive,
+      hasPendingBackgroundWork,
       setMaxThinkingTokens,
       interrupt,
       steer,
@@ -644,6 +645,7 @@ export class Supervisor {
       queue,
       abortFn: abort,
       isProcessAlive,
+      hasPendingBackgroundWork,
       pid: () => {
         const p = result.pid;
         return typeof p === "function" ? p() : p;
@@ -804,6 +806,7 @@ export class Supervisor {
       queue,
       abort,
       isProcessAlive,
+      hasPendingBackgroundWork,
       setMaxThinkingTokens,
       interrupt,
       steer,
@@ -831,6 +834,7 @@ export class Supervisor {
       queue,
       abortFn: abort,
       isProcessAlive,
+      hasPendingBackgroundWork,
       pid: () => {
         const p = result.pid;
         return typeof p === "function" ? p() : p;
@@ -869,11 +873,11 @@ export class Supervisor {
     // Add the initial user message to history with the same UUID we passed to provider.
     process.addInitialUserMessage(message, messageUuid, message.tempId);
 
-    // Pi edit-forks around a native message boundary and
+    // Pi and Antigravity edit-fork around a native message boundary and
     // preserve the source session, so the supervisor must re-key the process
     // onto the fork's native id once the provider reports it.
     const isCrossSessionEditFork =
-      activeProvider.name === "pi" &&
+      (activeProvider.name === "pi" || activeProvider.name === "agy") &&
       Boolean(resumeSessionId && modelSettings?.resumeSessionAt);
     const isCodexFork =
       activeProvider.name === "codex" &&
@@ -2077,6 +2081,8 @@ export class Supervisor {
       if (process.state.type !== "idle") continue;
       if (this.preemptingProcessIds.has(process.id)) continue;
       if (process.getDeferredQueueSummary().length > 0) continue;
+      // Stopping it would kill the background work and the turn it starts.
+      if (process.hasPendingBackgroundWork) continue;
       const idleMs = now - process.state.since.getTime();
       if (idleMs < this.residentIdleTtlMs) continue;
       expired.push(process);
@@ -2089,6 +2095,7 @@ export class Supervisor {
         this.isShuttingDown ||
         this.processes.get(process.id) !== process ||
         process.state.type !== "idle" ||
+        process.hasPendingBackgroundWork ||
         this.preemptingProcessIds.has(process.id)
       ) {
         continue;
@@ -2194,6 +2201,7 @@ export class Supervisor {
       // Only preempt idle processes, not waiting-input
       if (process.state.type !== "idle") continue;
       if (this.preemptingProcessIds.has(process.id)) continue;
+      if (process.hasPendingBackgroundWork) continue;
 
       const idleMs = now - process.state.since.getTime();
       if (idleMs >= this.idlePreemptThresholdMs && idleMs > oldestIdleTime) {

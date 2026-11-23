@@ -114,6 +114,18 @@ function completedTurn(turn: string, offset: number): Message[] {
 }
 
 describe("SessionDisplayReducer process folding", () => {
+  it("labels the last answer of a history that stops mid-turn as incomplete", () => {
+    const model = new SessionDisplayReducer(view, "codex", {
+      foldSettled: true,
+    });
+    model.restore(completedTurn("turn-1", 0));
+    model.setRuntime("incomplete");
+    const snapshot = model.snapshot();
+    expect(SessionDisplaySnapshotSchema.safeParse(snapshot).success).toBe(true);
+    expect(snapshot.activity.state).toBe("incomplete");
+    expect(labels(snapshot.nodes)).toContain("process:incomplete");
+  });
+
   it("folds the working steps of a completed answer behind one summary", () => {
     const model = new SessionDisplayReducer(view, "codex", {
       foldSettled: true,

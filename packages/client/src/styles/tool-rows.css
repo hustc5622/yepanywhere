@@ -495,7 +495,8 @@
   color: var(--error-color);
 }
 
-.display-process--interrupted .display-process-title {
+.display-process--interrupted .display-process-title,
+.display-process--incomplete .display-process-title {
   color: var(--warning-color, var(--text-secondary));
 }
 

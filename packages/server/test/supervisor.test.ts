@@ -712,7 +712,10 @@ describe("Supervisor", () => {
       await providerSupervisor.abortProcess((process2 as { id: string }).id);
     });
 
-    it.each([{ providerName: "pi" as const, displayName: "Pi" }])(
+    it.each([
+      { providerName: "pi" as const, displayName: "Pi" },
+      { providerName: "agy" as const, displayName: "Antigravity" },
+    ])(
       "replaces a $displayName process and registers the native fork session id",
       async ({ providerName, displayName }) => {
         const starts: Array<{
@@ -1068,7 +1071,7 @@ describe("Supervisor", () => {
   });
 
   describe("resident idle TTL", () => {
-    function createResidentProvider() {
+    function createResidentProvider(backgroundWork?: () => boolean) {
       const aborts: string[] = [];
       const startSession = vi.fn(async (options: StartSessionOptions) => {
         const sessionId = options.resumeSessionId ?? "unexpected-session";
@@ -1087,6 +1090,9 @@ describe("Supervisor", () => {
             aborts.push(sessionId);
           },
           isProcessAlive: () => !aborted,
+          ...(backgroundWork
+            ? { hasPendingBackgroundWork: backgroundWork }
+            : {}),
         };
       });
       return { provider: createCodexTestProvider(startSession), aborts };
@@ -1142,6 +1148,31 @@ describe("Supervisor", () => {
             sessionId: "sess-ttl",
           }),
         );
+      } finally {
+        await target.shutdown();
+      }
+    });
+
+    it("keeps an idle process whose background work will wake it", async () => {
+      let pending = true;
+      const { provider, aborts } = createResidentProvider(() => pending);
+      const target = new Supervisor({
+        provider,
+        idleTimeoutMs: 100,
+        residentIdleTtlMs: 60_000,
+      });
+
+      try {
+        await resumeIdle(target, "sess-background");
+        await expect(
+          target.reclaimExpiredIdleProcesses(Date.now() + 10 * 60_000),
+        ).resolves.toBe(0);
+        expect(aborts).toEqual([]);
+
+        pending = false;
+        await expect(
+          target.reclaimExpiredIdleProcesses(Date.now() + 10 * 60_000),
+        ).resolves.toBe(1);
       } finally {
         await target.shutdown();
       }

@@ -113,32 +113,38 @@ describe("derivePiSession lastTurnStatus", () => {
     );
   });
 
-  it("reports a turn cut off mid tool call as interrupted", () => {
-    expect(
-      derivePiSession(content("s", [user, assistant("toolUse")]))
-        .lastTurnStatus,
-    ).toBe("interrupted");
+  it("reports an explicit abort as interrupted", () => {
     expect(
       derivePiSession(content("s", [user, assistant("aborted")]))
         .lastTurnStatus,
     ).toBe("interrupted");
+  });
+
+  // The same shape is on disk while the agent is still working, so it is
+  // reported as incomplete; only callers that know nobody runs the session
+  // may show it (see presentLastTurnStatus).
+  it("reports a history that stops mid tool call as incomplete", () => {
+    expect(
+      derivePiSession(content("s", [user, assistant("toolUse")]))
+        .lastTurnStatus,
+    ).toBe("incomplete");
     expect(
       derivePiSession(content("s", [user, assistant("pending")]))
         .lastTurnStatus,
-    ).toBe("interrupted");
+    ).toBe("incomplete");
   });
 
-  it("reports a trailing tool result as interrupted", () => {
+  it("reports a trailing tool result as incomplete", () => {
     expect(
       derivePiSession(content("s", [user, assistant("toolUse"), toolResult]))
         .lastTurnStatus,
-    ).toBe("interrupted");
+    ).toBe("incomplete");
   });
 
-  it("reports an unanswered prompt as interrupted", () => {
+  it("reports an unanswered prompt as incomplete", () => {
     expect(
       derivePiSession(content("s", [assistant("stop"), user])).lastTurnStatus,
-    ).toBe("interrupted");
+    ).toBe("incomplete");
   });
 
   it("reports no status for a session without assistant turns", () => {

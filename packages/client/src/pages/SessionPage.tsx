@@ -469,6 +469,7 @@ function SessionPageContent({
     actualSessionId,
     hasSideConversation,
     sideVisible,
+    projectId,
   );
   const [isInspectorDrawerOpen, setInspectorDrawerOpen] = useState(false);
   const openSideConversation = useCallback(() => {

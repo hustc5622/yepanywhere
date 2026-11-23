@@ -212,4 +212,84 @@ describe("SessionDisplayService dormant views", () => {
     expect(stale).not.toContain("display-current");
     other.cleanup();
   });
+
+  it("checks source stamp on active hit in snapshot() and subscribe()", async () => {
+    vi.useFakeTimers();
+    const t = fixture();
+    const first = await open(t.service);
+    expect(t.source.read).toHaveBeenCalledTimes(1);
+
+    // Unchanged stamp on an active hit reuses the projection without reading.
+    const warm = await open(t.service);
+    expect(warm.state).toBe("hit");
+    expect(t.source.read).toHaveBeenCalledTimes(1);
+
+    // When the file changes while the entry is still active, snapshot()
+    // refreshes immediately instead of returning stale memory.
+    t.setStamp("2");
+    t.source.read.mockResolvedValueOnce({
+      ...page("completed", "2"),
+      messages: [
+        ...page("completed", "2").messages,
+        {
+          uuid: "u2",
+          type: "user",
+          codexTurnId: "turn-2",
+          message: { role: "user", content: "Follow up" },
+        } as Message,
+      ],
+      turnStatuses: { turn: "completed", "turn-2": "completed" },
+    });
+    const refreshed = await open(t.service);
+    expect(refreshed.state).toBe("hit");
+    expect(t.source.read).toHaveBeenCalledTimes(2);
+    expect(refreshed.snapshot.nodes.some((n) => n.id === "question:u2")).toBe(
+      true,
+    );
+
+    // Similarly, subscribe() refreshes on a changed stamp rather than replying
+    // display-current for the client's now-stale version.
+    const knownBefore = {
+      epoch: refreshed.snapshot.view.epoch,
+      seq: refreshed.snapshot.seq,
+    };
+    t.setStamp("3");
+    t.source.read.mockResolvedValueOnce({
+      ...page("completed", "3"),
+      messages: [
+        ...page("completed", "3").messages,
+        {
+          uuid: "u2",
+          type: "user",
+          codexTurnId: "turn-2",
+          message: { role: "user", content: "Follow up" },
+        } as Message,
+        {
+          uuid: "u3",
+          type: "user",
+          codexTurnId: "turn-3",
+          message: { role: "user", content: "Third" },
+        } as Message,
+      ],
+      turnStatuses: {
+        turn: "completed",
+        "turn-2": "completed",
+        "turn-3": "completed",
+      },
+    });
+    const events: Array<{ type: string; data: unknown }> = [];
+    const sub = await t.service.subscribe(
+      selection,
+      (type, data) => events.push({ type, data }),
+      undefined,
+      knownBefore,
+    );
+    expect(events.map((e) => e.type)).toContain("display-snapshot");
+    expect(events.map((e) => e.type)).not.toContain("display-current");
+    const delivered = events.find((e) => e.type === "display-snapshot")?.data as
+      | { nodes: Array<{ id: string }> }
+      | undefined;
+    expect(delivered?.nodes.some((n) => n.id === "question:u3")).toBe(true);
+    sub.cleanup();
+  });
 });

@@ -54,8 +54,8 @@ export interface StartSessionOptions {
   allowMissingRolloutReplacement?: boolean;
   /**
    * Provider-native edit boundary used with resumeSessionId. Claude resumes
-   * through the supplied ancestor UUID; Pi forks before the supplied native
-   * user message ID. Maps to the provider's
+   * through the supplied ancestor UUID; Pi and Antigravity fork before the
+   * supplied native user message ID. Maps to the provider's
    * `resumeSessionAt` option.
    */
   resumeSessionAt?: string;
@@ -137,6 +137,12 @@ export interface AgentSession {
   abort: () => void;
   /** Check if the underlying CLI process is still alive (undefined = not available) */
   isProcessAlive?: () => boolean;
+  /**
+   * True while the agent has background work that will wake it later
+   * (agy background commands and timers). Such an idle process is kept:
+   * stopping it would kill that work and the turn it would start.
+   */
+  hasPendingBackgroundWork?: () => boolean;
   /** OS PID of the spawned agent child process (undefined if not available) */
   pid?: number | (() => number | undefined);
   /** Session ID if available immediately (some providers provide later via messages) */

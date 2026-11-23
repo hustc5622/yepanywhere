@@ -478,4 +478,76 @@ describe("Pi native session reader", () => {
     );
     expect(await reader.getBranchState(loneId)).toBeUndefined();
   });
+
+  it("observes appended Pi JSONL entries immediately without waiting for catalog TTL", async () => {
+    const sessionsDir = join(tmpdir(), `pi-sessions-fresh-${randomUUID()}`);
+    const projectPath = join(tmpdir(), `pi-project-fresh-${randomUUID()}`);
+    const projectDir = join(sessionsDir, "--pi-project--");
+    tempDirs.push(sessionsDir);
+    await mkdir(projectDir, { recursive: true });
+
+    const sessionId = randomUUID();
+    const filePath = join(projectDir, `session_${sessionId}.jsonl`);
+    const initialRecords = [
+      {
+        type: "session",
+        version: 3,
+        id: sessionId,
+        timestamp: "2026-11-22T05:00:00.000Z",
+        cwd: projectPath,
+      },
+      {
+        type: "message",
+        id: "u1",
+        parentId: null,
+        timestamp: "2026-11-22T05:00:01.000Z",
+        message: { role: "user", content: "first prompt", timestamp: 1 },
+      },
+    ];
+    await writeFile(filePath, jsonl(initialRecords));
+
+    const reader = new PiSessionReader({ sessionsDir, projectPath });
+    const projectId = encodeProjectId(projectPath);
+
+    const firstStats = await reader.getSessionFileStats(sessionId);
+    const firstLoaded = await reader.getSession(sessionId, projectId);
+    expect(firstStats).not.toBeNull();
+    expect(firstLoaded?.summary.messageCount).toBe(1);
+
+    // Append directly on disk within the 5s catalog TTL (without invalidateFile).
+    await writeFile(
+      filePath,
+      jsonl([
+        ...initialRecords,
+        {
+          type: "message",
+          id: "a1",
+          parentId: "u1",
+          timestamp: "2026-11-22T05:00:05.000Z",
+          message: {
+            role: "assistant",
+            content: [{ type: "text", text: "fresh reply" }],
+            provider: "yep-openai-compatible",
+            model: "gpt-5",
+            stopReason: "stop",
+            timestamp: 2,
+          },
+        },
+      ]),
+    );
+
+    const secondStats = await reader.getSessionFileStats(sessionId);
+    expect(secondStats).not.toBeNull();
+    expect(secondStats?.size).toBeGreaterThan(firstStats?.size ?? 0);
+
+    const secondLoaded = await reader.getSession(sessionId, projectId);
+    expect(secondLoaded?.summary.messageCount).toBe(2);
+    const normalized = secondLoaded ? normalizeSession(secondLoaded) : null;
+    expect(
+      normalized?.messages.some(
+        (m) =>
+          m.type === "assistant" && JSON.stringify(m).includes("fresh reply"),
+      ),
+    ).toBe(true);
+  });
 });

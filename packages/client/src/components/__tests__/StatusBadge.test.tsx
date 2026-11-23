@@ -85,7 +85,7 @@ describe("SessionStatusBadge", () => {
       ".status-badge.notification-needs-input",
     );
     expect(badge).not.toBeNull();
-    expect(badge?.textContent).toBe("Approval Needed");
+    expect(badge?.textContent).toBe("Approval");
 
     const thinkingBadge = container.querySelector(".thinking-indicator-pill");
     expect(thinkingBadge).toBeNull();
@@ -171,7 +171,7 @@ describe("SessionStatusBadge", () => {
     expect(badge?.getAttribute("title")).toBe("model exploded");
   });
 
-  it("maps a bridge-reported interrupted turn to the continue badge", () => {
+  it("labels an explicitly stopped turn as interrupted", () => {
     const { container } = renderBadge(
       <SessionStatusBadge
         status={{ owner: "none" }}
@@ -179,9 +179,44 @@ describe("SessionStatusBadge", () => {
       />,
     );
 
-    const badge = container.querySelector(".notification-continue");
+    const badge = container.querySelector(".notification-interrupted");
     expect(badge).not.toBeNull();
-    expect(badge?.textContent).toBe("Continue");
+    expect(badge?.textContent).toBe("Interrupted");
+    expect(container.querySelector(".notification-continue")).toBeNull();
+  });
+
+  it("labels a turn that never finished as unfinished, not interrupted", () => {
+    for (const props of [
+      { lastTurnStatus: "incomplete" as const },
+      // Claude's legacy flag means the same thing.
+      { interrupted: true },
+    ]) {
+      const { container } = renderBadge(
+        <SessionStatusBadge status={{ owner: "none" }} {...props} />,
+      );
+      const badge = container.querySelector(".notification-incomplete");
+      expect(badge).not.toBeNull();
+      expect(badge?.textContent).toBe("Unfinished");
+      expect(badge?.getAttribute("title")).toContain("Send a message");
+      cleanup();
+    }
+  });
+
+  it("never shows a terminal badge while the session is running", () => {
+    const { container } = renderBadge(
+      <SessionStatusBadge
+        status={{
+          owner: "self",
+          processId: "p1",
+          permissionMode: "default",
+          modeVersion: 0,
+        }}
+        activity="in-turn"
+        lastTurnStatus="incomplete"
+      />,
+    );
+    expect(container.querySelector(".thinking-indicator-pill")).not.toBeNull();
+    expect(container.querySelector(".status-badge")).toBeNull();
   });
 
   it("prioritizes needs-input over retrying", () => {
@@ -196,6 +231,6 @@ describe("SessionStatusBadge", () => {
 
     const badge = container.querySelector(".notification-needs-input");
     expect(badge).not.toBeNull();
-    expect(badge?.textContent).toBe("Approval Needed");
+    expect(badge?.textContent).toBe("Approval");
   });
 });

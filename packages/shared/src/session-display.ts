@@ -288,8 +288,17 @@ export const SessionDisplayProcessSegmentSchema = z
   .object({
     type: z.literal("process"),
     id: NonEmptyIdSchema,
-    /** Outcome of the work this fold ends; `unknown` renders a neutral label. */
-    status: z.enum(["completed", "interrupted", "failed", "unknown"]),
+    /**
+     * Outcome of the work this fold ends; `unknown` renders a neutral label.
+     * `incomplete`: the history stops mid-turn and nothing runs the session.
+     */
+    status: z.enum([
+      "completed",
+      "interrupted",
+      "failed",
+      "incomplete",
+      "unknown",
+    ]),
     stepCount: z.number().int().positive(),
     toolCount: z.number().int().nonnegative(),
     failedToolCount: z.number().int().nonnegative(),
@@ -441,6 +450,7 @@ export const SessionDisplayActivitySchema = z
       "completed",
       "interrupted",
       "failed",
+      "incomplete",
       "unknown",
     ]),
     tools: z.array(SessionDisplayToolStepSchema),

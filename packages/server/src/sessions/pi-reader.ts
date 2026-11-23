@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { readFile, stat } from "node:fs/promises";
 import { dirname, isAbsolute, resolve } from "node:path";
 import {
   type AgentMapping,
@@ -100,6 +100,7 @@ export class PiSessionReader implements ISessionReader {
   private readonly projectPath?: string;
   private readonly getContextWindow?: PiSessionReaderOptions["getContextWindow"];
   private cache: { records: PiSessionFileRecord[]; at: number } | null = null;
+  private readonly knownFilePaths = new Map<string, string>();
   private readonly parsedCache = new BudgetedCache<ParsedPiSessionCacheEntry>(
     PI_PARSED_BUDGET,
   );
@@ -119,6 +120,7 @@ export class PiSessionReader implements ISessionReader {
   invalidateCache(): void {
     invalidatePiSessionFileCatalog(this.sessionsDir);
     this.cache = null;
+    this.knownFilePaths.clear();
     this.parsedCacheGeneration += 1;
     this.parsedFileGenerations.clear();
     this.parsedCache.clear();
@@ -154,7 +156,7 @@ export class PiSessionReader implements ISessionReader {
         .filter(
           (record) => !this.projectPath || record.cwd === this.projectPath,
         )
-        .map((record) => this.getSessionSummary(record.sessionId, projectId)),
+        .map((record) => this.getSessionSummaryForRecord(record, projectId)),
     );
     return summaries
       .filter((summary): summary is SessionSummary => summary !== null)
@@ -168,8 +170,16 @@ export class PiSessionReader implements ISessionReader {
     sessionId: string,
     projectId: UrlProjectId,
   ): Promise<SessionSummary | null> {
-    const record = await this.findRecord(sessionId);
-    if (!record || (this.projectPath && record.cwd !== this.projectPath)) {
+    const record = await this.findFreshRecord(sessionId);
+    if (!record) return null;
+    return this.getSessionSummaryForRecord(record, projectId);
+  }
+
+  private async getSessionSummaryForRecord(
+    record: PiSessionFileRecord,
+    projectId: UrlProjectId,
+  ): Promise<SessionSummary | null> {
+    if (this.projectPath && record.cwd !== this.projectPath) {
       return null;
     }
 
@@ -179,7 +189,7 @@ export class PiSessionReader implements ISessionReader {
       // parsed snapshot and one in-flight read.
       const parsed = await this.getParsedSession(record, { deferMedia: true });
       return parsed
-        ? await this.buildSummary(sessionId, projectId, record, parsed)
+        ? await this.buildSummary(record.sessionId, projectId, record, parsed)
         : null;
     } catch {
       return null;
@@ -235,8 +245,8 @@ export class PiSessionReader implements ISessionReader {
     _afterMessageId?: string,
     options?: GetSessionOptions,
   ): Promise<LoadedSession | null> {
-    const record = await this.findRecord(sessionId);
-    if (!record || (this.projectPath && record.cwd !== this.projectPath)) {
+    const record = await this.findFreshRecord(sessionId);
+    if (!record) {
       return null;
     }
     const deferMedia = options?.deferMedia === true;
@@ -288,8 +298,8 @@ export class PiSessionReader implements ISessionReader {
     sessionId: string,
     branchId?: string,
   ): Promise<SessionBranchState | undefined> {
-    const record = await this.findRecord(sessionId);
-    if (!record || (this.projectPath && record.cwd !== this.projectPath)) {
+    const record = await this.findFreshRecord(sessionId);
+    if (!record) {
       return undefined;
     }
     const records = await this.scan();
@@ -307,11 +317,11 @@ export class PiSessionReader implements ISessionReader {
     cachedMtime: number,
     cachedSize: number,
   ): Promise<{ summary: SessionSummary; mtime: number; size: number } | null> {
-    const record = await this.findRecord(sessionId, true);
-    if (!record) return null;
-    if (record.mtime === cachedMtime && record.size === cachedSize) return null;
+    const stats = await this.getSessionFileStats(sessionId);
+    if (!stats) return null;
+    if (stats.mtime === cachedMtime && stats.size === cachedSize) return null;
     const summary = await this.getSessionSummary(sessionId, projectId);
-    return summary ? { summary, mtime: record.mtime, size: record.size } : null;
+    return summary ? { summary, mtime: stats.mtime, size: stats.size } : null;
   }
 
   async getAgentMappings(): Promise<AgentMapping[]> {
@@ -329,8 +339,49 @@ export class PiSessionReader implements ISessionReader {
   async getSessionFileStats(
     sessionId: string,
   ): Promise<{ mtime: number; size: number } | null> {
-    const record = await this.findRecord(sessionId, true);
-    return record ? { mtime: record.mtime, size: record.size } : null;
+    const knownPath =
+      this.knownFilePaths.get(sessionId) ??
+      this.cache?.records.find(
+        (candidate) =>
+          candidate.sessionId === sessionId &&
+          (!this.projectPath || candidate.cwd === this.projectPath),
+      )?.filePath;
+    if (knownPath) {
+      try {
+        const fileStats = await stat(knownPath);
+        this.knownFilePaths.set(sessionId, knownPath);
+        const existing = this.cache?.records.find(
+          (candidate) => candidate.sessionId === sessionId,
+        );
+        if (
+          existing &&
+          (existing.mtime !== fileStats.mtimeMs ||
+            existing.size !== fileStats.size)
+        ) {
+          this.syncCachedRecordStats({
+            ...existing,
+            mtime: fileStats.mtimeMs,
+            size: fileStats.size,
+          });
+        }
+        this.evictStaleParsedForFile(
+          knownPath,
+          fileStats.mtimeMs,
+          fileStats.size,
+        );
+        return { mtime: fileStats.mtimeMs, size: fileStats.size };
+      } catch {
+        this.knownFilePaths.delete(sessionId);
+      }
+    }
+    const record = await this.findRecord(sessionId, true, true);
+    if (!record || (this.projectPath && record.cwd !== this.projectPath)) {
+      return null;
+    }
+    const refreshed = await this.refreshRecordStats(record);
+    return refreshed
+      ? { mtime: refreshed.mtime, size: refreshed.size }
+      : { mtime: record.mtime, size: record.size };
   }
 
   async listSessionFiles(_sessionDir: string): Promise<SessionFileEntry[]> {
@@ -569,6 +620,99 @@ export class PiSessionReader implements ISessionReader {
     if (invalidated) this.parsedCacheGeneration += 1;
   }
 
+  private evictStaleParsedForFile(
+    filePath: string,
+    mtime: number,
+    size: number,
+  ): void {
+    const targetPath = resolve(filePath);
+    let invalidated = false;
+    for (const [cacheKey, cached] of this.parsedCache) {
+      if (
+        resolve(cached.filePath) === targetPath &&
+        (cached.mtime !== mtime || cached.size !== size)
+      ) {
+        this.parsedCache.delete(cacheKey);
+        invalidated = true;
+      }
+    }
+    if (invalidated) {
+      this.parsedFileGenerations.set(
+        targetPath,
+        (this.parsedFileGenerations.get(targetPath) ?? 0) + 1,
+      );
+    }
+  }
+
+  private syncCachedRecordStats(updated: PiSessionFileRecord): void {
+    if (!this.cache) return;
+    const index = this.cache.records.findIndex(
+      (candidate) => candidate.sessionId === updated.sessionId,
+    );
+    if (index < 0) return;
+    const current = this.cache.records[index];
+    if (
+      current &&
+      current.filePath === updated.filePath &&
+      current.mtime === updated.mtime &&
+      current.size === updated.size
+    ) {
+      return;
+    }
+    const next = [...this.cache.records];
+    next[index] = updated;
+    this.cache = { records: next, at: this.cache.at };
+  }
+
+  private async refreshRecordStats(
+    record: PiSessionFileRecord,
+  ): Promise<PiSessionFileRecord | null> {
+    this.knownFilePaths.set(record.sessionId, record.filePath);
+    try {
+      const fileStats = await stat(record.filePath);
+      if (
+        fileStats.mtimeMs === record.mtime &&
+        fileStats.size === record.size
+      ) {
+        return record;
+      }
+      const updated: PiSessionFileRecord = {
+        ...record,
+        mtime: fileStats.mtimeMs,
+        size: fileStats.size,
+      };
+      this.syncCachedRecordStats(updated);
+      this.evictStaleParsedForFile(
+        record.filePath,
+        fileStats.mtimeMs,
+        fileStats.size,
+      );
+      return updated;
+    } catch {
+      this.knownFilePaths.delete(record.sessionId);
+      return null;
+    }
+  }
+
+  private async findFreshRecord(
+    sessionId: string,
+  ): Promise<PiSessionFileRecord | null> {
+    const record = await this.findRecord(sessionId);
+    if (!record || (this.projectPath && record.cwd !== this.projectPath)) {
+      return null;
+    }
+    const refreshed = await this.refreshRecordStats(record);
+    if (refreshed) return refreshed;
+    const rescanned = await this.findRecord(sessionId, true, true);
+    if (
+      !rescanned ||
+      (this.projectPath && rescanned.cwd !== this.projectPath)
+    ) {
+      return null;
+    }
+    return (await this.refreshRecordStats(rescanned)) ?? rescanned;
+  }
+
   private async scan(
     forceLocal = false,
     forceCatalog = false,
@@ -587,8 +731,9 @@ export class PiSessionReader implements ISessionReader {
   private async findRecord(
     sessionId: string,
     force = false,
+    forceCatalog = false,
   ): Promise<PiSessionFileRecord | null> {
-    const record = (await this.scan(force)).find(
+    const record = (await this.scan(force, forceCatalog)).find(
       (candidate) => candidate.sessionId === sessionId,
     );
     if (record || force) return record ?? null;

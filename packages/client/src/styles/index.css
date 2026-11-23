@@ -6504,10 +6504,29 @@ a.sidebar-nav-item {
   animation: pulse-blue 2s ease-in-out infinite;
 }
 
-/* "Continue" badge - session was interrupted (e.g. by a server restart) */
+/* Retrying a failed request: still working, but backing off */
 .status-badge.notification-continue {
   background: var(--status-badge-running-bg);
   color: var(--status-badge-running-text);
+}
+
+/* Paused (process hold) */
+.status-badge.notification-hold {
+  background: var(--status-badge-owned-bg);
+  color: var(--status-badge-owned-text);
+}
+
+/* The last turn was stopped on purpose: settled, nothing to fix */
+.status-badge.notification-interrupted {
+  background: var(--bg-hover);
+  color: var(--text-muted);
+}
+
+/* The last turn never finished (the agent stopped): worth a look */
+.status-badge.notification-incomplete {
+  background: transparent;
+  color: var(--status-badge-running-text);
+  box-shadow: inset 0 0 0 1px var(--status-badge-running-text);
 }
 
 /* "Failed" badge - the last turn ended with a provider error */
@@ -13777,6 +13796,22 @@ button.context-usage-indicator--button:focus-visible {
 .session-badge-continue {
   background: var(--status-badge-running-bg);
   color: var(--status-badge-running-text);
+}
+
+.session-badge-hold {
+  background: var(--status-badge-owned-bg);
+  color: var(--status-badge-owned-text);
+}
+
+.session-badge-interrupted {
+  background: var(--bg-hover);
+  color: var(--text-muted);
+}
+
+.session-badge-incomplete {
+  background: transparent;
+  color: var(--status-badge-running-text);
+  box-shadow: inset 0 0 0 1px var(--status-badge-running-text);
 }
 
 .session-badge-failed {

@@ -119,7 +119,8 @@ describe("session display read observation", () => {
     const warm = observe();
     await service.snapshot(selection, false, warm.observer);
     expect(warm.states).toEqual(["hit"]);
-    expect(warm.phases.size).toBe(0);
+    // A warm hit only checks the file stamp; cold phases stay unattributed.
+    expect([...warm.phases.keys()]).toEqual(["stamp"]);
   });
 
   it("logs a slow cold read with its phase breakdown", async () => {
