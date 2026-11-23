@@ -4,6 +4,7 @@ import {
   type Server as HttpsServer,
   createServer as createHttpsServer,
 } from "node:https";
+import type { Server as NetServer } from "node:net";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -63,6 +64,7 @@ import {
   SessionMetadataService,
 } from "./metadata/index.js";
 import { updateAllowedHosts } from "./middleware/allowed-hosts.js";
+import { installProxyProtocol } from "./network/proxy-protocol.js";
 import { NotificationService } from "./notifications/index.js";
 import { CodexSessionScanner } from "./projects/codex-scanner.js";
 import { GeminiSessionScanner } from "./projects/gemini-scanner.js";
@@ -145,6 +147,21 @@ function applyKeepAliveTuning(server: ReturnType<typeof serve>): void {
   if (typeof tunable.headersTimeout === "number") {
     tunable.headersTimeout = HTTP_HEADERS_TIMEOUT_MS;
   }
+}
+
+/**
+ * Let a local frpc (`transport.proxyProtocolVersion = "v2"`) tell us the real
+ * client address. Only loopback peers are trusted; see network/proxy-protocol.
+ */
+function enableProxyProtocol(server: ReturnType<typeof serve>): void {
+  if (config.proxyProtocol === "off") return;
+  installProxyProtocol(server as unknown as NetServer, {
+    onInvalid: (reason, peer) => {
+      console.warn(
+        `[ProxyProtocol] Dropped connection from ${peer ?? "unknown"}: ${reason}`,
+      );
+    },
+  });
 }
 
 function isRecoverablePipeError(error: unknown): boolean {
@@ -1183,6 +1200,7 @@ async function startServer() {
       : serve({ fetch: app.fetch, port, hostname }, onReady);
 
     applyKeepAliveTuning(server);
+    enableProxyProtocol(server);
 
     server.on("error", (error: unknown) => {
       const err = error as NodeJS.ErrnoException;
@@ -1575,6 +1593,7 @@ async function startServer() {
       },
     );
     applyKeepAliveTuning(dedicatedTlsServer);
+    enableProxyProtocol(dedicatedTlsServer);
     tlsLoader.attachServer(dedicatedTlsServer as unknown as HttpsServer);
     dedicatedTlsServerForShutdown = dedicatedTlsServer;
     dedicatedTlsServer.on("error", (error: unknown) => {

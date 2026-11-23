@@ -44,6 +44,7 @@ SERVER_TLS_HOST="${TLS_HOST:-}"
 SERVER_TLS_CERT_PATH="${TLS_CERT_PATH:-}"
 SERVER_TLS_KEY_PATH="${TLS_KEY_PATH:-}"
 SERVER_TRUST_PROXY="${TRUST_PROXY:-}"
+SERVER_PROXY_PROTOCOL="${PROXY_PROTOCOL:-}"
 BRIDGE_PORT="${YEP_CODEX_BRIDGE_PORT:-${CODEX_BRIDGE_PORT:-4510}}"
 BRIDGE_URL="${YEP_CODEX_BRIDGE_CONTROL_URL:-${CODEX_BRIDGE_CONTROL_URL:-http://127.0.0.1:${BRIDGE_PORT}}}"
 # External runtime splits live agent processes out of the web/API shell so the
@@ -640,6 +641,9 @@ write_server_plist() {
   fi
   if [[ -n "$SERVER_TRUST_PROXY" ]]; then
     env_args+=("TRUST_PROXY" "$SERVER_TRUST_PROXY")
+  fi
+  if [[ -n "$SERVER_PROXY_PROTOCOL" ]]; then
+    env_args+=("PROXY_PROTOCOL" "$SERVER_PROXY_PROTOCOL")
   fi
   if $RUNTIME_EXTERNAL; then
     env_args+=(

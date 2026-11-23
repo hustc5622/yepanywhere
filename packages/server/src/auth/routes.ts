@@ -3,9 +3,11 @@
  */
 
 import * as crypto from "node:crypto";
+import type { Socket } from "node:net";
 import type { Context } from "hono";
 import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
+import { getProxyProtocolClient } from "../network/proxy-protocol.js";
 import type { AuthService } from "./AuthService.js";
 import { PairingService } from "./PairingService.js";
 import { AuthRateLimiter, type RateLimitLockout } from "./RateLimiter.js";
@@ -180,7 +182,23 @@ function clearSessionCookies(c: Context, basePath?: string): void {
   }
 }
 
+/**
+ * Client address used for login rate limits and session `lastIp`.
+ *
+ * Order: a PROXY protocol header from a trusted local tunnel (frpc), then
+ * `X-Real-IP` / `X-Forwarded-For` when `trustProxy` is on, then the TCP peer.
+ * Without either, every frp-tunnelled client shares the tunnel's loopback
+ * address and therefore one rate-limit bucket.
+ */
 export function getClientRateLimitKey(c: Context, trustProxy = false): string {
+  const incoming = (
+    c.env as
+      | { incoming?: { socket?: Socket & { remoteAddress?: string } } }
+      | undefined
+  )?.incoming;
+  const proxied = getProxyProtocolClient(incoming?.socket);
+  if (proxied) return proxied.address;
+
   if (trustProxy) {
     const realIp = c.req.header("x-real-ip")?.trim();
     if (realIp) return realIp;
@@ -191,9 +209,6 @@ export function getClientRateLimitKey(c: Context, trustProxy = false): string {
     }
   }
 
-  const incoming = (
-    c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined
-  )?.incoming;
   return incoming?.socket?.remoteAddress ?? "direct";
 }
 

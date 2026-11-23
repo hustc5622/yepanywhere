@@ -57,6 +57,33 @@ scripts/deploy.sh --server-only
 
 ---
 
+## 经 frp 访问时识别真实客户端 IP（PROXY protocol）
+
+frpc 从本机 `127.0.0.1` 连接 Yep，所以不做额外配置时，所有经隧道进来的请求在服务端看来都是 `127.0.0.1`。结果是登录限流的「按客户端计数」退化成所有人共用一个计数：公网上任何人连错 5 次，你自己的手机和浏览器也会被锁 60 秒；已登录设备列表里的 IP 也全是 `127.0.0.1`。
+
+Yep 的 HTTP 和 HTTPS 监听会接受可选的 PROXY protocol（v1/v2）头：
+
+- 只有 TCP 对端是回环地址（frpc 所在的位置）时才采信这个头，局域网或公网对端发来的头不会被当作地址，无法伪造。
+- 头是可选的：本机脚本、本机浏览器、飞书 runtime 不发这个头，照常工作。PROXY 头不会与 HTTP 请求或 TLS 握手混淆。
+- 采信后，登录/配对限流和会话的 `lastIp` 都使用真实客户端地址。优先级：PROXY 头 → `TRUST_PROXY=true` 时的 `X-Real-IP`/`X-Forwarded-For` → TCP 对端。
+- 格式错误的头会直接断开连接，并在日志里记一条 `[ProxyProtocol] Dropped connection`。
+- 默认开启；在 `.env.deploy.local` 写 `PROXY_PROTOCOL=off` 可以关闭。
+
+frpc 侧在 Yep 的隧道（`localPort = 8022` 和 `8443`）上加一行，然后重启 frpc：
+
+```toml
+[[proxies]]
+type = "tcp"
+localIP = "127.0.0.1"
+localPort = 8022
+remotePort = 18022
+transport.proxyProtocolVersion = "v2"
+```
+
+**顺序很重要**：先部署支持 PROXY protocol 的 Yep，再改 frpc。反过来的话，旧版服务会把 PROXY 头当成坏的 HTTP 请求拒掉，整条隧道不可用。只给 Yep 的隧道加这一行，SSH、MySQL 等其他隧道不要加。
+
+---
+
 ## 日常无感认证工作流
 
 1. **首次开启认证**：在「设置 → 本地访问」打开「需要密码」，设置强密码（建议配合 Safari/Chrome/iCloud 密码管理器使用 Touch ID / Face ID 自动填充）。

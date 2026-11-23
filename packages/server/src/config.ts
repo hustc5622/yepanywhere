@@ -167,6 +167,13 @@ export interface Config {
   authSessionMaxTtlMs: number;
   /** Whether to trust reverse-proxy forwarding headers (X-Forwarded-Proto, X-Real-IP). */
   trustProxy: boolean;
+  /**
+   * Accept an optional PROXY protocol header (v1/v2) from loopback peers such
+   * as a local frpc with `transport.proxyProtocolVersion`, so rate limits and
+   * session records see the real client address. `PROXY_PROTOCOL=off`
+   * disables it. Default: "auto".
+   */
+  proxyProtocol: "auto" | "off";
   /** Whether port was explicitly set via CLI (prevents runtime changes) */
   cliPortOverride: boolean;
   /** Whether host was explicitly set via CLI (prevents runtime changes) */
@@ -470,6 +477,10 @@ export function loadConfig(): Config {
       60 *
       1000,
     trustProxy: process.env.TRUST_PROXY === "true",
+    proxyProtocol:
+      process.env.PROXY_PROTOCOL?.trim().toLowerCase() === "off"
+        ? "off"
+        : "auto",
     // CLI override flags (set by cli.ts when --port or --host are used)
     // Also treat PORT env var as an override when explicitly set (e.g., PORT=0 for test harnesses)
     cliPortOverride:
