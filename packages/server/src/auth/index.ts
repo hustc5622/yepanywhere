@@ -22,8 +22,12 @@ export {
 export {
   createAuthRoutes,
   getClientRateLimitKey,
+  getRequestSessionCredential,
   getSessionCookiePath,
   SESSION_COOKIE_NAME,
+  SESSION_TOKEN_QUERY_PARAM,
+  type SessionCredential,
+  type SessionCredentialSource,
   setSessionCookie,
   shouldUseSecureCookie,
   type AuthRoutesDeps,

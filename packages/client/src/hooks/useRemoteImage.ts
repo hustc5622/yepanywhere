@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { API_BASE } from "../lib/apiPath";
+import { authSessionHeaders } from "../lib/authSessionToken";
 
 /**
  * For browser fetches under a reverse-proxy prefix (Caddy mounts the
@@ -119,7 +120,10 @@ export function useFetchedImage(apiPath: string | null): RemoteImageResult {
 
     const requestUrl = directApiUrl(apiPath);
 
-    fetch(requestUrl, { credentials: "include" })
+    fetch(requestUrl, {
+      credentials: "include",
+      headers: authSessionHeaders(),
+    })
       .then(async (res) => {
         if (!res.ok) {
           throw new Error(await describeFailedResponse(res, requestUrl));

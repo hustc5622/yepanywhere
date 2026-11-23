@@ -23,6 +23,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  */
 class YepApprovalActionReceiver : BroadcastReceiver() {
   override fun onReceive(context: Context, intent: Intent) {
+    YepSessionTokens.init(context)
     val action = intent.getStringExtra(EXTRA_ACTION) ?: return
     val sessionId = intent.getStringExtra(EXTRA_SESSION_ID) ?: return
     val requestId = intent.getStringExtra(EXTRA_REQUEST_ID) ?: return
@@ -154,6 +155,7 @@ class YepApprovalActionReceiver : BroadcastReceiver() {
       connection,
       hasBody = body != null,
       cookie = CookieManager.getInstance().getCookie(url),
+      sessionToken = YepSessionTokens.tokenFor(url),
     )
 
     try {
@@ -197,10 +199,13 @@ class YepApprovalActionReceiver : BroadcastReceiver() {
       connection: HttpURLConnection,
       hasBody: Boolean,
       cookie: String?,
+      sessionToken: String? = null,
     ) {
       connection.setRequestProperty("Accept", "application/json")
       cookie?.takeIf { it.isNotBlank() }
         ?.let { connection.setRequestProperty("Cookie", it) }
+      YepSessionTokens.authorizationHeader(sessionToken)
+        ?.let { connection.setRequestProperty("Authorization", it) }
       if (hasBody) {
         connection.doOutput = true
         connection.setRequestProperty("Content-Type", "application/json")

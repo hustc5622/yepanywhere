@@ -1,4 +1,5 @@
 import { API_BASE } from "./apiPath";
+import { withAuthSessionQuery } from "./authSessionToken";
 
 /** Browser-loadable sources for the small image inside an attachment label. */
 export function getAttachmentThumbnailSrc({
@@ -14,9 +15,13 @@ export function getAttachmentThumbnailSrc({
   for (const candidate of [previewUrl, apiPath]) {
     const source = candidate?.trim();
     if (!source) continue;
-    if (source.startsWith(`${API_BASE}/`)) return source;
-    if (source.startsWith("/api/")) return `${API_BASE}${source.slice(4)}`;
-    if (/^(?:https?:|blob:|data:image\/)/i.test(source)) return source;
+    if (source.startsWith(`${API_BASE}/`)) return withAuthSessionQuery(source);
+    if (source.startsWith("/api/")) {
+      return withAuthSessionQuery(`${API_BASE}${source.slice(4)}`);
+    }
+    if (/^(?:https?:|blob:|data:image\/)/i.test(source)) {
+      return withAuthSessionQuery(source);
+    }
   }
   return undefined;
 }

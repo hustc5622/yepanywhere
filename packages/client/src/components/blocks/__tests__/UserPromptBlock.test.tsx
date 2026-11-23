@@ -474,6 +474,7 @@ User uploaded files:
       await waitFor(() => {
         expect(fetchMock).toHaveBeenCalledWith(downloadUrl, {
           credentials: "include",
+          headers: {},
         });
       });
       expect(screen.getByRole("dialog")).toBeDefined();

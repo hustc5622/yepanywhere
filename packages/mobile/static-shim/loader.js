@@ -8,6 +8,9 @@
   var NATIVE_PUSH_REQUEST_MESSAGE = "yep-anywhere:native-push-request";
   var NATIVE_PUSH_RESPONSE_MESSAGE = "yep-anywhere:native-push-response";
   var NATIVE_PUSH_DEBUG_MESSAGE = "yep-anywhere:native-push-debug";
+  // The framed app cannot keep its auth cookie (cross-site iframe), so it holds
+  // a bearer token and hands it here for the native watcher / approval actions.
+  var SESSION_TOKEN_MESSAGE = "yep-anywhere:mobile-shell-session-token";
   var CHANNEL_STORAGE_KEY = "yep-anywhere-mobile-channel";
   var ACTIVE_NODE_STORAGE_KEY = "yep-anywhere-mobile-active-node";
   var NODE_HISTORY_STORAGE_KEY = "yep-anywhere-mobile-node-history";
@@ -516,6 +519,27 @@
     } catch (error) {
       logNativePush(
         "configure session watcher failed: " +
+          (error && error.message ? error.message : "unknown")
+      );
+    }
+  }
+
+  function forwardSessionTokenToNative(origin, token) {
+    if (typeof origin !== "string" || !/^https?:\/\//.test(origin)) return;
+    var value = typeof token === "string" ? token : "";
+    try {
+      if (
+        window.YepNativePush &&
+        typeof window.YepNativePush.setSessionToken === "function"
+      ) {
+        window.YepNativePush.setSessionToken(origin, value);
+        logNativePush(
+          "session token " + (value ? "stored" : "cleared") + " origin=" + origin
+        );
+      }
+    } catch (error) {
+      logNativePush(
+        "session token forward failed: " +
           (error && error.message ? error.message : "unknown")
       );
     }
@@ -1190,6 +1214,11 @@
 
         if (event.data.type === THEME_MESSAGE) {
           applyAppTheme(event.data.theme, event.data.resolvedTheme);
+          return;
+        }
+
+        if (event.data.type === SESSION_TOKEN_MESSAGE) {
+          forwardSessionTokenToNative(event.origin, event.data.token);
           return;
         }
 

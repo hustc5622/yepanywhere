@@ -18,6 +18,11 @@ import {
 } from "@yep-anywhere/shared";
 import { getDesktopAuthToken } from "../../api/client";
 import { API_BASE } from "../apiPath";
+import {
+  AUTH_SESSION_QUERY_PARAM,
+  getAuthSessionToken,
+  redactAuthSessionQuery,
+} from "../authSessionToken";
 import { WireProtocol } from "./WireProtocol";
 import type {
   Connection,
@@ -73,6 +78,11 @@ export class WebSocketConnection implements Connection {
     if (token) {
       params.set("desktop_token", token);
     }
+    // Framed clients (Android shell) hold a session token instead of a cookie.
+    const sessionToken = getAuthSessionToken();
+    if (sessionToken) {
+      params.set(AUTH_SESSION_QUERY_PARAM, sessionToken);
+    }
     const query = params.toString();
     return query ? `${base}?${query}` : base;
   }
@@ -97,7 +107,10 @@ export class WebSocketConnection implements Connection {
   private connect(): Promise<void> {
     return new Promise((resolve, reject) => {
       const wsUrl = this.getWsUrl();
-      console.log("[WebSocketConnection] Connecting to", wsUrl);
+      console.log(
+        "[WebSocketConnection] Connecting to",
+        redactAuthSessionQuery(wsUrl),
+      );
 
       const ws = new WebSocket(wsUrl);
       ws.binaryType = "arraybuffer";

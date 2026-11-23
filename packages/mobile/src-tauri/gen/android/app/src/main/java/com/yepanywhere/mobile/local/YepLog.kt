@@ -2,7 +2,6 @@ package com.yepanywhere.mobile.local
 
 import android.content.Context
 import android.util.Log
-import android.webkit.CookieManager
 import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedReader
@@ -119,8 +118,7 @@ object YepLog {
       setRequestProperty("Content-Type", "application/json")
       setRequestProperty("Accept", "application/json")
       setRequestProperty("X-Yep-Anywhere", "true")
-      CookieManager.getInstance().getCookie(url)?.takeIf { it.isNotBlank() }
-        ?.let { setRequestProperty("Cookie", it) }
+      YepSessionTokens.authorize(this, url)
     }
 
     try {

@@ -8,6 +8,7 @@
  */
 import { parseLineColumn } from "@yep-anywhere/shared";
 import { API_BASE, appPath } from "./apiPath";
+import { withAuthSessionQuery } from "./authSessionToken";
 
 export interface FileRef {
   /** Absolute path, or a path relative to `projectId`'s root. */
@@ -116,7 +117,7 @@ function fsQuery(ref: FileRef): URLSearchParams {
 export function fileRawUrl(ref: FileRef, download = false): string {
   const params = fsQuery(ref);
   if (download) params.set("download", "true");
-  return `${API_BASE}/fs/raw?${params.toString()}`;
+  return withAuthSessionQuery(`${API_BASE}/fs/raw?${params.toString()}`);
 }
 
 /** API path (without base) for the preview JSON. */

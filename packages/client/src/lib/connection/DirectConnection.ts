@@ -2,6 +2,7 @@ import type { UploadedFile } from "@yep-anywhere/shared";
 import { uploadFile } from "../../api/upload";
 import { API_BASE } from "../apiPath";
 import { authEvents } from "../authEvents";
+import { authSessionHeaders } from "../authSessionToken";
 import type {
   Connection,
   StreamHandlers,
@@ -29,6 +30,7 @@ export class DirectConnection implements Connection {
       headers: {
         "Content-Type": "application/json",
         "X-Yep-Anywhere": "true",
+        ...authSessionHeaders(),
         ...init?.headers,
       },
     });
@@ -65,6 +67,7 @@ export class DirectConnection implements Connection {
       credentials: "include",
       headers: {
         "X-Yep-Anywhere": "true",
+        ...authSessionHeaders(),
       },
     });
 

@@ -2,6 +2,7 @@ import { useState } from "react";
 import { useOptionalSessionMetadata } from "../../../contexts/SessionMetadataContext";
 import { useFetchedImage } from "../../../hooks/useRemoteImage";
 import { useOptionalI18n } from "../../../i18n";
+import { withAuthSessionQuery } from "../../../lib/authSessionToken";
 import { fileRefFromPath } from "../../../lib/fileRef";
 import { FileOpenButton } from "../../FilePreviewPanel";
 import { DetailPanel } from "../../ui/DetailPanel";
@@ -172,7 +173,7 @@ function ImagePreview({
     <div className="read-image-result">
       <img
         className="read-image"
-        src={src}
+        src={withAuthSessionQuery(src)}
         alt={alt}
         style={{ maxWidth: "100%" }}
         onLoad={(event) => {

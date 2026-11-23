@@ -1,5 +1,6 @@
 import { useFetchedImage } from "../hooks/useRemoteImage";
 import { useOptionalI18n } from "../i18n";
+import { withAuthSessionQuery } from "../lib/authSessionToken";
 import { Modal } from "./ui/Modal";
 
 interface Props {
@@ -45,7 +46,7 @@ export function AttachmentPreviewModal({ name, src, apiPath, onClose }: Props) {
     <Modal title={name} onClose={onClose}>
       <div className="uploaded-image-modal">
         {src ? (
-          <img src={src} alt={name} />
+          <img src={withAuthSessionQuery(src)} alt={name} />
         ) : apiPath ? (
           <FetchedPreview apiPath={apiPath} alt={name} />
         ) : (

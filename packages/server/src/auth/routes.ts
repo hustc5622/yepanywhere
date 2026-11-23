@@ -12,6 +12,62 @@ import { AuthRateLimiter, type RateLimitLockout } from "./RateLimiter.js";
 
 export const SESSION_COOKIE_NAME = "yep-anywhere-session";
 
+/**
+ * Query parameter carrying the session token for requests that cannot set
+ * headers: WebSocket upgrades and media/download URLs (`<img>`, `<video>`,
+ * DownloadManager). Only honored on GET/HEAD so it never authorizes writes.
+ */
+export const SESSION_TOKEN_QUERY_PARAM = "yep_auth";
+
+const BEARER_PREFIX = /^Bearer\s+/i;
+
+export type SessionCredentialSource = "cookie" | "header" | "query";
+
+export interface SessionCredential {
+  sessionId: string;
+  source: SessionCredentialSource;
+}
+
+/**
+ * Read the session credential from a request.
+ *
+ * Browsers carry it in the HttpOnly cookie. Clients embedded in a cross-site
+ * iframe (the Android shell at `https://tauri.localhost` framing a plain-HTTP
+ * server) never get that cookie back: `SameSite=Lax` is withheld from
+ * cross-site frames and `SameSite=None` requires `Secure`, which plain HTTP
+ * cannot set. Those clients receive the token in the login response instead
+ * and present it as `Authorization: Bearer`, or as `?yep_auth=` where headers
+ * are impossible.
+ */
+export function getRequestSessionCredential(
+  c: Context,
+): SessionCredential | null {
+  const authorization = c.req.header("authorization");
+  if (authorization && BEARER_PREFIX.test(authorization)) {
+    const token = authorization.replace(BEARER_PREFIX, "").trim();
+    if (token) return { sessionId: token, source: "header" };
+  }
+
+  const cookie = getCookie(c, SESSION_COOKIE_NAME);
+  if (cookie) return { sessionId: cookie, source: "cookie" };
+
+  const method = c.req.method.toUpperCase();
+  if (method === "GET" || method === "HEAD") {
+    const queryToken = c.req.query(SESSION_TOKEN_QUERY_PARAM)?.trim();
+    if (queryToken) return { sessionId: queryToken, source: "query" };
+  }
+
+  return null;
+}
+
+function wantsTokenTransport(body: unknown): boolean {
+  return (
+    typeof body === "object" &&
+    body !== null &&
+    (body as { tokenTransport?: unknown }).tokenTransport === true
+  );
+}
+
 export interface AuthRoutesDeps {
   authService: AuthService;
   /** Whether auth is disabled by env var (--auth-disable). Overrides settings. */
@@ -30,11 +86,15 @@ export interface AuthRoutesDeps {
 
 interface SetupBody {
   password: string;
+  /** Also return the session token for clients that cannot keep the cookie. */
+  tokenTransport?: boolean;
 }
 
 interface LoginBody {
   password: string;
   deviceLabel?: string;
+  /** Also return the session token for clients that cannot keep the cookie. */
+  tokenTransport?: boolean;
 }
 
 interface ChangePasswordBody {
@@ -48,6 +108,8 @@ interface PairingCreateBody {
 interface PairingRedeemBody {
   token: string;
   deviceLabel?: string;
+  /** Also return the session token for clients that cannot keep the cookie. */
+  tokenTransport?: boolean;
 }
 
 interface LogoutAllBody {
@@ -148,7 +210,7 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
   const pairingService = deps.pairingService ?? new PairingService();
 
   const requireSession = async (c: Context): Promise<string | null> => {
-    const sessionId = getCookie(c, SESSION_COOKIE_NAME);
+    const sessionId = getRequestSessionCredential(c)?.sessionId;
     if (!sessionId) return null;
     const valid = await authService.validateSession(sessionId);
     return valid ? sessionId : null;
@@ -226,7 +288,8 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
     }
 
     // Auth is enabled - check session
-    const sessionId = getCookie(c, SESSION_COOKIE_NAME);
+    const credential = getRequestSessionCredential(c);
+    const sessionId = credential?.sessionId;
     const hasAccount = authService.hasAccount();
 
     if (!hasAccount) {
@@ -254,6 +317,7 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
     });
     if (
       validation.valid &&
+      credential?.source === "cookie" &&
       validation.shouldRefreshCookie &&
       validation.cookieMaxAgeSec
     ) {
@@ -360,7 +424,10 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
       maxAgeSec: authService.getSessionCookieMaxAgeSec(),
     });
 
-    return c.json({ success: true });
+    return c.json({
+      success: true,
+      ...(wantsTokenTransport(body) ? { sessionToken: sessionId } : {}),
+    });
   });
 
   /**
@@ -421,7 +488,10 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
       maxAgeSec: authService.getSessionCookieMaxAgeSec(),
     });
 
-    return c.json({ success: true });
+    return c.json({
+      success: true,
+      ...(wantsTokenTransport(body) ? { sessionToken: sessionId } : {}),
+    });
   });
 
   /**
@@ -429,7 +499,7 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
    * Logout current session.
    */
   app.post("/logout", async (c) => {
-    const sessionId = getCookie(c, SESSION_COOKIE_NAME);
+    const sessionId = getRequestSessionCredential(c)?.sessionId;
 
     if (sessionId) {
       await authService.invalidateSession(sessionId);
@@ -626,7 +696,10 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
       maxAgeSec: authService.getSessionCookieMaxAgeSec(),
     });
 
-    return c.json({ success: true });
+    return c.json({
+      success: true,
+      ...(wantsTokenTransport(body) ? { sessionToken: sessionId } : {}),
+    });
   });
 
   /**

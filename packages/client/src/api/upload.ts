@@ -6,6 +6,10 @@ import type {
   UploadedFile,
 } from "@yep-anywhere/shared";
 import { API_BASE } from "../lib/apiPath";
+import {
+  redactAuthSessionQuery,
+  withAuthSessionQuery,
+} from "../lib/authSessionToken";
 
 /** Default chunk size (64KB) - matches server progress interval */
 const DEFAULT_CHUNK_SIZE = 64 * 1024;
@@ -71,7 +75,7 @@ export async function uploadChunks(
   createWebSocket: WebSocketFactory = (u) => new WebSocket(u) as WebSocketLike,
 ): Promise<UploadedFile> {
   const { onProgress, signal } = options;
-  console.log("[Upload] Starting upload to:", url);
+  console.log("[Upload] Starting upload to:", redactAuthSessionQuery(url));
 
   return new Promise((resolve, reject) => {
     // Early abort check
@@ -255,7 +259,7 @@ export function buildUploadUrl(
 
   const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
   const host = window.location.host;
-  return `${protocol}//${host}${pathFor(API_BASE)}`;
+  return withAuthSessionQuery(`${protocol}//${host}${pathFor(API_BASE)}`);
 }
 
 /**

@@ -1,6 +1,5 @@
 package com.yepanywhere.mobile.local
 
-import android.webkit.CookieManager
 import org.json.JSONArray
 import org.json.JSONObject
 import java.net.HttpURLConnection
@@ -57,11 +56,10 @@ class YepNodeNotifications {
         requestMethod = "GET"
         connectTimeout = 5_000
         readTimeout = 8_000
-        // Never forward this server's cookies through a redirect.
+        // Never forward this server's cookies or token through a redirect.
         instanceFollowRedirects = false
         setRequestProperty("Accept", "application/json")
-        CookieManager.getInstance().getCookie(url)?.takeIf { it.isNotBlank() }
-          ?.let { setRequestProperty("Cookie", it) }
+        YepSessionTokens.authorize(this, url)
       }
       try {
         val status = connection.responseCode

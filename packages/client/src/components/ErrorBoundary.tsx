@@ -1,6 +1,7 @@
 import { Component, type ErrorInfo, type ReactNode } from "react";
 import { useI18n } from "../i18n";
 import { apiPath } from "../lib/apiPath";
+import { authSessionHeaders } from "../lib/authSessionToken";
 
 const CLIENT_BUILD_ID = typeof __BUILD_ID__ === "undefined" ? "" : __BUILD_ID__;
 const CLIENT_BUILD_PROFILE =
@@ -66,7 +67,9 @@ export class ErrorBoundary extends Component<Props, State> {
   async fetchServerVersion() {
     this.setState({ versionLoading: true });
     try {
-      const res = await fetch(apiPath("/version"));
+      const res = await fetch(apiPath("/version"), {
+        headers: authSessionHeaders(),
+      });
       if (res.ok) {
         const data = await res.json();
         this.setState({

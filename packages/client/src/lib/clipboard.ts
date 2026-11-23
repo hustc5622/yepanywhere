@@ -1,4 +1,5 @@
 import { isManagedUploadDownloadUrl } from "@yep-anywhere/shared";
+import { withAuthSessionQuery } from "./authSessionToken";
 
 const RECENT_SELECTION_TTL_MS = 2000;
 
@@ -517,7 +518,9 @@ async function readAttachmentBlob(
     if (!inline) throw new Error(`Invalid inline data for ${attachment.name}`);
     return inline;
   }
-  const response = await fetch(sourceUrl, { credentials: "include" });
+  const response = await fetch(withAuthSessionQuery(sourceUrl), {
+    credentials: "include",
+  });
   if (!response.ok) {
     throw new Error(
       `Unable to load ${attachment.name}: HTTP ${response.status}${response.statusText ? ` ${response.statusText}` : ""}`,

@@ -421,3 +421,119 @@ describe("Auth routes - hardening, sliding sessions, device management & pairing
     expect(statusBAfter.authenticated).toBe(false);
   });
 });
+
+describe("Auth routes - token transport for cross-site frames", () => {
+  let authService: AuthService;
+  let testDir: string;
+
+  beforeEach(async () => {
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-token-test-"));
+    authService = new AuthService({
+      dataDir: testDir,
+      cookieSecret: "test-cookie-secret",
+    });
+    await authService.initialize();
+    await authService.enableAuth("strong-password-123");
+  });
+
+  afterEach(async () => {
+    await fs.rm(testDir, { recursive: true, force: true });
+  });
+
+  async function login(
+    routes: ReturnType<typeof createAuthRoutes>,
+    body: Record<string, unknown>,
+  ): Promise<Response> {
+    return routes.request("/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "strong-password-123", ...body }),
+    });
+  }
+
+  it("keeps the session token out of normal browser login responses", async () => {
+    const routes = createAuthRoutes({ authService });
+    const res = await login(routes, {});
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ success: true });
+  });
+
+  it("returns a bearer token that authenticates status and logout", async () => {
+    const routes = createAuthRoutes({ authService });
+    const res = await login(routes, { tokenTransport: true });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { sessionToken?: string };
+    expect(body.sessionToken).toMatch(/^[0-9a-f]{64}$/);
+    const authorization = `Bearer ${body.sessionToken}`;
+
+    const status = await routes.request("/status", {
+      headers: { Authorization: authorization },
+    });
+    const statusBody = (await status.json()) as { authenticated: boolean };
+    expect(statusBody.authenticated).toBe(true);
+    // Token-authenticated requests never get a refreshed cookie.
+    expect(status.headers.get("set-cookie")).toBeNull();
+
+    const sessions = await routes.request("/sessions", {
+      headers: { Authorization: authorization },
+    });
+    expect(sessions.status).toBe(200);
+
+    const logout = await routes.request("/logout", {
+      method: "POST",
+      headers: { Authorization: authorization },
+    });
+    expect(logout.status).toBe(200);
+
+    const after = await routes.request("/status", {
+      headers: { Authorization: authorization },
+    });
+    expect(
+      ((await after.json()) as { authenticated: boolean }).authenticated,
+    ).toBe(false);
+  });
+
+  it("accepts the query token only on read requests", async () => {
+    const routes = createAuthRoutes({ authService });
+    const res = await login(routes, { tokenTransport: true });
+    const { sessionToken } = (await res.json()) as { sessionToken: string };
+
+    const read = await routes.request(
+      `/sessions?yep_auth=${encodeURIComponent(sessionToken)}`,
+    );
+    expect(read.status).toBe(200);
+
+    const write = await routes.request(
+      `/logout-all?yep_auth=${encodeURIComponent(sessionToken)}`,
+      { method: "POST", headers: { "Content-Type": "application/json" } },
+    );
+    expect(write.status).toBe(401);
+  });
+
+  it("returns the token from pairing redemption when requested", async () => {
+    const routes = createAuthRoutes({ authService });
+    const loginRes = await login(routes, { tokenTransport: true });
+    const { sessionToken } = (await loginRes.json()) as {
+      sessionToken: string;
+    };
+    const created = await routes.request("/pairing/create", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${sessionToken}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({}),
+    });
+    const { token } = (await created.json()) as { token: string };
+
+    const redeemed = await routes.request("/pairing/redeem", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ token, tokenTransport: true }),
+    });
+    expect(redeemed.status).toBe(200);
+    const body = (await redeemed.json()) as { sessionToken?: string };
+    expect(body.sessionToken).toMatch(/^[0-9a-f]{64}$/);
+    expect(body.sessionToken).not.toBe(sessionToken);
+  });
+});

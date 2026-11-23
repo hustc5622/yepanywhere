@@ -327,7 +327,13 @@ export function attachUnifiedUpgradeHandler(
   server.on("upgrade", (req, socket, head) => {
     const connId = ++connectionCounter;
     const urlPath = req.url || "/";
-    debugLog("Upgrade", `[${connId}] Upgrade request`, { path: urlPath });
+    debugLog("Upgrade", `[${connId}] Upgrade request`, {
+      // Upgrade URLs carry credentials (`yep_auth`, `desktop_token`).
+      path: urlPath.replace(
+        /([?&](?:yep_auth|desktop_token)=)[^&#]*/g,
+        "$1***",
+      ),
+    });
 
     // Track socket state
     let socketClosed = false;

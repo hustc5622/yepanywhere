@@ -66,6 +66,13 @@ scripts/deploy.sh --server-only
    - 登录接口与配对接口内置防爆破限流（连续失败 5 次锁定 60 秒，10 次锁定 15 分钟）；
    - 修改密码会自动吊销其他所有设备的会话；
    - 可在「设置 → 本地访问 → 已登录设备」随时查看并远程踢出单个设备或退出其他所有设备。
+5. **Android APK 内的登录凭证（Bearer token）**：APK 外壳运行在 `https://tauri.localhost`，Yep 页面放在它的 iframe 里，属于**跨站 iframe**。浏览器不会在跨站 iframe 里保存或发送 `SameSite=Lax` 的 Cookie；`SameSite=None` 又必须带 `Secure`，纯 HTTP 节点（如 `http://39.106.189.88:18022`）无法下发。表现是密码正确、服务端也创建了会话，但后续请求不带 Cookie，又被踢回登录页。因此：
+   - 页面检测到自己运行在 iframe 中时，登录、配对兑换和初始化账号请求会带上 `tokenTransport: true`，服务端在响应里额外返回 `sessionToken`。普通浏览器不带这个字段，仍然只使用 HttpOnly Cookie，token 不会暴露给页面 JS。
+   - 页面把 token 存在 iframe 自己的 `localStorage`（`yep-anywhere-auth-session-token`）里。fetch 请求带 `Authorization: Bearer <token>`；WebSocket 升级请求和 `<img>`/`<video>`/下载这类无法设置请求头的 URL 带 `?yep_auth=<token>`。服务端只在 GET/HEAD 请求上接受查询参数，所以它不能用来执行写操作。token 认证的请求不会刷新 Cookie。
+   - 页面通过 `postMessage` 把 token 交给 APK 外壳（只发往 `https://tauri.localhost` 和 `tauri://localhost`），外壳再调用原生桥 `YepNativePush.setSessionToken(origin, token)`，按 origin 存进 App 私有的 SharedPreferences。后台会话监听、通知栏审批、侧栏节点角标、原生日志上传和 DownloadManager 下载都会带上这个 token。原生桥只能写入、不能读回。
+   - 退出登录、全部退出（包含当前设备）、关闭认证，以及 `/api/auth/status` 判定当前 token 已失效时，页面会清掉本地 token 并通知外壳清除。
+   - 服务端和页面改动部署后，现有 APK 就能正常登录。后台监听和通知栏审批使用 token 需要重新打 APK，因为外壳 `loader.js` 和原生代码都打包在 APK 里。
+
 ---
 
 ## 路径 2（备选）：海外低延迟 TCP frp + 域名自动证书

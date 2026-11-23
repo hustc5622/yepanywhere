@@ -23,6 +23,21 @@ class YepApprovalActionReceiverTest {
     assertTrue(connection.doOutput)
   }
 
+  @Test
+  fun approvalRequestsPresentTheSessionTokenAsBearer() {
+    val connection = RecordingHttpURLConnection()
+
+    YepApprovalActionReceiver.configureApiRequest(
+      connection,
+      hasBody = false,
+      cookie = null,
+      sessionToken = "abc123",
+    )
+
+    assertEquals("Bearer abc123", connection.getRequestProperty("Authorization"))
+    assertEquals(null, connection.getRequestProperty("Cookie"))
+  }
+
   private class RecordingHttpURLConnection :
     HttpURLConnection(URL("http://127.0.0.1/yep/api/sessions/test/input")) {
     override fun connect() = Unit

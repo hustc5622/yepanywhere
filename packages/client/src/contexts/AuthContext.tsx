@@ -18,6 +18,11 @@ import {
 import { useLocation, useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import { authEvents } from "../lib/authEvents";
+import {
+  announceAuthSessionTokenToShell,
+  getAuthSessionToken,
+  setAuthSessionToken,
+} from "../lib/authSessionToken";
 
 interface AuthContextValue {
   /** Whether user is authenticated */
@@ -77,6 +82,13 @@ export function AuthProvider({ children }: AuthProviderProps) {
   const checkAuth = useCallback(async () => {
     try {
       const status = await api.getAuthStatus();
+      if (status.enabled && !status.authenticated && getAuthSessionToken()) {
+        // The held bearer token was revoked or expired; drop it so later
+        // requests stop presenting it and native watchers stop polling with it.
+        setAuthSessionToken(null);
+      } else if (status.authenticated) {
+        announceAuthSessionTokenToShell();
+      }
       setAuthEnabled(status.enabled);
       setAuthDisabledByEnv(status.disabledByEnv);
       setAuthFilePath(status.authFilePath ?? "");

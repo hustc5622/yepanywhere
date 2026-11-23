@@ -441,6 +441,11 @@ function uploadListQuery(
 }
 
 import { API_BASE } from "../lib/apiPath";
+import {
+  authSessionHeaders,
+  setAuthSessionToken,
+  shouldUseTokenTransport,
+} from "../lib/authSessionToken";
 
 /**
  * Desktop auth token read from URL query parameter (?desktop_token=...).
@@ -646,6 +651,7 @@ export async function fetchResponse(
   if (desktopAuthToken) {
     headers["X-Desktop-Token"] = desktopAuthToken;
   }
+  Object.assign(headers, authSessionHeaders());
 
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
@@ -944,6 +950,7 @@ async function fetchBlob(
   if (desktopAuthToken) {
     headers["X-Desktop-Token"] = desktopAuthToken;
   }
+  Object.assign(headers, authSessionHeaders());
 
   const res = await fetch(`${API_BASE}${path}`, {
     credentials: "include",
@@ -993,6 +1000,7 @@ async function uploadReportForm<T>(
   if (desktopAuthToken) {
     headers["X-Desktop-Token"] = desktopAuthToken;
   }
+  Object.assign(headers, authSessionHeaders());
 
   const formData = new FormData();
   formData.append("file", file);
@@ -1054,6 +1062,7 @@ async function loadReportImageFile(
   if (desktopAuthToken) {
     headers["X-Desktop-Token"] = desktopAuthToken;
   }
+  Object.assign(headers, authSessionHeaders());
   const response = await fetch(url, {
     credentials: "include",
     headers,
@@ -1063,6 +1072,29 @@ async function loadReportImageFile(
     throw new Error(`Failed to load report image: HTTP ${response.status}`);
   }
   return response.blob();
+}
+
+/**
+ * Create a session (password login, pairing, initial setup). Framed clients
+ * cannot keep the HttpOnly cookie, so they ask for the token in the response
+ * and present it as a bearer token from then on (see `authSessionToken`).
+ */
+async function establishAuthSession(
+  path: string,
+  body: Record<string, unknown>,
+): Promise<{ success: boolean }> {
+  const tokenTransport = shouldUseTokenTransport();
+  const result = await fetchJSON<{ success: boolean; sessionToken?: string }>(
+    path,
+    {
+      method: "POST",
+      body: JSON.stringify(tokenTransport ? { ...body, tokenTransport } : body),
+    },
+  );
+  if (tokenTransport) {
+    setAuthSessionToken(result.sessionToken ?? null);
+  }
+  return { success: result.success };
 }
 
 export const api = {
@@ -2496,25 +2528,27 @@ export const api = {
   disableAuth: () =>
     fetchJSON<{ success: boolean }>("/auth/disable", {
       method: "POST",
+    }).then((result) => {
+      setAuthSessionToken(null);
+      return result;
     }),
 
   /** @deprecated Use enableAuth instead */
   setupAccount: (password: string) =>
-    fetchJSON<{ success: boolean }>("/auth/setup", {
-      method: "POST",
-      body: JSON.stringify({ password }),
-    }),
+    establishAuthSession("/auth/setup", { password }),
 
   login: (password: string) =>
-    fetchJSON<{ success: boolean }>("/auth/login", {
-      method: "POST",
-      body: JSON.stringify({ password }),
-    }),
+    establishAuthSession("/auth/login", { password }),
 
-  logout: () =>
-    fetchJSON<{ success: boolean }>("/auth/logout", {
-      method: "POST",
-    }),
+  logout: async () => {
+    try {
+      return await fetchJSON<{ success: boolean }>("/auth/logout", {
+        method: "POST",
+      });
+    } finally {
+      setAuthSessionToken(null);
+    }
+  },
 
   changePassword: (newPassword: string) =>
     fetchJSON<{ success: boolean }>("/auth/change-password", {
@@ -2541,6 +2575,9 @@ export const api = {
     }>("/auth/logout-all", {
       method: "POST",
       body: JSON.stringify({ includeCurrent }),
+    }).then((result) => {
+      if (result.signedOutCurrent) setAuthSessionToken(null);
+      return result;
     }),
 
   createPairingToken: (label?: string) =>
@@ -2550,12 +2587,9 @@ export const api = {
     }),
 
   redeemPairingToken: (token: string, deviceLabel?: string) =>
-    fetchJSON<{ success: boolean }>("/auth/pairing/redeem", {
-      method: "POST",
-      body: JSON.stringify({
-        token,
-        ...(deviceLabel ? { deviceLabel } : {}),
-      }),
+    establishAuthSession("/auth/pairing/redeem", {
+      token,
+      ...(deviceLabel ? { deviceLabel } : {}),
     }),
 
   /** Toggle unauthenticated localhost access (desktop token floor bypass) */

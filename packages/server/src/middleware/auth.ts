@@ -1,7 +1,9 @@
 /**
  * Authentication middleware for API routes.
  *
- * Validates session cookies and returns 401 for unauthenticated requests.
+ * Validates the session credential (HttpOnly cookie, or the bearer/query
+ * token used by clients that cannot keep the cookie) and returns 401 for
+ * unauthenticated requests.
  * Skips auth for /api/auth/* paths (login, setup, etc).
  *
  * Auth is only enforced when:
@@ -17,11 +19,10 @@
 
 import * as crypto from "node:crypto";
 import type { MiddlewareHandler } from "hono";
-import { getCookie } from "hono/cookie";
 import type { AuthService } from "../auth/AuthService.js";
 import {
-  SESSION_COOKIE_NAME,
   getClientRateLimitKey,
+  getRequestSessionCredential,
   setSessionCookie,
 } from "../auth/routes.js";
 import { WS_INTERNAL_AUTHENTICATED } from "./internal-auth.js";
@@ -174,11 +175,14 @@ export function createAuthMiddleware(
       );
     }
 
-    // Validate session cookie (and extend sliding window when due)
-    const sessionId = getCookie(c, SESSION_COOKIE_NAME);
-    if (!sessionId) {
+    // Validate session credential: the HttpOnly cookie for browsers, or the
+    // bearer/query token for clients embedded in a cross-site frame (Android
+    // shell) that never receive the cookie. Extend the sliding window when due.
+    const credential = getRequestSessionCredential(c);
+    if (!credential) {
       return c.json({ error: "Authentication required" }, 401);
     }
+    const { sessionId } = credential;
 
     const validation =
       typeof authService.validateSessionWithRefresh === "function"
@@ -194,7 +198,11 @@ export function createAuthMiddleware(
       return c.json({ error: "Session expired" }, 401);
     }
 
-    if (validation.shouldRefreshCookie && validation.cookieMaxAgeSec) {
+    if (
+      credential.source === "cookie" &&
+      validation.shouldRefreshCookie &&
+      validation.cookieMaxAgeSec
+    ) {
       setSessionCookie(c, sessionId, {
         basePath,
         trustProxy,

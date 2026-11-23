@@ -578,3 +578,60 @@ describe("Codex new-session service tier", () => {
     },
   );
 });
+
+describe("framed login token transport", () => {
+  const fetchMock = vi.fn<typeof fetch>();
+  const TOKEN = "e".repeat(64);
+
+  beforeEach(() => {
+    vi.stubGlobal("fetch", fetchMock);
+    window.localStorage.clear();
+  });
+
+  afterEach(() => {
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    fetchMock.mockReset();
+    window.localStorage.clear();
+  });
+
+  function jsonResponse(body: unknown): Response {
+    return { ok: true, json: async () => body } as Response;
+  }
+
+  it("keeps browser logins cookie-only", async () => {
+    fetchMock.mockResolvedValue(jsonResponse({ success: true }));
+    await api.login("pw-123456");
+    const [, request] = fetchMock.mock.calls[0] ?? [];
+    expect(JSON.parse(String(request?.body))).toEqual({
+      password: "pw-123456",
+    });
+  });
+
+  it("requests, stores and presents the bearer token inside a frame", async () => {
+    vi.spyOn(window, "top", "get").mockReturnValue({} as Window);
+    fetchMock.mockResolvedValueOnce(
+      jsonResponse({ success: true, sessionToken: TOKEN }),
+    );
+    await expect(api.login("pw-123456")).resolves.toEqual({ success: true });
+    const [, loginRequest] = fetchMock.mock.calls[0] ?? [];
+    expect(JSON.parse(String(loginRequest?.body))).toEqual({
+      password: "pw-123456",
+      tokenTransport: true,
+    });
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ sessions: [] }));
+    await api.listAuthSessions();
+    const [, nextRequest] = fetchMock.mock.calls[1] ?? [];
+    expect(nextRequest?.headers).toMatchObject({
+      Authorization: `Bearer ${TOKEN}`,
+    });
+
+    fetchMock.mockResolvedValueOnce(jsonResponse({ success: true }));
+    await api.logout();
+    fetchMock.mockResolvedValueOnce(jsonResponse({ sessions: [] }));
+    await api.listAuthSessions();
+    const [, afterLogout] = fetchMock.mock.calls[3] ?? [];
+    expect(afterLogout?.headers).not.toHaveProperty("Authorization");
+  });
+});

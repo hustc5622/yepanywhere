@@ -79,6 +79,8 @@ class MainActivity : TauriActivity() {
   }
 
   override fun onCreate(savedInstanceState: Bundle?) {
+    // Before super.onCreate: the WebView (and its JS bridge) is created there.
+    YepSessionTokens.init(applicationContext)
     enableEdgeToEdge()
     super.onCreate(savedInstanceState)
     Log.i(
@@ -207,6 +209,8 @@ class MainActivity : TauriActivity() {
         CookieManager.getInstance().getCookie(download.url)
           ?.takeIf { it.isNotBlank() }
           ?.let { addRequestHeader("Cookie", it) }
+        YepSessionTokens.authorizationHeader(YepSessionTokens.tokenFor(download.url))
+          ?.let { addRequestHeader("Authorization", it) }
         mainWebView?.url
           ?.takeIf { URLUtil.isHttpUrl(it) || URLUtil.isHttpsUrl(it) }
           ?.let { addRequestHeader("Referer", it) }
@@ -534,6 +538,16 @@ class MainActivity : TauriActivity() {
     fun configureSessionWatcher(origin: String) {
       Log.i(TAG, "bridge.configureSessionWatcher: origin=$origin")
       activity.configureSessionWatcher(origin)
+    }
+
+    /**
+     * Session token from the framed web app, relayed by the shell. Write-only:
+     * no bridge method ever returns a stored token to JavaScript.
+     */
+    @JavascriptInterface
+    fun setSessionToken(origin: String, token: String) {
+      Log.i(TAG, "bridge.setSessionToken: origin=$origin present=${token.isNotBlank()}")
+      YepSessionTokens.store(origin, token)
     }
 
     @JavascriptInterface

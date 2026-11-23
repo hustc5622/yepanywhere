@@ -9,6 +9,7 @@ import {
   matchTokenToAttachment,
   splitByAttachmentTokens,
 } from "../../lib/attachmentTokens";
+import { withAuthSessionQuery } from "../../lib/authSessionToken";
 import {
   createLinkPattern,
   splitTrailingUrlPunctuation,
@@ -117,7 +118,7 @@ function isGenericFeishuAttachmentName(name: string): boolean {
 
 function managedUploadHref(path: string): string {
   const endpoint = path.startsWith("/api") ? path.slice(4) : path;
-  return resolveApiPath(endpoint);
+  return withAuthSessionQuery(resolveApiPath(endpoint));
 }
 
 /**
@@ -389,7 +390,10 @@ function UploadedFileItem({
           <Modal title={displayName} onClose={() => setShowModal(false)}>
             <div className="uploaded-image-modal">
               {directPreviewUrl ? (
-                <img src={directPreviewUrl} alt={displayName} />
+                <img
+                  src={withAuthSessionQuery(directPreviewUrl)}
+                  alt={displayName}
+                />
               ) : apiPath ? (
                 <FetchedUploadedImage apiPath={apiPath} alt={displayName} />
               ) : null}
