@@ -14,7 +14,7 @@
  */
 
 import { realpathSync } from "node:fs";
-import { readFile, stat } from "node:fs/promises";
+import { open, readFile, stat } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -37,6 +37,7 @@ import {
   canonicalizeAgyToolName,
   cleanAgyToolOutput,
   normalizeAgyToolArguments,
+  readAgyToolTiming,
 } from "./agy-tools.js";
 
 /**
@@ -382,6 +383,66 @@ export function parseAgyTranscriptSteps(raw: string): AgyTranscriptStep[] {
   return [...byIndex.values()].sort((a, b) => a.stepIndex - b.stepIndex);
 }
 
+/** The newest transcript step, as far as it matters for turn liveness. */
+export interface AgyTranscriptTail {
+  stepIndex: number;
+  type: string;
+  /**
+   * agy handed control back: a planner response with no tool call (the
+   * turn's answer, or a progress note before waiting on background work),
+   * or an error. Anything else means the agent is still working.
+   */
+  yielded: boolean;
+}
+
+/** A step that ends agy's work until something wakes it again. */
+export function isAgyYieldStep(
+  step: Pick<AgyTranscriptStep, "type" | "toolCalls">,
+): boolean {
+  return (
+    (step.type === "PLANNER_RESPONSE" && step.toolCalls.length === 0) ||
+    step.type === "ERROR_MESSAGE"
+  );
+}
+
+/**
+ * Read only the end of an agy transcript. Liveness checks run while agy is
+ * working, against transcripts that grow to megabytes.
+ */
+export async function readAgyTranscriptTail(
+  transcriptPath: string,
+  maxBytes = 256 * 1024,
+): Promise<AgyTranscriptTail | null> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
+  try {
+    handle = await open(transcriptPath, "r");
+    const { size } = await handle.stat();
+    if (size === 0) return null;
+    // One step can be large (a long tool output); widen until one parses.
+    for (let window = maxBytes; ; window *= 4) {
+      const length = Math.min(size, window);
+      const buffer = Buffer.alloc(length);
+      await handle.read(buffer, 0, length, size - length);
+      let text = buffer.toString("utf8");
+      // A window that starts mid-line drops its torn first line.
+      if (length < size) text = text.slice(text.indexOf("\n") + 1);
+      const last = parseAgyTranscriptSteps(text).at(-1);
+      if (last) {
+        return {
+          stepIndex: last.stepIndex,
+          type: last.type,
+          yielded: isAgyYieldStep(last),
+        };
+      }
+      if (length >= size || window >= 64 * 1024 * 1024) return null;
+    }
+  } catch {
+    return null;
+  } finally {
+    await handle?.close().catch(() => undefined);
+  }
+}
+
 /**
  * The text the user typed. agy wraps prompts as
  * `<USER_REQUEST>…</USER_REQUEST><ADDITIONAL_METADATA>…` (plus optional
@@ -456,6 +517,32 @@ async function loadImage(
 }
 
 /**
+ * Message id of one transcript step. Step indexes restart in every
+ * conversation and a native fork keeps its source's indexes, so the id is
+ * qualified by the conversation: an edit-fork family is shown as one
+ * branch tree and needs ids that stay unique across its sessions.
+ */
+export function agyStepEntryId(sessionId: string, stepIndex: number): string {
+  return `agy-${sessionId}-step-${stepIndex}`;
+}
+
+const AGY_STEP_ENTRY_ID = /^agy-(?:(.+)-)?step-(\d+)$/u;
+
+/**
+ * Inverse of {@link agyStepEntryId}. Also accepts the unqualified
+ * `agy-step-<n>` ids older Yep builds produced (`sessionId: null`).
+ */
+export function parseAgyStepEntryId(
+  id: string,
+): { sessionId: string | null; stepIndex: number } | null {
+  const match = AGY_STEP_ENTRY_ID.exec(id);
+  if (!match) return null;
+  const stepIndex = Number(match[2]);
+  if (!Number.isSafeInteger(stepIndex)) return null;
+  return { sessionId: match[1] ?? null, stepIndex };
+}
+
+/**
  * Convert agy steps into a linear Pi session so Pi's transcript projection
  * and tool renderers can be reused.
  */
@@ -491,7 +578,7 @@ export async function buildAgyPiSession(
   for (const step of steps) {
     const timestampMs = timestampOf(step, lastTimestamp);
     lastTimestamp = timestampMs;
-    const entryId = `agy-step-${step.stepIndex}`;
+    const entryId = agyStepEntryId(header.sessionId, step.stepIndex);
     switch (step.type) {
       case "USER_INPUT": {
         pending = [];
@@ -570,16 +657,24 @@ export async function buildAgyPiSession(
         if (!call) break;
         pending = pending.filter((candidate) => candidate !== call);
         const failed = step.status === "ERROR";
-        const text = cleanAgyToolOutput(
-          failed ? (step.error ?? step.content ?? "") : (step.content ?? ""),
-        );
-        push(entryId, timestampMs, {
+        const raw = failed
+          ? (step.error ?? step.content ?? "")
+          : (step.content ?? "");
+        const text = cleanAgyToolOutput(raw);
+        // The step's created_at is when the call was issued, not when it
+        // ended; the bookkeeping lines carry both ends.
+        const timing = readAgyToolTiming(step.content ?? raw);
+        const resultMs = timing.completedAtMs ?? timestampMs;
+        push(entryId, resultMs, {
           role: "toolResult",
           toolCallId: call.id,
           toolName: canonicalizeAgyToolName(call.name),
           content: [{ type: "text", text }],
           isError: failed,
-          timestamp: timestampMs,
+          timestamp: resultMs,
+          ...(timing.durationMs !== undefined
+            ? { durationMs: timing.durationMs }
+            : {}),
         });
         break;
       }
@@ -656,8 +751,6 @@ export async function readAgyTranscript(
   return buildAgyPiSession(steps, record, callIds, options);
 }
 
-const AGY_STEP_UUID = /^agy-step-\d+$/u;
-
 /**
  * Mark agy replies addressed to the user as final answers so the display
  * keeps them outside the folded work (like Codex `final_answer`).
@@ -671,7 +764,7 @@ const AGY_STEP_UUID = /^agy-step-\d+$/u;
 export function annotateAgyReplyPhases(messages: Message[]): Message[] {
   for (const message of messages) {
     if (message.type !== "assistant") continue;
-    if (!AGY_STEP_UUID.test(message.uuid ?? "")) continue;
+    if (!parseAgyStepEntryId(message.uuid ?? "")) continue;
     const content = message.message?.content;
     if (!Array.isArray(content)) continue;
     const hasText = content.some(

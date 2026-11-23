@@ -204,6 +204,36 @@ describe("agy ACP update conversion", () => {
     });
   });
 
+  it("reports agy's call-to-result time on live results", () => {
+    const seen = new Map<string, { name: string; input: string }>();
+    convertAgyUpdate(
+      { sessionUpdate: "tool_call", status: "pending", ...base } as never,
+      "s1",
+      seen,
+    );
+    const done = convertAgyUpdate(
+      {
+        sessionUpdate: "tool_call_update",
+        status: "completed",
+        ...base,
+        rawOutput: {
+          output:
+            "Created At: 2026-11-21T16:59:17+08:00\nCompleted At: 2026-11-21T16:59:24+08:00\nCommand exited with code 0.",
+        },
+      } as never,
+      "s1",
+      seen,
+    );
+    expect(
+      (done[0] as { message: { content: Array<Record<string, unknown>> } })
+        .message.content[0],
+    ).toMatchObject({
+      type: "tool_result",
+      content: "Command exited with code 0.",
+      durationMs: 7000,
+    });
+  });
+
   it("reads diff and text content as result text", () => {
     expect(
       agyToolResultText({

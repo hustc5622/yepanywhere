@@ -100,7 +100,23 @@ describe("provider-specific historical message editing", () => {
     });
   });
 
+  it("forks Antigravity edits at the persisted agy step id", () => {
+    const uuid = "agy-3c2f-step-8";
+    expect(supportsHistoricalMessageEditing("agy")).toBe(true);
+    expect(canEditPersistedUserPrompt("agy", "jsonl")).toBe(true);
+    expect(canEditPersistedUserPrompt("agy", "sdk")).toBe(false);
+    expect(
+      resolveSessionEditSubmission("agy", { uuid, parentUuid: null }),
+    ).toEqual({
+      kind: "edit-fork",
+      resumeSessionAt: uuid,
+      optimisticTruncate: false,
+      refreshSameSessionBranches: false,
+    });
+  });
+
   it("does not expose editing for unrelated providers", () => {
+    expect(supportsHistoricalMessageEditing("mcode")).toBe(false);
     expect(supportsHistoricalMessageEditing("gemini")).toBe(false);
     expect(supportsHistoricalMessageEditing("gemini-acp")).toBe(false);
     expect(supportsHistoricalMessageEditing("codex-oss")).toBe(false);

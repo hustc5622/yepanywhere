@@ -256,6 +256,40 @@ export function inferAgyNativeToolName(update: {
   return title || "tool";
 }
 
+export interface AgyToolTiming {
+  createdAtMs?: number;
+  completedAtMs?: number;
+  /** Call-to-result time agy recorded; absent while the call has not ended. */
+  durationMs?: number;
+}
+
+function bookkeepingTime(text: string, label: string): number | undefined {
+  const match = new RegExp(`^${label} At: ([^\n]+)$`, "mu").exec(text);
+  const ms = match?.[1] ? Date.parse(match[1].trim()) : Number.NaN;
+  return Number.isFinite(ms) ? ms : undefined;
+}
+
+/**
+ * Per-call timing from agy's result bookkeeping lines. A planner step that
+ * emits many calls persists all of them under the step's own start, so these
+ * lines are the only per-call start and end agy records (live and on disk).
+ */
+export function readAgyToolTiming(text: string | undefined): AgyToolTiming {
+  if (!text) return {};
+  const head = text.slice(0, 512);
+  const createdAtMs = bookkeepingTime(head, "Created");
+  const completedAtMs = bookkeepingTime(head, "Completed");
+  return {
+    ...(createdAtMs !== undefined ? { createdAtMs } : {}),
+    ...(completedAtMs !== undefined ? { completedAtMs } : {}),
+    ...(createdAtMs !== undefined &&
+    completedAtMs !== undefined &&
+    completedAtMs >= createdAtMs
+      ? { durationMs: completedAtMs - createdAtMs }
+      : {}),
+  };
+}
+
 /**
  * agy prefixes tool results with bookkeeping lines (`Created At: …`,
  * `Completed At: …`, sometimes repeated) and wraps failures as

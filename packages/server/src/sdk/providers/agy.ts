@@ -11,7 +11,8 @@
  * Sending `session/prompt` during a running turn steers that turn.
  *
  * History is read from `~/.gemini/antigravity-cli` by AgySessionReader; this
- * provider only streams live turns.
+ * provider only streams live turns. Editing a past prompt forks the
+ * conversation natively first (agy-fork.ts) and continues in the fork.
  *
  * Protocol facts come from the installed CLI (references/antigravity/probe)
  * — agy is closed source, so never implement from memory.
@@ -41,20 +42,28 @@ import { AcpCommandTracker } from "../../agent-commands/acp-commands.js";
 import { readAgentCommandCache } from "../../agent-commands/command-cache.js";
 import { getLogger } from "../../logging/logger.js";
 import {
+  agyTranscriptPath,
+  readAgyTranscriptTail,
+  resolveAgyDataDir,
+} from "../../sessions/agy-store.js";
+import {
   canonicalizeAgyToolName,
   cleanAgyToolOutput,
   inferAgyNativeToolName,
   normalizeAgyToolArguments,
+  readAgyToolTiming,
 } from "../../sessions/agy-tools.js";
 import { whichCommand } from "../cli-detection.js";
 import { MessageQueue, getUserPromptProjection } from "../messageQueue.js";
 import type {
   PermissionMode,
+  QueuedUserMessage,
   SDKMessage,
   ToolApprovalResult,
   UserMessage,
 } from "../types.js";
 import { ACPClient } from "./acp/client.js";
+import { forkAgyConversation, planAgyEditFork } from "./agy-fork.js";
 import {
   AGY_FALLBACK_MODELS,
   AGY_MODEL_CONFIG_ID,
@@ -63,7 +72,7 @@ import {
   parseAgyModelsOutput,
   resolveAgyModelChoice,
 } from "./agy-models.js";
-import { ensureAgySplitProxy } from "./agy-network.js";
+import { ensureAgySplitProxy, getAgyUpstreamFailure } from "./agy-network.js";
 import {
   buildAgyElicitationContent,
   planAgyQuestionnaire,
@@ -98,6 +107,15 @@ const MODELS_TIMEOUT_MS = 30_000;
 const AUTH_REQUIRED_CODE = -32000;
 export const AGY_AUTH_REQUIRED_MESSAGE =
   "Antigravity CLI is not signed in. Run `agy` once in a terminal on the Yep host (or `agy acp --login` over SSH) and complete the Google sign-in, then retry.";
+
+/**
+ * agy answers "Authentication required" when it cannot refresh its token,
+ * which also happens while the `YEP_AGY_PROXY` exit is down. Signing in
+ * again would not help then, so say what actually failed.
+ */
+export function agyProxyUnavailableMessage(reason: string): string {
+  return `Antigravity could not reach Google through YEP_AGY_PROXY (${reason}), so agy could not refresh its sign-in. The saved sign-in is likely still valid; check the proxy exit, then retry.`;
+}
 
 export type AgyModeId = "default" | "accept-edits" | "auto" | "plan";
 
@@ -266,6 +284,14 @@ function toolResultMessage(
   update: { content?: unknown; rawOutput?: unknown },
   failed: boolean,
 ): SDKMessage {
+  const raw = update.rawOutput;
+  const timing = readAgyToolTiming(
+    typeof raw === "string"
+      ? raw
+      : isRecord(raw) && typeof raw.output === "string"
+        ? raw.output
+        : undefined,
+  );
   return {
     type: "user",
     uuid: randomUUID(),
@@ -278,6 +304,9 @@ function toolResultMessage(
           tool_use_id: id,
           content: agyToolResultText(update),
           ...(failed ? { is_error: true } : {}),
+          ...(timing.durationMs !== undefined
+            ? { durationMs: timing.durationMs }
+            : {}),
         },
       ],
     },
@@ -362,6 +391,48 @@ function thinkingMessage(
 export interface AgyProviderConfig {
   /** Explicit agy binary path (auto-detected when omitted). */
   agyPath?: string;
+  /** agy app data dir holding transcripts (default: `resolveAgyDataDir`). */
+  dataDir?: string;
+}
+
+/**
+ * Session updates that are conversation, not status metadata. Only these can
+ * mean agy is working.
+ */
+const AGY_WORK_UPDATES = new Set([
+  "agent_message_chunk",
+  "agent_thought_chunk",
+  "tool_call",
+  "tool_call_update",
+  "plan",
+]);
+/**
+ * agy can resolve a prompt a few hundred ms before the turn's last text
+ * chunks arrive. Text inside this window after a turn ends belongs to it.
+ */
+const AGY_STRAGGLER_GRACE_MS = 2_000;
+/** An agent-initiated turn is over once the transcript yielded and ACP went quiet. */
+const AGY_SETTLE_QUIET_MS = 1_500;
+/**
+ * Settle on a yielded transcript even if its step is not newer than the
+ * baseline (the whole wake-up finished before Yep sampled it).
+ */
+const AGY_SETTLE_FALLBACK_QUIET_MS = 10_000;
+/**
+ * A background call this old without a completion is presumed lost; it no
+ * longer keeps an idle process from being reclaimed.
+ */
+const AGY_BACKGROUND_WORK_MAX_AGE_MS = 6 * 60 * 60_000;
+/** Bound a wake-up whose end Yep never observed (agy hung or was killed). */
+const AGY_SETTLE_MAX_QUIET_MS = 30 * 60_000;
+
+function isAgyWorkUpdate(notification: SessionNotification): boolean {
+  return AGY_WORK_UPDATES.has(notification.update.sessionUpdate);
+}
+
+function isAgyTextUpdate(notification: SessionNotification): boolean {
+  const kind = notification.update.sessionUpdate;
+  return kind === "agent_message_chunk" || kind === "agent_thought_chunk";
 }
 
 interface PromptTracker {
@@ -382,6 +453,25 @@ interface AgySessionState {
   prompt: PromptTracker | null;
   /** Native tool names by ACP call id, recorded from raw frames. */
   toolNames: Map<string, string>;
+  /**
+   * Tool calls already shown, by ACP call id. Session-wide: a background
+   * command started in one turn reports its completion in a later one.
+   */
+  toolSeen: Map<string, { name: string; input: string }>;
+  /** Calls reported started and not yet completed or failed, with start time. */
+  openCalls: Map<string, number>;
+  /** When the last turn ended; straggling text is dropped right after. */
+  turnEndedAt: number;
+  /**
+   * A turn agy started on its own (background task or timer wake-up). No
+   * prompt owns it, so its end is read from the transcript.
+   */
+  agentTurn: {
+    /** Newest transcript step when the turn was noticed. */
+    baselineStep: number | null;
+    lastUpdateAt: number;
+    cancelled: boolean;
+  } | null;
   model?: string;
   reasoningEffort?: string;
 }
@@ -442,6 +532,7 @@ export class AgyProvider implements AgentProvider {
   readonly supportsSlashCommands = true;
 
   private readonly agyPath?: string;
+  private readonly dataDir?: string;
   private catalog?: {
     at: number;
     models: ModelInfo[];
@@ -454,6 +545,7 @@ export class AgyProvider implements AgentProvider {
 
   constructor(config: AgyProviderConfig = {}) {
     this.agyPath = config.agyPath;
+    this.dataDir = config.dataDir;
   }
 
   async isInstalled(): Promise<boolean> {
@@ -562,16 +654,20 @@ export class AgyProvider implements AgentProvider {
         ? `${String(error.stdout ?? "")}\n${String(error.stderr ?? "")}`
         : "";
       const signedOut = /sign in/i.test(output);
+      // While the YEP_AGY_PROXY exit is down agy cannot refresh its token
+      // and also prints "Please sign in"; that is not a sign-out.
+      const upstreamFailure = getAgyUpstreamFailure();
       log.debug(
-        { err: error, signedOut },
+        { err: error, signedOut, upstreamFailure },
         "Antigravity `agy models` probe failed",
       );
       return {
         models: this.catalog?.models ?? AGY_FALLBACK_MODELS,
         // A transient network failure must not log a signed-in user out.
-        authenticated: signedOut
-          ? false
-          : (this.catalog?.authenticated ?? false),
+        authenticated:
+          signedOut && !upstreamFailure
+            ? false
+            : (this.catalog?.authenticated ?? Boolean(upstreamFailure)),
       };
     }
   }
@@ -585,6 +681,10 @@ export class AgyProvider implements AgentProvider {
       promptActive: false,
       prompt: null,
       toolNames: new Map(),
+      toolSeen: new Map(),
+      openCalls: new Map(),
+      turnEndedAt: 0,
+      agentTurn: null,
       model: options.model,
       reasoningEffort: options.reasoningEffort,
     };
@@ -620,20 +720,34 @@ export class AgyProvider implements AgentProvider {
         client.close();
       },
       isProcessAlive: () => client.isAlive(),
+      // A background command or timer still running will wake agy, which
+      // then works without a prompt. Stopping the idle process kills it.
+      hasPendingBackgroundWork: () => {
+        const cutoff = Date.now() - AGY_BACKGROUND_WORK_MAX_AGE_MS;
+        for (const startedAt of state.openCalls.values())
+          if (startedAt >= cutoff) return client.isAlive();
+        return false;
+      },
       get pid() {
         return client.pid;
       },
       interrupt: async () => {
+        // An agent-initiated turn has no prompt to resolve as cancelled, and
+        // agy goes silent once it stops, so end it here.
+        if (state.agentTurn && !state.prompt) state.agentTurn.cancelled = true;
         if (state.sessionId) await client.cancel(state.sessionId);
       },
       steer: async (message: UserMessage) => {
-        if (!state.sessionId || !state.promptActive || !state.prompt) {
+        if (!state.sessionId || !state.promptActive) {
           return false;
         }
         const { internalPrompt } = getUserPromptProjection(message);
         const blocks = await this.buildPromptBlocks(message, internalPrompt);
         // Re-check: the turn may have ended while attachments were read.
         if (!state.promptActive) return false;
+        // A prompt sent while agy works joins the running turn; agy resolves
+        // it when that turn ends (also for a turn agy started on its own),
+        // so it becomes the owner of the rest of the turn.
         state.prompt = trackPrompt(client.prompt(state.sessionId, blocks));
         return { accepted: true };
       },
@@ -687,11 +801,16 @@ export class AgyProvider implements AgentProvider {
     }
 
     const updateQueue: SessionNotification[] = [];
+    /** An edit fork agy created that Yep has not been told about yet. */
+    let unannouncedForkId: string | undefined;
+    /** Wakes the idle loop: agy may have started a turn on its own. */
+    let wakeIdle: (() => void) | null = null;
     client.setSessionUpdateCallback((update) => {
       // The `/` list arrives right after session/new or resume; it is
       // metadata, not a transcript row.
       if (commands?.accept(update)) return;
       updateQueue.push(update);
+      wakeIdle?.();
     });
     client.setPermissionRequestCallback((request) =>
       this.handlePermissionRequest(request, options, signal, state),
@@ -714,7 +833,32 @@ export class AgyProvider implements AgentProvider {
       await client.initialize(AGY_CLIENT_CAPABILITIES);
 
       let sessionId: string;
-      if (options.resumeSessionId) {
+      const editFork =
+        options.resumeSessionId && options.resumeSessionAt
+          ? planAgyEditFork(options.resumeSessionId, options.resumeSessionAt)
+          : null;
+      if (editFork?.kind === "fork") {
+        // Source-preserving edit: copy the history before the edited prompt
+        // into a new conversation, then continue there.
+        const forkedSessionId = await forkAgyConversation({
+          agyPath,
+          cwd: options.cwd,
+          env: await agySpawnEnv(agyPath),
+          sourceSessionId: editFork.sourceSessionId,
+          forkAtStepIndex: editFork.forkAtStepIndex,
+          signal,
+        });
+        unannouncedForkId = forkedSessionId;
+        sessionId = await this.attachSession(
+          client,
+          forkedSessionId,
+          options.cwd,
+        );
+        updateQueue.length = 0;
+      } else if (editFork?.kind === "fresh") {
+        // Editing the first prompt keeps no history.
+        sessionId = await client.newSession(options.cwd);
+      } else if (options.resumeSessionId) {
         sessionId = await this.attachSession(
           client,
           options.resumeSessionId,
@@ -745,6 +889,7 @@ export class AgyProvider implements AgentProvider {
         );
       }
       const configOptions = client.getSessionConfigOptions(sessionId);
+      unannouncedForkId = undefined;
       yield {
         type: "system",
         subtype: "init",
@@ -758,43 +903,142 @@ export class AgyProvider implements AgentProvider {
           options.reasoningEffort,
       } as SDKMessage;
 
-      for await (const message of queue.generator()) {
-        if (signal.aborted) break;
-        const { internalPrompt, publicPrompt } =
-          getUserPromptProjection(message);
-        const userUuid = (message as { uuid?: string }).uuid ?? randomUUID();
-        yield {
-          type: "user",
-          uuid: userUuid,
-          session_id: sessionId,
-          message: { role: "user", content: publicPrompt },
-        } as SDKMessage;
+      // Wait for the next prompt and, between prompts, for agy itself:
+      // a background command or timer finishing wakes the agent, which then
+      // works without any prompt (`SYSTEM_MESSAGE` in the transcript). Those
+      // updates used to be buffered and thrown away, so the session looked
+      // idle and its transcript looked cut short while agy was working.
+      const transcriptPath = agyTranscriptPath(
+        sessionId,
+        this.dataDir ?? resolveAgyDataDir(),
+      );
+      const messages = queue.generator();
+      let pendingMessage:
+        | Promise<IteratorResult<QueuedUserMessage>>
+        | undefined;
+      let arrived: IteratorResult<QueuedUserMessage> | undefined;
+      const takeQueuedPrompt = (): QueuedUserMessage | undefined => {
+        if (!arrived || arrived.done) return undefined;
+        const message = arrived.value;
+        arrived = undefined;
+        pendingMessage = undefined;
+        return message;
+      };
+      while (!signal.aborted) {
+        if (!pendingMessage) {
+          const next = messages.next();
+          pendingMessage = next;
+          void next.then((result) => {
+            if (pendingMessage === next) arrived = result;
+          });
+        }
+        if (!this.hasAgentWork(updateQueue, state)) {
+          const woke = await Promise.race([
+            pendingMessage.then((result) => ({ result })),
+            new Promise<null>((resolve) => {
+              wakeIdle = () => resolve(null);
+            }),
+          ]);
+          wakeIdle = null;
+          if (!woke) continue;
+          pendingMessage = undefined;
+          arrived = undefined;
+          if (woke.result.done || signal.aborted) break;
+          yield* this.sendPrompt(client, sessionId, woke.result.value, state);
+          state.promptActive = true;
+          try {
+            yield* this.streamTurn(
+              client,
+              sessionId,
+              updateQueue,
+              signal,
+              state,
+              transcriptPath,
+            );
+          } finally {
+            state.promptActive = false;
+            state.prompt = null;
+            state.turnEndedAt = Date.now();
+          }
+          continue;
+        }
 
-        updateQueue.length = 0;
-        const blocks = await this.buildPromptBlocks(message, internalPrompt);
-        state.prompt = trackPrompt(client.prompt(sessionId, blocks));
+        // agy started a turn on its own.
+        const tail = await readAgyTranscriptTail(transcriptPath);
+        log.info(
+          {
+            event: "agy_agent_initiated_turn",
+            sessionId,
+            baselineStep: tail?.stepIndex ?? null,
+          },
+          "Antigravity started a turn without a Yep prompt",
+        );
+        state.agentTurn = {
+          baselineStep: tail?.stepIndex ?? null,
+          lastUpdateAt: Date.now(),
+          cancelled: false,
+        };
         state.promptActive = true;
+        yield {
+          type: "system",
+          subtype: "turn_started",
+          session_id: sessionId,
+          origin: "agent",
+        } as SDKMessage;
         try {
-          yield* this.streamTurn(sessionId, updateQueue, signal, state);
+          yield* this.streamTurn(
+            client,
+            sessionId,
+            updateQueue,
+            signal,
+            state,
+            transcriptPath,
+            takeQueuedPrompt,
+          );
         } finally {
           state.promptActive = false;
           state.prompt = null;
+          state.agentTurn = null;
+          state.turnEndedAt = Date.now();
         }
       }
     } catch (error) {
       if (signal.aborted) return;
       const authRequired = isAuthRequiredError(error);
-      log.error({ err: error, authRequired }, "Antigravity ACP session failed");
+      const upstreamFailure = authRequired ? getAgyUpstreamFailure() : null;
+      log.error(
+        { err: error, authRequired, upstreamFailure, unannouncedForkId },
+        "Antigravity ACP session failed",
+      );
+      if (unannouncedForkId) {
+        // The fork already exists in agy's store. Announce it so Yep records
+        // the edit-fork lineage and the failure lands on that branch;
+        // otherwise the copy shows up as a separate, unowned session.
+        yield {
+          type: "system",
+          subtype: "init",
+          session_id: unannouncedForkId,
+          cwd: options.cwd,
+          model: options.model,
+          reasoningEffort: options.reasoningEffort,
+        } as SDKMessage;
+      }
       yield {
         type: "error",
-        error: authRequired
-          ? AGY_AUTH_REQUIRED_MESSAGE
-          : error instanceof Error
-            ? error.message
-            : isRecord(error) && typeof error.message === "string"
+        error: upstreamFailure
+          ? agyProxyUnavailableMessage(upstreamFailure)
+          : authRequired
+            ? AGY_AUTH_REQUIRED_MESSAGE
+            : error instanceof Error
               ? error.message
-              : String(error),
-        ...(authRequired ? { errorCode: "agy.auth_required" } : {}),
+              : isRecord(error) && typeof error.message === "string"
+                ? error.message
+                : String(error),
+        ...(upstreamFailure
+          ? { errorCode: "agy.proxy_unavailable" }
+          : authRequired
+            ? { errorCode: "agy.auth_required" }
+            : {}),
       } as SDKMessage;
     } finally {
       queue.close();
@@ -900,20 +1144,30 @@ export class AgyProvider implements AgentProvider {
   /**
    * Stream one turn. The owning prompt can change mid-turn (steering); the
    * turn ends when the newest prompt has resolved and its updates drained.
+   *
+   * A turn agy started on its own (`state.agentTurn`) has no prompt until the
+   * user steers into it. agy sends no end-of-turn signal for it, so it ends
+   * when ACP has gone quiet and the transcript's newest step hands control
+   * back (see {@link readAgyTranscriptTail}).
    */
   private async *streamTurn(
+    client: ACPClient,
     sessionId: string,
     updateQueue: SessionNotification[],
     signal: AbortSignal,
     state: AgySessionState,
+    transcriptPath: string,
+    takeQueuedPrompt?: () => QueuedUserMessage | undefined,
   ): AsyncIterableIterator<SDKMessage> {
-    const seen = new Map<string, { name: string; input: string }>();
+    const seen = state.toolSeen;
     let text = "";
     let textId: string | null = null;
     let textDirty = false;
     let thinking = "";
     let thinkingId: string | null = null;
     let thinkingDirty = false;
+    let lastTailCheck = 0;
+    let agentSettled = false;
 
     const flushThinking = function* (): Generator<SDKMessage> {
       if (thinking && thinkingDirty) {
@@ -939,11 +1193,53 @@ export class AgyProvider implements AgentProvider {
         state.promptActive = false;
         break;
       }
+      const agentTurn = !owner ? state.agentTurn : null;
+      if (agentTurn) {
+        if (agentTurn.cancelled) {
+          state.promptActive = false;
+          break;
+        }
+        // A prompt that reached the queue just before this turn was noticed
+        // joins it, like a steer.
+        const queued = takeQueuedPrompt?.();
+        if (queued) {
+          yield* this.sendPrompt(client, sessionId, queued, state);
+          continue;
+        }
+        const now = Date.now();
+        const quiet = now - agentTurn.lastUpdateAt;
+        if (
+          updateQueue.length === 0 &&
+          quiet >= AGY_SETTLE_QUIET_MS &&
+          now - lastTailCheck >= 500
+        ) {
+          lastTailCheck = now;
+          const tail = await readAgyTranscriptTail(transcriptPath);
+          const newer =
+            agentTurn.baselineStep === null ||
+            (tail !== null && tail.stepIndex > agentTurn.baselineStep);
+          if (
+            (tail?.yielded &&
+              (newer || quiet >= AGY_SETTLE_FALLBACK_QUIET_MS)) ||
+            quiet >= AGY_SETTLE_MAX_QUIET_MS
+          ) {
+            if (!state.prompt) {
+              state.promptActive = false;
+              agentSettled = true;
+              break;
+            }
+            continue;
+          }
+        }
+      }
       await new Promise((resolve) => setTimeout(resolve, 40));
       while (updateQueue.length > 0) {
         const notification = updateQueue.shift();
         if (!notification || notification.sessionId !== sessionId) continue;
         const update = notification.update;
+        if (state.agentTurn && isAgyWorkUpdate(notification)) {
+          state.agentTurn.lastUpdateAt = Date.now();
+        }
         if (
           update.sessionUpdate === "agent_thought_chunk" &&
           update.content.type === "text"
@@ -963,6 +1259,16 @@ export class AgyProvider implements AgentProvider {
           textId ??= randomUUID();
           textDirty = true;
           continue;
+        }
+        if (
+          update.sessionUpdate === "tool_call" ||
+          update.sessionUpdate === "tool_call_update"
+        ) {
+          if (update.status === "completed" || update.status === "failed") {
+            state.openCalls.delete(update.toolCallId);
+          } else if (!state.openCalls.has(update.toolCallId)) {
+            state.openCalls.set(update.toolCallId, Date.now());
+          }
         }
         const converted = convertAgyUpdate(
           update,
@@ -989,7 +1295,17 @@ export class AgyProvider implements AgentProvider {
       yield thinkingMessage(sessionId, thinkingId, thinking);
     }
     if (textDirty && text) yield textMessage(sessionId, textId, text);
-    if (!owner) return;
+    if (!owner) {
+      const agentTurn = state.agentTurn;
+      if (!agentTurn || signal.aborted) return;
+      if (!agentSettled && !agentTurn.cancelled) return;
+      yield {
+        type: "result",
+        session_id: sessionId,
+        turnStatus: agentTurn.cancelled ? "interrupted" : "completed",
+      } as SDKMessage;
+      return;
+    }
 
     try {
       const result = await owner.promise;
@@ -1035,6 +1351,60 @@ export class AgyProvider implements AgentProvider {
         is_error: true,
       } as SDKMessage;
     }
+  }
+
+  /**
+   * Send one queued user message as a prompt and make it the turn's owner.
+   * Used for a fresh turn and for a prompt that joins a turn agy started.
+   */
+  private async *sendPrompt(
+    client: ACPClient,
+    sessionId: string,
+    message: QueuedUserMessage,
+    state: AgySessionState,
+  ): AsyncGenerator<SDKMessage> {
+    const { internalPrompt, publicPrompt } = getUserPromptProjection(message);
+    const userUuid = (message as { uuid?: string }).uuid ?? randomUUID();
+    yield {
+      type: "user",
+      uuid: userUuid,
+      session_id: sessionId,
+      message: { role: "user", content: publicPrompt },
+    } as SDKMessage;
+    const blocks = await this.buildPromptBlocks(message, internalPrompt);
+    state.prompt = trackPrompt(client.prompt(sessionId, blocks));
+  }
+
+  /**
+   * Drop what cannot mean agy is working: status metadata, and the text of
+   * a turn that just ended (agy can resolve the prompt before its last
+   * chunks). True when real work is left, i.e. agy started a turn itself.
+   */
+  private hasAgentWork(
+    updateQueue: SessionNotification[],
+    state: AgySessionState,
+  ): boolean {
+    const inGrace = Date.now() - state.turnEndedAt < AGY_STRAGGLER_GRACE_MS;
+    for (let index = 0; index < updateQueue.length; ) {
+      const notification = updateQueue[index];
+      const update = notification?.update;
+      const straggler =
+        inGrace &&
+        (isAgyTextUpdate(notification as SessionNotification) ||
+          (update?.sessionUpdate === "tool_call_update" &&
+            !state.openCalls.has(update.toolCallId)));
+      if (
+        !notification ||
+        notification.sessionId !== state.sessionId ||
+        !isAgyWorkUpdate(notification) ||
+        straggler
+      ) {
+        updateQueue.splice(index, 1);
+        continue;
+      }
+      index += 1;
+    }
+    return updateQueue.length > 0;
   }
 
   /**
@@ -1219,6 +1589,7 @@ export async function agySpawnEnv(
       : current
         ? `${binDir}${delimiter}${current}`
         : binDir,
+    AGY_CLI_DISABLE_AUTO_UPDATE: "true",
   };
   const proxy = process.env.YEP_AGY_PROXY?.trim();
   if (proxy) {

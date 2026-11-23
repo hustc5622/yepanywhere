@@ -56,12 +56,13 @@ NO_PROXY=localhost,127.0.0.1,::1,*.local,api.deepseek.com
 
 - agy 启动的工具即使继承了 `HTTPS_PROXY`，访问非 Google 域名时也走本机网络，不会被带到远端出口。工具访问 Google 域名时会和 agy 一样走远端。
 - 远端代理连不上或拒绝时，分流代理返回 502，不会改成直连，避免模型请求在你不知情时换了出口。
+- 分流代理记住最近一次上游失败（5 分钟内有效，任一次成功即清除，日志事件 `agy_upstream_proxy_failed`）。出口断开时 agy 刷不了 token，会报 `Authentication required` / `Please sign in`；这期间 Yep 不把 agy 标成未登录，会话错误改报代理不可用（`agy.proxy_unavailable`），而不是让用户重新登录。
 - 分流代理只处理 CONNECT（HTTPS），没有认证。它只监听回环地址，远端代理的凭据只保存在 Yep 进程里，不会出现在 agy 的环境变量中。
 - 其他 provider（Claude、Codex、Pi 等）继续用 runtime 自己的网络环境。
 - 没设 `YEP_AGY_PROXY` 时不改写任何变量，agy 继承宿主已有的代理设置。
 - `NO_PROXY` 没设时用内置默认值（本机回环与 `*.local` 直连）。
 
-本机与 home 的实际部署（2026-11）：home 的 NinjaDesktop（mihomo）在「覆写增强 → 覆写配置」里加了一个 `listeners` 条目 `agy-us`（`127.0.0.1:8486`，`proxy` 固定为美国节点）。home 的 tinyproxy（`18485`，经 frp 暴露在 `47.95.254.240:18485`）用按域名的 `upstream` 把上表的 Google 域名转到 8486，其余仍转到 Clash 的规则端口 8485（Codex 走这里，出口是新加坡）。home 的 Yep 用 `YEP_AGY_PROXY=http://127.0.0.1:8486`。本机 Yep 用与 Codex 相同的那个带认证的 `47.95.254.240:18485` 地址，凭据从 `~/.codex_proxy_env` 复制到 git-ignored 的 `.env.deploy.local`，不提交到仓库。
+本机与 home 的实际部署（2026-11）：home 的 NinjaDesktop（mihomo）在「覆写增强 → 覆写配置」里加了一个 `listeners` 条目 `agy-us`（`127.0.0.1:8486`，`proxy` 固定为美国节点）。home 的 tinyproxy（`18485`，经 frp 暴露在 `47.95.254.240:18485`）用按域名的 `upstream` 把上表的 Google 域名转到 8486，其余仍转到 Clash 的规则端口 8485（Codex 走这里，出口是新加坡）。home 的 Yep 用 `YEP_AGY_PROXY=http://127.0.0.1:8486`。本机 Yep 原先用与 Codex 相同的那个带认证的 `47.95.254.240:18485` 地址；2026-11-23 home 出口掉线后改为不设 `YEP_AGY_PROXY`，agy 直接使用本机网络（本机出口实测为美国洛杉矶节点），`.env.deploy.local` 里保留注释掉的那一行，需要时取消注释重新部署即可。从 `.env.deploy.local` 删掉（或注释掉）`YEP_AGY_PROXY` 后，`scripts/deploy.sh` 会把它从 server 和 runtime 的 LaunchAgent plist 里一并删除。在 Yep 内的终端或 agent 里执行部署时，shell 会继承运行中 Yep 的 `YEP_AGY_PROXY`/`NO_PROXY`；`scripts/lib/deploy-env.sh` 把与已部署 plist 相同的继承值视为非显式设置并忽略，以 env 文件为准（否则旧值会被重新写回 plist）。
 
 ## 会话与接管
 
@@ -76,13 +77,35 @@ NO_PROXY=localhost,127.0.0.1,::1,*.local,api.deepseek.com
 - slash 命令来自 ACP `available_commands_update`（`/goal`、`/compact`、`/plan`、`/schedule` 等），作为普通 prompt 文本发送即可。`/model`、`/usage` 这类由 CLI 自己回答的命令不走 ACP。
 - 工具名：ACP SDK 解析消息时会丢掉 agy 私有的 `tool_call.name`，provider 通过 `ACPClient.setRawMessageObserver` 从原始帧里记录它；没记录到时按参数形状推断（`CommandLine` 对应 `run_command`，依此类推）。映射到 Yep renderer 的规则在 `packages/server/src/sessions/agy-tools.ts`。
 
+## agent 自己发起的轮次
+
+agy 的后台命令和计时器结束时，agy 会在没有 prompt 的情况下自己继续工作（协议细节见 `references/antigravity/README.md`「agent 自己发起的轮次」）。Yep 的处理：
+
+- 两次提问之间也读取 ACP 更新。出现对话类更新（正文、思考、工具调用）就发出 `system/turn_started`（`origin: "agent"`），`Process` 据此从空闲切到运行中，界面和普通提问一样显示「运行中」，可以插入消息、中断。状态元数据（`usage_update`、`session_info_update` 等）不算；上一轮结束后 2 秒内到达的残余正文也不算（agy 可能先返回 prompt 再补最后几段）。
+- 这一轮没有 prompt 可以等，结束以 transcript 为准：ACP 静默 1.5 秒，且 `transcript_full.jsonl` 最新的 step 比这一轮开始时新、并且是交还控制的 step（不带 tool call 的 `PLANNER_RESPONSE` 或 `ERROR_MESSAGE`），就发出 `result`。只读文件尾部（`readAgyTranscriptTail`）。兜底：静默 10 秒且最新 step 已交还控制，或静默 30 分钟。
+- 唤醒期间发的消息作为 `session/prompt` 并入这一轮，由它接管这一轮的结束；中断时没有 prompt 可返回 `cancelled`，Yep 直接以 `interrupted` 收尾。
+- 还有后台调用未结束时（开始超过 6 小时的不算），`hasPendingBackgroundWork()` 为真，Supervisor 不回收、不抢占这个空闲进程，否则会连带杀掉后台任务和它将要发起的那一轮。
+- 实现：`packages/server/src/sdk/providers/agy.ts`（`hasAgentWork`、`streamTurn`）、`packages/server/src/sessions/agy-store.ts`（`readAgyTranscriptTail`）。真实联调：`npx tsx scripts/smoke-agy-agent-turn.ts`（`SMOKE_STEER=1` 插入消息，`SMOKE_CANCEL=1` 中断；会发起模型请求）。
+
+## 编辑提问与分支
+
+和 Pi、Codex 一样，编辑历史提问会保留原会话，在新会话里继续（source-preserving edit fork）：
+
+- ACP 没有暴露 `/fork`、`/rewind`，但每个 `agy acp` 进程都内嵌 TUI 用的语言服务器。它在回环地址上提供 Connect HTTP+JSON，要求 `x-antigravity-csrf-token`；令牌可以用环境变量 `ANTIGRAVITY_SERVER_CSRF_TOKEN` 指定，HTTP 端口只打印在 ACP 日志里（`Language server listening on random port at <port> for HTTP`）。
+- 编辑第 N 步的提问时，Yep 另起一个短命的 `agy acp --log-file <临时文件>`，带上随机令牌，先发 `initialize` 和只读的 `session/list` 让语言服务器启动，从日志读出端口，并等 `session/list` 成功（它同时是登录检查，失败就不分叉，避免留下没人接入的复制会话），再调用 `exa.language_server_pb.LanguageServerService/ForkConversation {sourceCascadeId, forkAtStepIndex: N-1, targetForkWorkspace: "FORK_TARGET_CURRENT_WORKSPACE"}`，拿到 `newCascadeId` 后结束这个进程。之后会话进程照常 `session/resume` 新会话并发送改写后的提问。实现：`packages/server/src/sdk/providers/agy-fork.ts`。
+- `forkAtStepIndex` 包含该步：新会话复制 `0..N-1` 步，保留原来的 step 序号、时间戳和工作区，末尾再加一条 fork 通知（`SYSTEM_MESSAGE`）。agy 拒绝在用户提问那一步分叉（`that step is a user message`），所以连续两条提问之间没有回复时无法编辑后一条。
+- 编辑第一条提问（N = 0）没有可保留的历史，直接 `session/new`。
+- 只分叉对话，不回退工作区文件（和终端 `/fork`、其他 provider 的编辑一致）。fork 不调用模型，实测约 1～6 秒（主要是语言服务器启动）。
+- agy 不记录分叉来源（`conversation_parents` 没有记录，`parent_conversation_id` 为空，新会话照常出现在会话目录里）。Yep 把 `forkParentSessionId` 和被替换提问的 id（`forkTargetMessageId`）写进自己的会话元数据，reader 据此用 copied-prefix 方式（同 Pi）构建分支：复制的历史要求 step 序号、角色、正文和时间戳都相同；被编辑提问与原提问显示为同级分支，会话列表把整个分支族合并成一项。
+- 消息 id 为 `agy-<会话 id>-step-<n>`。fork 保留 step 序号，不带会话 id 的话同一分支族里会出现重复 id。旧版本的 `agy-step-<n>` 仍能解析。
+
 ## 数据来源（只读）
 
 - 会话目录：`~/.gemini/antigravity-cli/conversation_summaries.db` 的 `conversation_summaries` 表。只列出 `parent_conversation_id = ''`（排除子 agent 运行）且 `step_count > 0`（排除只建了会话、从未提问的）的记录。工作目录取自 `workspace_uris`：同一目录的真实路径和传入路径都出现时，取传入路径（即符号链接那种写法）。
 - Transcript：`brain/<id>/.system_generated/logs/transcript_full.jsonl`，每行一个 step。不用 `transcript.jsonl`，因为它的参数是二次编码的字符串，长内容还可能被截断。step 的映射如下：
   - `USER_INPUT`：取 `<USER_REQUEST>` 里的正文，再加上 `media` 里的图片，转成 user 消息。
   - `PLANNER_RESPONSE`：转成 assistant 消息，包括 thinking、正文和 tool call。
-  - `GENERIC`：转成 tool 结果，去掉 `Created At:`/`Completed At:` 这些记账行；`status: ERROR` 时取 `error`。
+  - `GENERIC`：转成 tool 结果，去掉 `Created At:`/`Completed At:` 这些记账行；`status: ERROR` 时取 `error`。记账行是 agy 唯一的逐调用起止时间：一个 `PLANNER_RESPONSE` 的全部调用共用该步的 `created_at`，`GENERIC` 的 `created_at` 是调用发出时间而非结束时间。因此结果条目的时间取 `Completed At`，并带上 `durationMs = Completed At - Created At`（实时结果同样从 `rawOutput.output` 读取）；运行中的调用在展示层优先用实时 `tool_call` 到达时间作起点（`SessionDisplayReducer.adoptLiveToolStarts`）。
   - `CHECKPOINT`：对应 `/compact`，转成 Pi compaction。
   - `SYSTEM_MESSAGE` 不显示。
 - tool call id：transcript 里没有 id。reader 从 `conversations/<id>.db` 的 `steps.step_payload`（protobuf）里扫描 `call_<digits>`，让历史记录和实时流用同一个 id（实时工具块因此可以和落盘记录去重）。扫不到时退回 `agy-call-<step>-<n>`。
@@ -93,7 +116,7 @@ NO_PROXY=localhost,127.0.0.1,::1,*.local,api.deepseek.com
 
 ## 当前不支持
 
-- 编辑、回退和分支：agy TUI 里有 `/rewind`、`/fork`，但 ACP 没有暴露。
+- 原地回退（`/rewind`，语言服务器的 `RevertToCascadeStep`）：会改写原会话，Yep 的编辑统一走保留原会话的分叉，不接入。
 - 逐字流式显示正文：ACP 会推送正文增量，但为了和磁盘记录对齐，展示层按 step 整段显示。ACP 也不推送 thinking，thinking 只在历史里出现。
 - 多账号：未实现（`--app-data-dir` 能否隔离 keychain 还没验证）。界面也不显示账号邮箱：agy 不对外提供邮箱，只在日志里出现。
 - MCP 注入：ACP 的 `session/new` 支持 `mcpServers`，HTTP 类 MCP 需要 `--process-per-session`，目前尚未接入。
@@ -101,6 +124,6 @@ NO_PROXY=localhost,127.0.0.1,::1,*.local,api.deepseek.com
 
 ## 参考与验证
 
-- 单元测试：`packages/server/test/sdk/providers/agy.test.ts`、`agy-login.test.ts`（用模拟 agy 脚本覆盖登录流程）、`agy-usage.test.ts`（真实 `/usage`、`/credits` 输出作 fixture）、`agy.test.ts` 的 `agy spawn env`（`YEP_AGY_PROXY` 只作用于 agy）、`agy-network.test.ts`（分流代理：Google 域名走认证上游、其余直连、上游失败不回退）、`packages/server/test/sessions/agy-store.test.ts`、`packages/server/test/routes/providers.test.ts`、`packages/client/src/components/__tests__/AgyAccountCard.test.tsx`。
+- 单元测试：`packages/server/test/sdk/providers/agy.test.ts`、`agy-agent-turn.test.ts`（用模拟 agy 覆盖后台任务唤醒、并入、中断和残余正文）、`agy-fork.test.ts`（用模拟 agy 覆盖语言服务器端口、CSRF 令牌和 fork 失败）、`packages/server/test/sessions/agy-branch.test.ts`（分支视图）、`agy-login.test.ts`（用模拟 agy 脚本覆盖登录流程）、`agy-usage.test.ts`（真实 `/usage`、`/credits` 输出作 fixture）、`agy.test.ts` 的 `agy spawn env`（`YEP_AGY_PROXY` 只作用于 agy）、`agy-network.test.ts`（分流代理：Google 域名走认证上游、其余直连、上游失败不回退）、`packages/server/test/sessions/agy-store.test.ts`、`packages/server/test/routes/providers.test.ts`、`packages/client/src/components/__tests__/AgyAccountCard.test.tsx`。
 - 真实联调：`npx tsx scripts/smoke-agy-provider.ts [cwd]`。依次覆盖新建、续接和工具审批，再做问卷测试，最后用 reader 读回历史。脚本会发起模型请求（默认 Gemini 3.8 Flash low），并在 agy 历史里留下测试会话，运行前需要用户授权。可用环境变量：`SMOKE_RESUME`、`SMOKE_PROMPT`、`SMOKE_DENY=1`、`SMOKE_MODEL`、`SMOKE_EFFORT`、`SMOKE_MODE`、`SMOKE_MODELS=1`、`SMOKE_QUESTION=0`。
 - 升级 `agy` 后，重新运行 `references/antigravity/probe/step*.mjs`（需要登录，会发起少量请求），对比新旧 trace，再核对 `agy*.ts`。

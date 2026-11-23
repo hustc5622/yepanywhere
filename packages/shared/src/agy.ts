@@ -71,4 +71,6 @@ export interface AgyUsageResponse {
   credits: AgyCredits | null;
   message: string | null;
   fetchedAt: string | null;
+  /** True when returning previously cached quota following a failed refresh. */
+  stale?: boolean;
 }

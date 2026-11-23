@@ -144,7 +144,10 @@ import { SessionTitleService } from "./services/SessionTitleService.js";
 import type { SharingService } from "./services/SharingService.js";
 import { SessionShareService } from "./session-shares/SessionShareService.js";
 import { createInProcessSessionPayloadLoader } from "./session-shares/session-payload-loader.js";
-import { AgySessionReader } from "./sessions/agy-reader.js";
+import {
+  type AgyForkLineage,
+  AgySessionReader,
+} from "./sessions/agy-reader.js";
 import { AGY_BRAIN_DIR, AGY_DATA_DIR } from "./sessions/agy-store.js";
 import { CodexSessionReader } from "./sessions/codex-reader.js";
 import { resolveExistingCodexRolloutPath } from "./sessions/codex-rollout-file.js";
@@ -597,6 +600,23 @@ export function createApp(options: AppOptions): AppResult {
    * Create a session reader appropriate for the project's provider.
    * Routes call this with the project to get the right reader.
    */
+  // agy keeps no fork lineage; Yep's metadata records its edit forks.
+  const agyForkLineage = (): AgyForkLineage[] => {
+    const lineage: AgyForkLineage[] = [];
+    for (const [sessionId, metadata] of Object.entries(
+      options.sessionMetadataService?.getAllMetadata() ?? {},
+    )) {
+      if (metadata.provider !== "agy" || !metadata.forkParentSessionId) {
+        continue;
+      }
+      lineage.push({
+        sessionId,
+        forkParentSessionId: metadata.forkParentSessionId,
+        forkTargetMessageId: metadata.forkTargetMessageId,
+      });
+    }
+    return lineage;
+  };
   const readerFactory = (project: Project): ISessionReader => {
     const mergedKey =
       project.mergedSessionDirs && project.mergedSessionDirs.length > 0
@@ -681,6 +701,7 @@ export function createApp(options: AppOptions): AppResult {
           () =>
             new AgySessionReader({
               projectPath: project.path,
+              getForkLineage: agyForkLineage,
               getContextWindow: mis
                 ? (model, provider, sessionId) =>
                     mis.getCachedContextWindow(model, provider, sessionId)
@@ -835,6 +856,7 @@ export function createApp(options: AppOptions): AppResult {
       const mis = options.modelInfoService;
       return new AgySessionReader({
         projectPath,
+        getForkLineage: agyForkLineage,
         getContextWindow: mis
           ? (model, provider, sessionId) =>
               mis.getCachedContextWindow(model, provider, sessionId)

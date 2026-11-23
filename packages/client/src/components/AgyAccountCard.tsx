@@ -139,6 +139,13 @@ function UsageSection({
   }
   return (
     <div className="agy-usage">
+      {usage.stale && (
+        <p className="codex-usage-state" role="status">
+          {usage.message
+            ? t("agyUsageStaleWithReason", { reason: usage.message })
+            : t("agyUsageStale")}
+        </p>
+      )}
       {usage.groups.map((group) => (
         <UsageGroup key={group.name} group={group} />
       ))}
@@ -213,12 +220,21 @@ export function AgyAccountCard({ onRefresh, defaultExpanded = false }: Props) {
     try {
       setUsage(await api.getAgyUsage({ fresh }));
     } catch (usageError) {
-      setUsage({
-        state: "error",
-        groups: [],
-        credits: null,
-        message: (usageError as Error).message,
-        fetchedAt: null,
+      setUsage((previous) => {
+        if (previous && previous.state === "ok") {
+          return {
+            ...previous,
+            stale: true,
+            message: (usageError as Error).message,
+          };
+        }
+        return {
+          state: "error",
+          groups: [],
+          credits: null,
+          message: (usageError as Error).message,
+          fetchedAt: null,
+        };
       });
     } finally {
       setUsageLoading(false);

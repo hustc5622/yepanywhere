@@ -3,8 +3,10 @@ import net from "node:net";
 import { afterEach, describe, expect, it } from "vitest";
 import {
   type AgySplitProxy,
+  getAgyUpstreamFailure,
   isAgyUpstreamHost,
   parseConnectTarget,
+  setAgyUpstreamFailureForTests,
   startAgySplitProxy,
 } from "../../../src/sdk/providers/agy-network.js";
 
@@ -12,6 +14,7 @@ const closers: Array<() => Promise<void> | void> = [];
 
 afterEach(async () => {
   while (closers.length > 0) await closers.pop()?.();
+  setAgyUpstreamFailureForTests(null);
 });
 
 async function listen(server: net.Server): Promise<number> {
@@ -187,6 +190,27 @@ describe("agy split proxy", () => {
 
     expect(result.status).toBe("502");
     expect(remote.connections()).toBe(0);
+  });
+
+  it("remembers a failing upstream until a tunnel succeeds again", async () => {
+    const remote = await echoServer("upstream");
+    const refusing = await upstreamProxy(remote.port, 403);
+    const working = await upstreamProxy(remote.port);
+    expect(getAgyUpstreamFailure()).toBeNull();
+
+    const broken = await split(`http://127.0.0.1:${refusing.port}`);
+    await tunnel(broken.url, "oauth2.googleapis.com:443");
+    expect(getAgyUpstreamFailure()).toMatch(/refused CONNECT \(403\)/);
+    expect(getAgyUpstreamFailure(Date.now() + 10 * 60_000)).toBeNull();
+
+    // Direct hosts say nothing about the upstream exit.
+    const direct = await echoServer("direct");
+    await tunnel(broken.url, `127.0.0.1:${direct.port}`);
+    expect(getAgyUpstreamFailure()).not.toBeNull();
+
+    const healthy = await split(`http://127.0.0.1:${working.port}`);
+    await tunnel(healthy.url, "oauth2.googleapis.com:443");
+    expect(getAgyUpstreamFailure()).toBeNull();
   });
 
   it("only serves CONNECT and rejects non-HTTP upstreams", async () => {

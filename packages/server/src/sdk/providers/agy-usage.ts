@@ -34,6 +34,45 @@ const COMMAND_TIMEOUT_MS = 60_000;
 const SIGNED_OUT = /please sign in|not logged in|not signed in/i;
 const MODELS_PREFIX = /^models within this group:\s*/i;
 
+const TRANSIENT_NETWORK_ERRORS = [
+  /bad gateway/i,
+  /\b502\b/,
+  /upstream proxy (closed|timed out|failed)/i,
+  /connection reset/i,
+  /socket hang up/i,
+  /econnreset/i,
+  /etimedout/i,
+  /unexpected eof/i,
+];
+
+export function isTransientAgyNetworkError(error: unknown): boolean {
+  const failed = asRecord(error);
+  const text = `${error instanceof Error ? error.message : ""} ${
+    typeof failed?.stdout === "string" ? failed.stdout : ""
+  } ${typeof failed?.stderr === "string" ? failed.stderr : ""}`;
+  return TRANSIENT_NETWORK_ERRORS.some((pattern) => pattern.test(text));
+}
+
+export function humanizeAgyErrorMessage(raw: string): string {
+  if (/bad gateway|\b502\b/i.test(raw)) {
+    return "Google proxy returned Bad Gateway (502). Please check network proxy.";
+  }
+  if (/eligibility check failed/i.test(raw)) {
+    return "Google eligibility check failed. Please check network proxy or sign in again.";
+  }
+  if (/upstream proxy (closed|timed out|failed)/i.test(raw)) {
+    return "Google upstream proxy connection failed. Please check proxy settings.";
+  }
+  if (/timed out|did not answer/i.test(raw)) {
+    return "Command timed out while waiting for Google response.";
+  }
+  const cleaned = raw
+    .replace(/^Command failed:.*?\/agy\s+[^\n:]*(:\s*error:\s*|:\s*)/i, "")
+    .replace(/^error:\s*/i, "")
+    .trim();
+  return cleaned.slice(0, 300) || raw.slice(0, 300);
+}
+
 export interface AgyCommandOutput {
   stdout: string;
   stderr: string;
@@ -55,7 +94,11 @@ const defaultRunner: AgyCommandRunner = async (agyPath, command) => {
       timeout: COMMAND_TIMEOUT_MS,
       maxBuffer: 4 * 1024 * 1024,
       encoding: "utf-8",
-      env: { ...process.env, ...(await agySpawnEnv(agyPath)) },
+      env: {
+        ...process.env,
+        AGY_CLI_DISABLE_AUTO_UPDATE: "true",
+        ...(await agySpawnEnv(agyPath)),
+      },
     },
   );
   return { stdout, stderr };
@@ -208,7 +251,27 @@ export class AgyUsageService {
     if (this.inFlight) return this.inFlight;
     const read = this.read()
       .then((value) => {
-        if (value.state === "ok") this.cache = { at: this.now(), value };
+        if (value.state === "ok") {
+          this.cache = { at: this.now(), value };
+          return value;
+        }
+        // When a fresh refresh fails with network/proxy issues, fall back to
+        // previously cached quota rather than presenting an empty/broken card.
+        if (
+          (value.state === "error" || value.state === "unavailable") &&
+          this.cache?.value &&
+          this.cache.value.state === "ok"
+        ) {
+          log.warn(
+            { event: "agy_usage_stale_fallback", error: value.message },
+            "Returning cached Antigravity quota after fresh read failure",
+          );
+          return {
+            ...this.cache.value,
+            stale: true,
+            message: value.message,
+          };
+        }
         return value;
       })
       .finally(() => {
@@ -228,7 +291,11 @@ export class AgyUsageService {
     ]);
     if (!usage.ok) {
       log.debug(
-        { event: "agy_usage_failed", state: usage.state },
+        {
+          event: "agy_usage_failed",
+          state: usage.state,
+          message: usage.message,
+        },
         "Antigravity usage read failed",
       );
       return failure(usage.state, usage.message);
@@ -237,13 +304,36 @@ export class AgyUsageService {
     if (!groups) {
       return failure("error", "agy answered /usage without any groups");
     }
+    let creditsData = credits.ok ? parseAgyCredits(credits.data) : null;
+    if (!creditsData && this.cache?.value?.credits) {
+      creditsData = this.cache.value.credits;
+    }
     return {
       state: "ok",
       groups,
-      credits: credits.ok ? parseAgyCredits(credits.data) : null,
+      credits: creditsData,
       message: null,
       fetchedAt: new Date(this.now()).toISOString(),
     };
+  }
+
+  private async runWithRetry(
+    agyPath: string,
+    command: "/usage" | "/credits",
+  ): Promise<AgyCommandOutput> {
+    try {
+      return await this.run(agyPath, command);
+    } catch (firstError) {
+      if (!isTransientAgyNetworkError(firstError)) {
+        throw firstError;
+      }
+      log.debug(
+        { event: "agy_usage_transient_retry", command },
+        "Retrying transient failure in Antigravity command",
+      );
+      await new Promise((resolve) => setTimeout(resolve, 800));
+      return await this.run(agyPath, command);
+    }
   }
 
   private async command(
@@ -252,7 +342,10 @@ export class AgyUsageService {
     expected: readonly string[],
   ): Promise<ParsedCommand> {
     try {
-      return parseAgyCommandOutput(await this.run(agyPath, command), expected);
+      return parseAgyCommandOutput(
+        await this.runWithRetry(agyPath, command),
+        expected,
+      );
     } catch (error) {
       // A failed process still carries what it printed; a signed-out agy
       // may report the reason on the way out.
@@ -264,15 +357,16 @@ export class AgyUsageService {
       if (SIGNED_OUT.test(`${printed.stdout}\n${printed.stderr}`)) {
         return { ok: false, state: "signed-out", message: "Not signed in" };
       }
+      const rawMessage =
+        failed?.killed === true
+          ? `agy did not answer ${command} within ${COMMAND_TIMEOUT_MS / 1000}s`
+          : error instanceof Error
+            ? error.message
+            : String(error);
       return {
         ok: false,
         state: "error",
-        message:
-          failed?.killed === true
-            ? `agy did not answer ${command} within ${COMMAND_TIMEOUT_MS / 1000}s`
-            : error instanceof Error
-              ? error.message.slice(0, 500)
-              : String(error),
+        message: humanizeAgyErrorMessage(rawMessage),
       };
     }
   }

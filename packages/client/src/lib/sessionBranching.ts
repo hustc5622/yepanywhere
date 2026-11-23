@@ -94,8 +94,8 @@ export interface EditablePromptIdentity {
 
 export function usesNativeEditForkBoundary(
   provider: ProviderName | string | undefined | null,
-): provider is "pi" {
-  return provider === "pi";
+): provider is "pi" | "agy" {
+  return provider === "pi" || provider === "agy";
 }
 
 export function supportsHistoricalMessageEditing(
@@ -105,12 +105,13 @@ export function supportsHistoricalMessageEditing(
     provider == null ||
     provider === "claude" ||
     provider === "codex" ||
-    provider === "pi"
+    provider === "pi" ||
+    provider === "agy"
   );
 }
 
 /**
- * Pi can only fork at an authoritative native message ID.
+ * Pi and Antigravity can only fork at an authoritative native message ID.
  * Their live echo temporarily carries a Yep UUID, so editing stays
  * unavailable until the persisted message replaces that echo. Other
  * supported providers retain their existing edit behavior.

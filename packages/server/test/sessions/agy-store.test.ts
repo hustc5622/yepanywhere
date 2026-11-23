@@ -14,7 +14,10 @@ import {
   readAgyTranscript,
   readAgyUserText,
 } from "../../src/sessions/agy-store.js";
-import { cleanAgyToolOutput } from "../../src/sessions/agy-tools.js";
+import {
+  cleanAgyToolOutput,
+  readAgyToolTiming,
+} from "../../src/sessions/agy-tools.js";
 
 function openSqlite() {
   const sqlite = process.getBuiltinModule?.("node:sqlite") as
@@ -76,7 +79,7 @@ const STEPS = [
     status: "DONE",
     created_at: "2026-11-21T08:58:04Z",
     content:
-      "Created At: 2026-11-21T16:58:04+08:00\nCompleted At: 2026-11-21T16:58:04+08:00\nCreated file.",
+      "Created At: 2026-11-21T16:58:04+08:00\nCompleted At: 2026-11-21T16:58:07+08:00\nCreated file.",
   },
   {
     step_index: 3,
@@ -292,6 +295,20 @@ describe("agy store", () => {
         written.message.role === "toolResult" &&
         written.message.content,
     ).toEqual([{ type: "text", text: "Created file." }]);
+    // The result is stamped when the call ended and carries agy's own
+    // call-to-result time, not the planner step's shared start.
+    expect(written?.timestamp).toBe("2026-11-21T08:58:07.000Z");
+    expect(
+      written?.type === "message" &&
+        written.message.role === "toolResult" &&
+        written.message.durationMs,
+    ).toBe(3000);
+    const denied = session?.entries[3];
+    expect(
+      denied?.type === "message" &&
+        denied.message.role === "toolResult" &&
+        "durationMs" in denied.message,
+    ).toBe(false);
   });
 
   it("falls back to synthesized ids without the conversation store", async () => {
@@ -363,6 +380,26 @@ describe("agy store helpers", () => {
         "Created At: a\nCompleted At: b\nCreated At: a\nCompleted At: b\nok\n",
       ),
     ).toBe("ok");
+  });
+
+  it("reads per-call timing from result bookkeeping lines", () => {
+    expect(
+      readAgyToolTiming(
+        "Created At: 2026-11-22T23:48:53+08:00\nCompleted At: 2026-11-22T23:50:15+08:00\nCreated At: 2026-11-22T23:48:53+08:00\nCompleted At: 2026-11-22T23:50:15+08:00\nMade 1 replacement",
+      ),
+    ).toEqual({
+      createdAtMs: Date.parse("2026-11-22T15:48:53Z"),
+      completedAtMs: Date.parse("2026-11-22T15:50:15Z"),
+      durationMs: 82_000,
+    });
+    // A background task has started but not ended.
+    expect(
+      readAgyToolTiming(
+        "Created At: 2026-11-22T23:52:10+08:00\nTool is running as a background task",
+      ),
+    ).toEqual({ createdAtMs: Date.parse("2026-11-22T15:52:10Z") });
+    expect(readAgyToolTiming("Created At: x\nok")).toEqual({});
+    expect(readAgyToolTiming(undefined)).toEqual({});
   });
 
   it("maps watched paths to conversation ids", () => {

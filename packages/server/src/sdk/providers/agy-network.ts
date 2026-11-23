@@ -15,6 +15,7 @@
 import http from "node:http";
 import net from "node:net";
 import tls from "node:tls";
+import { getLogger } from "../../logging/logger.js";
 
 /** Registrable domains whose traffic belongs to agy's model/auth path. */
 export const AGY_UPSTREAM_DOMAINS = [
@@ -26,6 +27,46 @@ export const AGY_UPSTREAM_DOMAINS = [
 
 const CONNECT_TIMEOUT_MS = 15_000;
 const MAX_UPSTREAM_HEADER_BYTES = 16 * 1024;
+/** How long a failed upstream tunnel keeps the exit marked unhealthy. */
+export const AGY_UPSTREAM_FAILURE_WINDOW_MS = 5 * 60_000;
+
+/**
+ * Outcome of the latest tunnel through `YEP_AGY_PROXY`. agy cannot refresh
+ * its OAuth token while that exit is down and then reports "Authentication
+ * required" / "Please sign in", which Yep must not read as a sign-out.
+ */
+let upstreamFailure: { at: number; reason: string } | undefined;
+
+function recordUpstreamResult(error: Error | null, now = Date.now()): void {
+  if (!error) {
+    // A working tunnel clears the failure: the exit is back.
+    upstreamFailure = undefined;
+    return;
+  }
+  if (!upstreamFailure) {
+    // Message only: the upstream URL may carry credentials.
+    getLogger().warn(
+      { event: "agy_upstream_proxy_failed", reason: error.message },
+      "Antigravity upstream proxy (YEP_AGY_PROXY) failed",
+    );
+  }
+  upstreamFailure = { at: now, reason: error.message };
+}
+
+/**
+ * The reason `YEP_AGY_PROXY` is currently failing, or null when it is
+ * healthy, unused, or its last failure is older than the failure window.
+ */
+export function getAgyUpstreamFailure(now = Date.now()): string | null {
+  if (!upstreamFailure) return null;
+  if (now - upstreamFailure.at > AGY_UPSTREAM_FAILURE_WINDOW_MS) return null;
+  return upstreamFailure.reason;
+}
+
+/** Test hook: set (or clear with null) the remembered upstream failure. */
+export function setAgyUpstreamFailureForTests(reason: string | null): void {
+  upstreamFailure = reason ? { at: Date.now(), reason } : undefined;
+}
 
 export function isAgyUpstreamHost(host: string): boolean {
   const name = host.toLowerCase().replace(/\.$/, "");
@@ -207,6 +248,7 @@ export async function startAgySplitProxy(
         }));
     opened.then(
       ({ socket, rest }) => {
+        if (viaUpstream) recordUpstreamResult(null);
         sockets.add(socket);
         socket.on("close", () => sockets.delete(socket));
         if (client.destroyed) {
@@ -218,7 +260,12 @@ export async function startAgySplitProxy(
         if (head.length > 0) socket.write(head);
         splice(client, socket);
       },
-      () => {
+      (error: unknown) => {
+        if (viaUpstream) {
+          recordUpstreamResult(
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        }
         // Never fall back to direct for upstream hosts, and never echo the
         // upstream URL (it may carry credentials).
         client.end("HTTP/1.1 502 Bad Gateway\r\nConnection: close\r\n\r\n");

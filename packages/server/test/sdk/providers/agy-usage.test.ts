@@ -234,6 +234,71 @@ describe("AgyUsageService", () => {
     expect((await signedOut.getUsage()).state).toBe("signed-out");
   });
 
+  it("retries transient network errors like Bad Gateway", async () => {
+    let attempts = 0;
+    const run = vi.fn(async (_path: string, command: "/usage" | "/credits") => {
+      if (command === "/usage") {
+        attempts++;
+        if (attempts === 1) {
+          throw Object.assign(
+            new Error(
+              'error: Eligibility check failed: Post "https://daily-cloudcode-pa.googleapis.com/v1internal:loadCodeAssist": Bad Gateway',
+            ),
+            { stderr: "Bad Gateway" },
+          );
+        }
+        return ok(USAGE);
+      }
+      return ok(CREDITS);
+    });
+    const service = new AgyUsageService(async () => "/h/agy", run);
+    const result = await service.getUsage();
+    expect(result.state).toBe("ok");
+    expect(attempts).toBe(2);
+  });
+
+  it("returns stale cached quota when a fresh read fails with a proxy error", async () => {
+    let fail = false;
+    const run = vi.fn(async (_path: string, command: "/usage" | "/credits") => {
+      if (fail) {
+        throw new Error("upstream proxy timed out");
+      }
+      return ok(command === "/usage" ? USAGE : CREDITS);
+    });
+    const service = new AgyUsageService(async () => "/h/agy", run);
+    const initial = await service.getUsage();
+    expect(initial.state).toBe("ok");
+    expect(initial.stale).toBeUndefined();
+
+    // Next fresh read fails with proxy error; should return stale cache
+    fail = true;
+    const refreshed = await service.getUsage({ fresh: true });
+    expect(refreshed.state).toBe("ok");
+    expect(refreshed.stale).toBe(true);
+    expect(refreshed.groups).toEqual(initial.groups);
+    expect(refreshed.message).toContain(
+      "Google upstream proxy connection failed",
+    );
+  });
+
+  it("inherits previously cached credits when credits command fails", async () => {
+    let failCredits = false;
+    const run = vi.fn(async (_path: string, command: "/usage" | "/credits") => {
+      if (command === "/credits" && failCredits) {
+        throw new Error("credits unavailable");
+      }
+      return ok(command === "/usage" ? USAGE : CREDITS);
+    });
+    const service = new AgyUsageService(async () => "/h/agy", run);
+    const first = await service.getUsage();
+    expect(first.credits?.remaining).toBe(0);
+
+    failCredits = true;
+    const second = await service.getUsage({ fresh: true });
+    expect(second.state).toBe("ok");
+    expect(second.credits?.remaining).toBe(0);
+  });
+
   it("reports a missing CLI without spawning", async () => {
     const run = runner();
     const service = new AgyUsageService(async () => null, run);
