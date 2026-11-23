@@ -47,10 +47,14 @@ describe("agy model catalog", () => {
       neon?.supportedReasoningEfforts?.map((e) => e.reasoningEffort),
     ).toEqual(["low", "medium", "high", "xhigh"]);
     expect(neon?.defaultReasoningEffort).toBe("high");
+    // agy compacts at its own per-model limit, not the raw 1M Gemini window.
+    expect(neon?.contextWindow).toBe(512_000);
+    expect(models[2]?.contextWindow).toBe(256_000);
     // A single-tier slug stays whole, exactly like agy's ACP option value.
     expect(models[3]).toEqual({
       id: "gpt-oss-120b-medium",
       name: "GPT-OSS 120B (Medium)",
+      contextWindow: 80_000,
     });
   });
 

@@ -341,6 +341,30 @@ describe("agy store", () => {
     const other = new AgySessionReader({ dataDir, projectPath: "/elsewhere" });
     expect(await other.listSessions("p" as UrlProjectId)).toEqual([]);
   });
+
+  it("sizes the context meter by agy's compaction limit, not 1M", async () => {
+    await seed();
+    // A model-info cache that knows nothing falls back to agy's own table;
+    // the reader must ask as provider "agy", not Pi's gateway defaults.
+    const asked: (string | undefined)[] = [];
+    const reader = new AgySessionReader({
+      dataDir,
+      projectPath: "/w",
+      getContextWindow: (_model, provider) => {
+        asked.push(provider);
+        return undefined;
+      },
+    });
+    const [summary] = await reader.listSessions("p" as UrlProjectId);
+    // The fixture ends with a CHECKPOINT, so the fill is unknown but the
+    // window is still reported (gemini-4-neon → 512K).
+    expect(summary?.contextUsage).toMatchObject({
+      contextWindow: 512_000,
+      unknown: true,
+    });
+    expect(asked).toContain("agy");
+    expect(asked).not.toContain("pi");
+  });
 });
 
 describe("agy store helpers", () => {

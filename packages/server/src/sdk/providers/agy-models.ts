@@ -12,7 +12,7 @@
  * effort, mirroring Codex's model + effort controls.
  */
 
-import type { ModelInfo } from "@yep-anywhere/shared";
+import { type ModelInfo, getAgyContextWindow } from "@yep-anywhere/shared";
 
 export const AGY_MODEL_CONFIG_ID = "model";
 export const AGY_THOUGHT_CONFIG_ID = "thought_level";
@@ -77,7 +77,11 @@ export function buildAgyModelCatalog(
     if (!split || !tiers || tiers.size < 2) {
       if (!emitted.has(row.slug)) {
         emitted.add(row.slug);
-        models.push({ id: row.slug, name: row.label });
+        models.push({
+          id: row.slug,
+          name: row.label,
+          contextWindow: getAgyContextWindow(row.slug),
+        });
       }
       continue;
     }
@@ -87,6 +91,7 @@ export function buildAgyModelCatalog(
     models.push({
       id: split.base,
       name: row.label.replace(TIER_LABEL, "").trim() || split.base,
+      contextWindow: getAgyContextWindow(split.base),
       supportedReasoningEfforts: ordered.map((reasoningEffort) => ({
         reasoningEffort,
       })),
@@ -134,6 +139,7 @@ export const AGY_FALLBACK_MODELS: ModelInfo[] = [
   {
     id: "gemini-3.8-flash",
     name: "Gemini 3.8 Flash",
+    contextWindow: getAgyContextWindow("gemini-3.8-flash"),
     supportedReasoningEfforts: [
       { reasoningEffort: "low" },
       { reasoningEffort: "medium" },

@@ -455,6 +455,54 @@ export function getLlmGatewayModelDefaultLimits(
 }
 
 /**
+ * Effective context windows for Antigravity CLI (`agy`) models.
+ *
+ * agy's ACP `usage_update` reports `size: 1048576` (the raw Gemini window), but
+ * agy compacts the conversation long before that: its bundled per-model
+ * experiment config (`model_profiles` → `CASCADE_USE_EXPERIMENT_CHECKPOINTER`
+ * in the agy binary) sets `max_token_limit`, and a `CHECKPOINT` step is
+ * written once the next request would exceed it. That limit — not 1M — is the
+ * usable window, so the meter uses it.
+ *
+ * Verified against real transcripts (2026-11, agy 1.5.x):
+ * - `gemini-4-argon-high` (enum M417, limit 512000) compacted at ~510K;
+ *   `gemini-4-neon-high` ran to ~401K without compacting.
+ * - `gemini-3.8-flash-high` (not in `model_profiles`, default limit 256000)
+ *   compacted at ~254K.
+ * - Claude models use 256000 (an 840K `claude-1m` variant is an experiment);
+ *   `gpt-oss-120b-medium` uses 80000.
+ *
+ * Matched by longest prefix against the family id or the full tiered slug.
+ */
+const AGY_CONTEXT_WINDOW_RULES: ReadonlyArray<
+  readonly [prefix: string, contextWindow: number]
+> = [
+  ["gemini-4", 512_000],
+  ["gemini-pro-orchestrator", 512_000],
+  ["gemini-3.8-flash", 256_000],
+  ["gemini", 256_000],
+  ["claude", 256_000],
+  ["gpt-oss", 80_000],
+];
+/** agy's default checkpoint limit for models without a dedicated profile. */
+export const AGY_DEFAULT_CONTEXT_WINDOW = 256_000;
+
+/** Usable context window (compaction limit) for an agy model id or slug. */
+export function getAgyContextWindow(model: string | undefined): number {
+  if (!model) return AGY_DEFAULT_CONTEXT_WINDOW;
+  const raw = model.trim().toLowerCase();
+  let best = AGY_DEFAULT_CONTEXT_WINDOW;
+  let bestLen = -1;
+  for (const [prefix, size] of AGY_CONTEXT_WINDOW_RULES) {
+    if (raw.startsWith(prefix) && prefix.length > bestLen) {
+      best = size;
+      bestLen = prefix.length;
+    }
+  }
+  return best;
+}
+
+/**
  * Short-name → display label map for Claude SDK model options.
  * These are the logical short names used by the Claude provider config
  * (e.g. "opus", "sonnet"), not full model IDs.
@@ -608,6 +656,9 @@ export function getModelContextWindow(
   model: string | undefined,
   provider?: ProviderName,
 ): number {
+  // agy compacts at its own per-model limit, well below the raw model window.
+  if (provider === "agy") return getAgyContextWindow(model);
+
   if (!model) {
     return provider === "codex"
       ? CODEX_DEFAULT_CONTEXT_WINDOW
@@ -707,6 +758,7 @@ export function escalateContextWindow(
   if (provider === "codex" || provider === "codex-oss") return contextWindow;
   if (provider === "gemini" || provider === "gemini-acp") return contextWindow;
   if (provider === "pi") return contextWindow;
+  if (provider === "agy") return contextWindow;
   // Default to Claude's 1M tier for Claude and unknown providers.
   return Math.max(contextWindow, CLAUDE_EXTENDED_CONTEXT_WINDOW);
 }

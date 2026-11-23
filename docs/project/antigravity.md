@@ -112,6 +112,7 @@ agy 的后台命令和计时器结束时，agy 会在没有 prompt 的情况下�
 - 文件变化：监听 `brain/` 目录下的 `transcript_full.jsonl`。终端里的 `agy` 正在运行的会话，会被 ExternalSessionTracker 标记为外部活动。
 - 展示：和 Pi、MiniMax Code 一样，实时通道只转发工具块，正文以磁盘快照为准，按 step 整段出现。
 - 折叠：agy 一个 prompt 由多个 planner step 串起来，中途可能有多段面向用户的正文。reader 把以下两种 step 的正文标为 `final_answer`（`annotateAgyReplyPhases`），让它们留在「已完成」折叠外，并把工作过程切成前后几段：一是只有正文、没有工具调用的 step（agy 交还控制，比如等后台任务时的进度说明，或最终答复）；二是正文和 `ask_question` 在同一个 step（向用户提问前给出的报告）。正文配普通工具调用的（「我先看看 X」）仍然折叠。历史里的 thinking 也会显示在折叠区里。
+- 上下文用量：取最后一个带 token 的 `PLANNER_RESPONSE` 的 `input_tokens + cache_read_tokens + output_tokens`。窗口不用 ACP `usage_update.size`（恒为 `1048576`，是模型原始窗口），而用 agy 实际压缩的上限：agy 二进制里 `model_profiles` 的 `CASCADE_USE_EXPERIMENT_CHECKPOINTER.max_token_limit`，下一次请求会超过它时写 `CHECKPOINT`。实测 Gemini 4 Argon（`MODEL_PLACEHOLDER_M417`，512000）约 51 万压缩、Gemini 3.8 Flash（无专属 profile，默认 256000）约 25.4 万压缩。对应表在 `packages/shared/src/app-types.ts` 的 `getAgyContextWindow`（Gemini 4 / Orchestrator 512K，Flash、Claude 256K，GPT-OSS 80K，其他 256K）；reader 以 provider `agy` 解析窗口（不走 Pi 网关表的 Gemini 1M），模型目录也带上这个值。升级 agy 后可用 `strings ~/.local/bin/agy | grep max_token_limit` 和 `~/.gemini/antigravity-cli/log/` 里的 `Switching model ... (enum: …)` 复核。
 - `AGY_DATA_DIR` 是 Yep 专用的覆盖项（测试和诊断用），默认值是 `~/.gemini/antigravity-cli`。Yep 从不写 agy 的数据库或 transcript；归档 agy 会话只写 Yep 自己的元数据。
 
 ## 当前不支持

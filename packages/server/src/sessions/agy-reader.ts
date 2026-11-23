@@ -7,6 +7,7 @@ import {
   SESSION_TITLE_MAX_LENGTH,
   type SessionBranchState,
   type UrlProjectId,
+  getAgyContextWindow,
 } from "@yep-anywhere/shared";
 import { getLogger } from "../logging/logger.js";
 import { canonicalizeProjectPath } from "../projects/paths.js";
@@ -85,7 +86,12 @@ export class AgySessionReader implements ISessionReader {
     this.projectPath = options.projectPath
       ? canonicalizeProjectPath(options.projectPath)
       : undefined;
-    this.getContextWindow = options.getContextWindow;
+    // The transcript is projected through Pi's converter, which asks for the
+    // window as provider "pi" (gateway limits: Gemini = 1M). agy compacts at
+    // its own per-model limit, so resolve as "agy" and fall back to that.
+    const cached = options.getContextWindow;
+    this.getContextWindow = (model, _provider, sessionId) =>
+      cached?.(model, "agy", sessionId) ?? getAgyContextWindow(model);
     this.getForkLineage = options.getForkLineage;
   }
 

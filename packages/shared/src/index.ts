@@ -423,7 +423,9 @@ export {
   // Context window utilities
   DEFAULT_CONTEXT_WINDOW,
   CODEX_DEFAULT_CONTEXT_WINDOW,
+  AGY_DEFAULT_CONTEXT_WINDOW,
   escalateContextWindow,
+  getAgyContextWindow,
   getModelContextWindow,
   getLlmGatewayModelDefaultLimits,
   resolveModelDisplayLabel,

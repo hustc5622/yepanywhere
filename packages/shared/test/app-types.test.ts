@@ -3,6 +3,7 @@ import {
   CLAUDE_EXTENDED_CONTEXT_WINDOW,
   CODEX_DEFAULT_CONTEXT_WINDOW,
   DEFAULT_CONTEXT_WINDOW,
+  escalateContextWindow,
   getLlmGatewayModelDefaultLimits,
   getModelContextWindow,
   resolveClaudeModelLabel,
@@ -66,6 +67,24 @@ describe("getModelContextWindow", () => {
     expect(getModelContextWindow("gpt-image-2", "pi")).toBe(
       DEFAULT_CONTEXT_WINDOW,
     );
+  });
+});
+
+describe("agy context windows", () => {
+  it("uses agy's compaction limit instead of the raw Gemini window", () => {
+    expect(getModelContextWindow("gemini-4-neon", "agy")).toBe(512_000);
+    expect(getModelContextWindow("gemini-4-argon-high", "agy")).toBe(512_000);
+    expect(getModelContextWindow("gemini-pro-orchestrator-neon", "agy")).toBe(
+      512_000,
+    );
+    expect(getModelContextWindow("gemini-3.8-flash-low", "agy")).toBe(256_000);
+    expect(getModelContextWindow("claude-opus-5-5-high", "agy")).toBe(256_000);
+    expect(getModelContextWindow("gpt-oss-120b-medium", "agy")).toBe(80_000);
+    expect(getModelContextWindow(undefined, "agy")).toBe(256_000);
+  });
+
+  it("never escalates an agy window to the Claude 1M tier", () => {
+    expect(escalateContextWindow(512_000, 523_000, "agy")).toBe(512_000);
   });
 });
 
