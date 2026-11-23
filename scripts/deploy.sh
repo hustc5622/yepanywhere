@@ -683,7 +683,6 @@ check_reports_preflight() {
 # credentials.
 check_agy_proxy_preflight() {
   server_deploy_restarts || return 0
-  [[ -n "${YEP_AGY_PROXY:-}" ]] || return 0
   [[ "$(uname -s)" == "Darwin" ]] || return 0
 
   local server_label="${YEP_LAUNCHD_SERVER_LABEL:-com.yueyuan.yepanywhere.server}"
@@ -691,6 +690,15 @@ check_agy_proxy_preflight() {
   [[ -f "$plist" ]] || return 0
 
   local key current
+  if [[ -z "${YEP_AGY_PROXY:-}" ]]; then
+    # Removed from the env file: the plist must drop it too, or agy keeps
+    # using the old exit.
+    if /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:YEP_AGY_PROXY" "$plist" >/dev/null 2>&1; then
+      mark_server_launchagent_sync_needed "agy proxy"
+      dim "agy proxy config: LaunchAgent $server_label will be updated (YEP_AGY_PROXY removed)"
+    fi
+    return 0
+  fi
   for key in YEP_AGY_PROXY NO_PROXY; do
     [[ -n "${!key:-}" ]] || continue
     current="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$key" "$plist" 2>/dev/null || true)"
