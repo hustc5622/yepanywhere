@@ -548,6 +548,225 @@ describe("SessionIndexService", () => {
     });
   });
 
+  // Regression: after an index version bump, concurrent cold loads and
+  // single-session lookups left the sidebar showing 1-2 sessions of a project
+  // with hundreds. The stale path must never serve an index that was not
+  // fully enumerated.
+  describe("incomplete index protection", () => {
+    const SESSION_IDS = ["session-1", "session-2", "session-3", "session-4"];
+
+    async function createSessions(): Promise<void> {
+      for (const id of SESSION_IDS) {
+        await createSession(id, `Content ${id}`);
+      }
+    }
+
+    function slowParse(delayMs: number) {
+      const original = reader.getSessionSummary.bind(reader);
+      return vi
+        .spyOn(reader, "getSessionSummary")
+        .mockImplementation(async (sessionId, pid) => {
+          await new Promise((resolve) => setTimeout(resolve, delayMs));
+          return original(sessionId, pid);
+        });
+    }
+
+    function newService(): SessionIndexService {
+      return new SessionIndexService({
+        dataDir,
+        projectsDir,
+        fullValidationIntervalMs: 30_000,
+      });
+    }
+
+    it("shares one cold load across concurrent stale reads after a version bump", async () => {
+      await createSessions();
+      const indexPath = service.getIndexPath(sessionDir, reader);
+      await writeFile(
+        indexPath,
+        JSON.stringify({ version: 15, projectId, sessions: {} }),
+      );
+      const staleService = newService();
+      const parseSpy = slowParse(5);
+
+      const [a, b] = await Promise.all([
+        staleService.getSessionsWithCache(sessionDir, projectId, reader, {
+          allowStale: true,
+        }),
+        staleService.getSessionsWithCache(sessionDir, projectId, reader, {
+          allowStale: true,
+        }),
+      ]);
+      const c = await staleService.getSessionsWithCache(
+        sessionDir,
+        projectId,
+        reader,
+        { allowStale: true },
+      );
+
+      expect(a).toHaveLength(SESSION_IDS.length);
+      expect(b).toHaveLength(SESSION_IDS.length);
+      expect(c).toHaveLength(SESSION_IDS.length);
+      expect(parseSpy).toHaveBeenCalledTimes(SESSION_IDS.length);
+
+      const persisted = JSON.parse(await readFile(indexPath, "utf-8"));
+      expect(persisted.version).toBe(16);
+      expect(persisted.complete).toBe(true);
+      expect(Object.keys(persisted.sessions).sort()).toEqual(SESSION_IDS);
+    });
+
+    it("does not serve a cold index populated by a single-session lookup", async () => {
+      await createSessions();
+      const staleService = newService();
+
+      await staleService.getSessionSummaryWithCache(
+        sessionDir,
+        projectId,
+        "session-1",
+        reader,
+      );
+      const sessions = await staleService.getSessionsWithCache(
+        sessionDir,
+        projectId,
+        reader,
+        { allowStale: true },
+      );
+
+      expect(sessions).toHaveLength(SESSION_IDS.length);
+    });
+
+    it("does not trust a persisted point-lookup index after restart", async () => {
+      await createSessions();
+      const first = newService();
+      await first.getSessionTitle(sessionDir, projectId, "session-1", reader);
+      const indexPath = first.getIndexPath(sessionDir, reader);
+      const persisted = JSON.parse(await readFile(indexPath, "utf-8"));
+      expect(Object.keys(persisted.sessions)).toEqual(["session-1"]);
+      expect(persisted.complete).toBe(false);
+
+      const restarted = newService();
+      const sessions = await restarted.getSessionsWithCache(
+        sessionDir,
+        projectId,
+        reader,
+        { allowStale: true },
+      );
+      expect(sessions).toHaveLength(SESSION_IDS.length);
+    });
+
+    it("revalidates a legacy index file that lacks the completeness flag", async () => {
+      await createSessions();
+      const filePath = join(sessionDir, "session-1.jsonl");
+      const stats = await stat(filePath);
+      const indexPath = service.getIndexPath(sessionDir, reader);
+      await writeFile(
+        indexPath,
+        JSON.stringify({
+          version: 16,
+          projectId,
+          sessions: {
+            "session-1": {
+              title: "Content session-1",
+              fullTitle: "Content session-1",
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+              messageCount: 1,
+              indexedBytes: stats.size,
+              fileMtime: stats.mtimeMs,
+              provider: "claude",
+            },
+          },
+        }),
+      );
+      const staleService = newService();
+      const parseSpy = vi.spyOn(reader, "getSessionSummary");
+
+      const sessions = await staleService.getSessionsWithCache(
+        sessionDir,
+        projectId,
+        reader,
+        { allowStale: true },
+      );
+
+      expect(sessions).toHaveLength(SESSION_IDS.length);
+      // The matching cached entry is reused; only the missing ones parse.
+      expect(parseSpy).toHaveBeenCalledTimes(SESSION_IDS.length - 1);
+      const persisted = JSON.parse(await readFile(indexPath, "utf-8"));
+      expect(persisted.complete).toBe(true);
+    });
+
+    it("does not expose a half-scanned index to a concurrent stale read", async () => {
+      await createSessions();
+      const staleService = newService();
+      const parseSpy = slowParse(20);
+
+      const full = staleService.getSessionsWithCache(
+        sessionDir,
+        projectId,
+        reader,
+      );
+      await vi.waitFor(() => {
+        expect(parseSpy.mock.calls.length).toBeGreaterThanOrEqual(2);
+      });
+      const stale = await staleService.getSessionsWithCache(
+        sessionDir,
+        projectId,
+        reader,
+        { allowStale: true },
+      );
+
+      expect(stale).toHaveLength(SESSION_IDS.length);
+      expect(await full).toHaveLength(SESSION_IDS.length);
+    });
+
+    it("keeps parsed summaries when persisting the index fails, then retries", async () => {
+      await createSessions();
+      const indexPath = service.getIndexPath(sessionDir, reader);
+      const saveSpy = vi
+        .spyOn(
+          service as unknown as { doSaveIndex: () => Promise<void> },
+          "doSaveIndex",
+        )
+        .mockRejectedValueOnce(new Error("lock timeout"));
+
+      const sessions = await service.getSessionsWithCache(
+        sessionDir,
+        projectId,
+        reader,
+      );
+      expect(sessions).toHaveLength(SESSION_IDS.length);
+      await expect(stat(indexPath)).rejects.toMatchObject({ code: "ENOENT" });
+
+      // The next validation finds nothing changed but still retries the save.
+      saveSpy.mockRestore();
+      await service.getSessionsWithCache(sessionDir, projectId, reader);
+      const persisted = JSON.parse(await readFile(indexPath, "utf-8"));
+      expect(persisted.complete).toBe(true);
+      expect(Object.keys(persisted.sessions).sort()).toEqual(SESSION_IDS);
+    });
+
+    it("skips one unreadable session instead of emptying the list", async () => {
+      await createSessions();
+      const original = reader.getSessionSummary.bind(reader);
+      vi.spyOn(reader, "getSessionSummary").mockImplementation(
+        async (sessionId, pid) => {
+          if (sessionId === "session-2") throw new Error("corrupt");
+          return original(sessionId, pid);
+        },
+      );
+
+      const sessions = await service.getSessionsWithCache(
+        sessionDir,
+        projectId,
+        reader,
+      );
+
+      expect(sessions.map((s) => s.id).sort()).toEqual(
+        SESSION_IDS.filter((id) => id !== "session-2"),
+      );
+    });
+  });
+
   describe("invalidation", () => {
     it("invalidateSession removes session from memory cache", async () => {
       await createSession("session-1", "Original");
@@ -1020,7 +1239,7 @@ describe("SessionIndexService", () => {
       await writeFile(
         indexPath,
         JSON.stringify({
-          version: 15,
+          version: 16,
           projectId,
           sessions: {
             legacy: {

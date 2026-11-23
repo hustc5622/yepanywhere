@@ -139,6 +139,13 @@ export class SessionContentIndexService {
   private dirtySessionsByDir: Map<string, Set<string>> = new Map();
   private inFlightEnsures: Map<string, Promise<SessionContentIndexState>> =
     new Map();
+  /**
+   * Deduplicates cold index loads per scope so concurrent callers share one
+   * index object; otherwise the last load replaces `indexCache` and earlier
+   * callers mutate an orphan that `doSaveIndex` never persists.
+   */
+  private inFlightIndexLoads: Map<string, Promise<SessionContentIndexState>> =
+    new Map();
   private unsubscribeEventBus: (() => void) | null = null;
 
   constructor(options: SessionContentIndexServiceOptions = {}) {
@@ -206,10 +213,42 @@ export class SessionContentIndexService {
     reader?: ISessionReader,
   ): Promise<SessionContentIndexState> {
     const cacheKey = this.getScopeKey(sessionDir, reader);
-    const indexPath = this.getIndexPath(sessionDir, reader);
-
     const cached = this.indexCache.get(cacheKey);
     if (cached) return cached;
+
+    const inFlight = this.inFlightIndexLoads.get(cacheKey);
+    if (inFlight) return inFlight;
+
+    const promise = this.loadIndexFromDisk(sessionDir, projectId, reader).then(
+      (loaded) => {
+        if (this.inFlightIndexLoads.get(cacheKey) !== promise) {
+          return this.indexCache.get(cacheKey) ?? loaded;
+        }
+        const existing = this.indexCache.get(cacheKey);
+        if (existing) return existing;
+        this.indexCache.set(cacheKey, loaded);
+        this.evictIfNeeded();
+        return loaded;
+      },
+    );
+    this.inFlightIndexLoads.set(cacheKey, promise);
+    try {
+      return await promise;
+    } finally {
+      if (this.inFlightIndexLoads.get(cacheKey) === promise) {
+        this.inFlightIndexLoads.delete(cacheKey);
+      }
+    }
+  }
+
+  /** Read and validate the persisted index; never touches `indexCache`. */
+  private async loadIndexFromDisk(
+    sessionDir: string,
+    projectId: UrlProjectId,
+    reader?: ISessionReader,
+  ): Promise<SessionContentIndexState> {
+    const cacheKey = this.getScopeKey(sessionDir, reader);
+    const indexPath = this.getIndexPath(sessionDir, reader);
 
     const fresh: SessionContentIndexState = {
       version: CURRENT_VERSION,
@@ -224,8 +263,6 @@ export class SessionContentIndexService {
         parsed.version === CURRENT_VERSION &&
         parsed.projectId === projectId
       ) {
-        this.indexCache.set(cacheKey, parsed);
-        this.evictIfNeeded();
         return parsed;
       }
     } catch (error) {
@@ -237,8 +274,6 @@ export class SessionContentIndexService {
       }
     }
 
-    this.indexCache.set(cacheKey, fresh);
-    this.evictIfNeeded();
     return fresh;
   }
 
@@ -661,6 +696,7 @@ export class SessionContentIndexService {
 
   clearCache(sessionDir: string): void {
     this.indexCache.delete(sessionDir);
+    this.inFlightIndexLoads.delete(sessionDir);
     this.dirtyDirs.delete(sessionDir);
     this.dirtySessionsByDir.delete(sessionDir);
   }

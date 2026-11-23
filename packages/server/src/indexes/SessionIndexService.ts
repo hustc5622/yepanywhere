@@ -94,6 +94,11 @@ export interface CachedSessionSummary {
 }
 
 export interface SessionIndexState {
+  // v16 rebuilds Pi-family summaries (Pi, agy, mcode, dsh): a history that
+  // merely stops mid-turn is now `incomplete`, and `interrupted` needs an
+  // explicit abort on record. Cached v15 entries reported every unfinished
+  // tail as interrupted.
+  //
   // v15 rebuilds cached Pi summaries: a compaction now resets the context
   // reading to an explicit `unknown` until the next response reports usage,
   // instead of repeating the pre-compaction fill.
@@ -108,14 +113,43 @@ export interface SessionIndexState {
   // v12 persists question coverage so a bounded Codex summary cannot be
   // mistaken for a complete directory. It also rebuilds v11 entries whose
   // question ids were already byte-offset stable but lacked this field.
-  version: 15;
+  version: 16;
   projectId: string;
   sessions: Record<string, CachedSessionSummary>;
+  /**
+   * True only after a full validation enumerated the whole scope and committed
+   * its result. Single-session lookups (`getSessionSummaryWithCache`,
+   * `getSessionTitle`) write individual entries into a cold index, so a
+   * non-empty `sessions` map does not prove the directory was listed. The
+   * stale-while-revalidate list path must never serve an incomplete index:
+   * after a version bump it returned one or two point-lookup entries for a
+   * project with hundreds of sessions, and the incremental sidebar never
+   * refetched to fill the gap.
+   *
+   * Absent on files written before this flag existed; those are treated as
+   * incomplete and confirmed by one full validation (cached entries are reused
+   * by mtime/size, so this costs stats, not re-parses).
+   */
+  complete?: boolean;
+}
+
+function isIndexComplete(index: SessionIndexState): boolean {
+  return index.complete === true;
+}
+
+/** Entries are reused by reference when unchanged, so identity is enough. */
+function sameSessionMap(
+  a: Record<string, CachedSessionSummary>,
+  b: Record<string, CachedSessionSummary>,
+): boolean {
+  const aKeys = Object.keys(a);
+  if (aKeys.length !== Object.keys(b).length) return false;
+  return aKeys.every((key) => a[key] === b[key]);
 }
 
 // Rebuild persisted summaries that recorded the first Codex model instead of
 // the latest one; they are now used to restore the model on resume.
-const CURRENT_VERSION = 15;
+const CURRENT_VERSION = 16;
 
 function needsPiTurnStatusMigration(index: SessionIndexState): boolean {
   return Object.values(index.sessions).some(
@@ -227,6 +261,16 @@ export class SessionIndexService implements ISessionIndexService {
   private inFlightTitleLoads: Map<string, Promise<string | null>> = new Map();
   private inFlightSummaryLoads: Map<string, Promise<SessionSummary | null>> =
     new Map();
+  /**
+   * Deduplicates cold index loads per scope. Without it, concurrent callers each
+   * built their own fresh index object and the last one won `indexCache`, so a
+   * full validation could fill an orphaned object while `doSaveIndex` persisted
+   * the empty one that replaced it.
+   */
+  private inFlightIndexLoads: Map<string, Promise<SessionIndexState>> =
+    new Map();
+  /** Scopes whose in-memory index failed to persist and must be saved again. */
+  private unsavedScopes: Set<string> = new Set();
   private cacheStats = {
     requests: 0,
     fastHits: 0,
@@ -369,25 +413,51 @@ export class SessionIndexService implements ISessionIndexService {
     projectId: UrlProjectId,
     reader?: ISessionReader,
   ): Promise<SessionIndexState> {
-    const scopeKey = this.getScopeKey(sessionDir, reader);
-    const indexPath = this.getIndexPath(sessionDir, reader);
-    const cacheKey = scopeKey;
+    const cacheKey = this.getScopeKey(sessionDir, reader);
 
     // Check memory cache first
     const cached = this.indexCache.get(cacheKey);
     if (cached) {
-      /*
-      logger.debug(
-        `[SessionIndexService] Memory cache hit for project (${Object.keys(cached.sessions).length} sessions)`,
-      );
-      */
       return cached;
     }
-    /*
-    logger.debug(
-      `[SessionIndexService] Memory cache miss, loading from disk: ${indexPath}`,
+
+    const inFlight = this.inFlightIndexLoads.get(cacheKey);
+    if (inFlight) {
+      return inFlight;
+    }
+
+    const promise = this.loadIndexFromDisk(sessionDir, projectId, reader).then(
+      (loaded) => {
+        // A concurrent clearCache() drops the in-flight entry; this load must
+        // then not resurrect the scope in memory.
+        if (this.inFlightIndexLoads.get(cacheKey) !== promise) {
+          return this.indexCache.get(cacheKey) ?? loaded;
+        }
+        const existing = this.indexCache.get(cacheKey);
+        if (existing) return existing;
+        this.indexCache.set(cacheKey, loaded);
+        this.evictIfNeeded();
+        return loaded;
+      },
     );
-    */
+    this.inFlightIndexLoads.set(cacheKey, promise);
+    try {
+      return await promise;
+    } finally {
+      if (this.inFlightIndexLoads.get(cacheKey) === promise) {
+        this.inFlightIndexLoads.delete(cacheKey);
+      }
+    }
+  }
+
+  /** Read and validate the persisted index; never touches `indexCache`. */
+  private async loadIndexFromDisk(
+    sessionDir: string,
+    projectId: UrlProjectId,
+    reader?: ISessionReader,
+  ): Promise<SessionIndexState> {
+    const scopeKey = this.getScopeKey(sessionDir, reader);
+    const indexPath = this.getIndexPath(sessionDir, reader);
 
     try {
       const content = await fs.readFile(indexPath, "utf-8");
@@ -399,20 +469,16 @@ export class SessionIndexService implements ISessionIndexService {
         parsed.projectId === projectId &&
         !needsPiTurnStatusMigration(parsed)
       ) {
-        this.indexCache.set(cacheKey, parsed);
-        this.evictIfNeeded();
         return parsed;
       }
 
       // Version mismatch or different project - start fresh
-      const fresh: SessionIndexState = {
+      return {
         version: CURRENT_VERSION,
         projectId,
         sessions: {},
+        complete: false,
       };
-      this.indexCache.set(cacheKey, fresh);
-      this.evictIfNeeded();
-      return fresh;
     } catch (error) {
       // File doesn't exist or is invalid - start fresh
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
@@ -421,14 +487,12 @@ export class SessionIndexService implements ISessionIndexService {
           `[SessionIndexService] Failed to load index for ${scopeKey}, starting fresh`,
         );
       }
-      const fresh: SessionIndexState = {
+      return {
         version: CURRENT_VERSION,
         projectId,
         sessions: {},
+        complete: false,
       };
-      this.indexCache.set(cacheKey, fresh);
-      this.evictIfNeeded();
-      return fresh;
     }
   }
 
@@ -551,6 +615,19 @@ export class SessionIndexService implements ISessionIndexService {
     const scopeKey = this.getScopeKey(sessionDir, reader);
     this.dirtyDirs.delete(scopeKey);
     this.dirtySessionsByDir.delete(scopeKey);
+  }
+
+  /** Clear only the dirty signals that existed when a full validation began. */
+  private clearCoveredDirtyState(
+    scopeKey: string,
+    dirDirtyAtStart: boolean,
+    dirtySessionsAtStart: Set<string>,
+  ): void {
+    if (dirDirtyAtStart) this.dirtyDirs.delete(scopeKey);
+    const current = this.dirtySessionsByDir.get(scopeKey);
+    if (!current) return;
+    for (const sessionId of dirtySessionsAtStart) current.delete(sessionId);
+    if (current.size === 0) this.dirtySessionsByDir.delete(scopeKey);
   }
 
   /** Refresh one already indexed Cursor session instead of every project scope. */
@@ -934,6 +1011,15 @@ export class SessionIndexService implements ISessionIndexService {
     return { indexChanged, statCalls, parseCalls };
   }
 
+  /**
+   * Enumerate the whole scope and rebuild its index.
+   *
+   * The new session map is built locally and committed in one step, so a
+   * concurrent reader of the same index object never observes a half-scanned
+   * directory. A failed save keeps the committed in-memory result (and retries
+   * on the next validation) instead of discarding it, and an enumeration error
+   * keeps serving the last complete index rather than an empty list.
+   */
   private async runFullValidation(
     sessionDir: string,
     projectId: UrlProjectId,
@@ -944,17 +1030,27 @@ export class SessionIndexService implements ISessionIndexService {
     statCalls: number;
     parseCalls: number;
   }> {
+    const scopeKey = this.getScopeKey(sessionDir, reader);
     const summaries: SessionSummary[] = [];
     const seenSessionIds = new Set<string>();
-    let indexChanged = false;
+    // Entries present before the scan; anything else that appears in
+    // `index.sessions` meanwhile was written by a concurrent lookup.
+    const preexistingIds = new Set(Object.keys(index.sessions));
+    const wasComplete = isIndexComplete(index);
+    // Watcher signals that arrive while the scan runs may postdate the stat of
+    // their file, so only the signals this scan already covers are cleared.
+    const dirDirtyAtStart = this.dirtyDirs.has(scopeKey);
+    const dirtySessionsAtStart = new Set(
+      this.dirtySessionsByDir.get(scopeKey) ?? [],
+    );
     let statCalls = 0;
     let parseCalls = 0;
 
+    let sessionFiles: SessionFileEntry[];
     try {
       // Enumerate session files — delegate to reader if it supports custom
       // enumeration (e.g., Gemini JSON where session ID is inside the file),
       // otherwise use default JSONL filename-based discovery.
-      let sessionFiles: SessionFileEntry[];
       if (reader.listSessionFiles) {
         sessionFiles = await reader.listSessionFiles(sessionDir);
       } else {
@@ -966,86 +1062,140 @@ export class SessionIndexService implements ISessionIndexService {
             filePath: path.join(sessionDir, f),
           }));
       }
-
-      const validationStats =
-        await this.statSessionFilesForValidation(sessionFiles);
-      const allStats = validationStats.allStats;
-      statCalls += validationStats.statCalls;
-
-      const cacheMisses: {
-        sessionId: string;
-        mtime: number;
-        size: number;
-      }[] = [];
-
-      for (let i = 0; i < sessionFiles.length; i++) {
-        const entry = sessionFiles[i];
-        if (!entry) continue;
-        const sessionId = entry.sessionId;
-        seenSessionIds.add(sessionId);
-
-        const stats = allStats[i];
-        if (!stats) continue;
-
-        const cached = index.sessions[sessionId];
-        const mtime = stats.mtimeMs;
-        const size = stats.size;
-
-        if (
-          cached &&
-          cached.fileMtime === mtime &&
-          cached.indexedBytes === size
-        ) {
-          if (cached.isEmpty || isRetiredProviderName(cached.provider))
-            continue;
-          summaries.push(this.cachedToSummary(sessionId, cached, projectId));
-        } else {
-          cacheMisses.push({ sessionId, mtime, size });
-        }
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+        return { summaries: [], statCalls, parseCalls };
       }
-
-      for (const { sessionId, mtime, size } of cacheMisses) {
-        parseCalls += 1;
-        const summary = await reader.getSessionSummary(sessionId, projectId);
-        if (summary) {
-          summaries.push(summary);
-          index.sessions[sessionId] = this.toCachedSummary(
-            summary,
-            mtime,
-            size,
-          );
-          indexChanged = true;
-        } else {
-          index.sessions[sessionId] = this.toEmptyCachedSummary(mtime, size);
-          indexChanged = true;
-        }
-      }
-
-      for (const sessionId of Object.keys(index.sessions)) {
-        if (!seenSessionIds.has(sessionId)) {
-          delete index.sessions[sessionId];
-          indexChanged = true;
-        }
-      }
-
-      if (indexChanged) {
-        await this.saveIndex(sessionDir, reader);
-      }
-
-      summaries.sort(
-        (a, b) =>
-          new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+      logger.warn(
+        { err: error },
+        `[SessionIndexService] Failed to enumerate sessions for ${scopeKey}`,
       );
-      this.lastFullValidationAt.set(
-        this.getScopeKey(sessionDir, reader),
-        Date.now(),
-      );
-      this.clearDirDirtyState(sessionDir, reader);
-
-      return { summaries, statCalls, parseCalls };
-    } catch {
-      return { summaries: [], statCalls, parseCalls };
+      return {
+        summaries: wasComplete
+          ? this.buildSummariesFromIndex(index, projectId)
+          : [],
+        statCalls,
+        parseCalls,
+      };
     }
+
+    const validationStats =
+      await this.statSessionFilesForValidation(sessionFiles);
+    const allStats = validationStats.allStats;
+    statCalls += validationStats.statCalls;
+
+    const nextSessions: Record<string, CachedSessionSummary> = {};
+    // Summaries parsed by this scan, returned as the reader produced them.
+    const parsedSummaries = new Map<
+      string,
+      { cached: CachedSessionSummary; summary: SessionSummary }
+    >();
+    const cacheMisses: {
+      sessionId: string;
+      mtime: number;
+      size: number;
+    }[] = [];
+
+    for (let i = 0; i < sessionFiles.length; i++) {
+      const entry = sessionFiles[i];
+      if (!entry) continue;
+      const sessionId = entry.sessionId;
+      seenSessionIds.add(sessionId);
+
+      const stats = allStats[i];
+      if (!stats) continue;
+
+      const cached = index.sessions[sessionId];
+      const mtime = stats.mtimeMs;
+      const size = stats.size;
+
+      if (
+        cached &&
+        cached.fileMtime === mtime &&
+        cached.indexedBytes === size
+      ) {
+        nextSessions[sessionId] = cached;
+      } else {
+        cacheMisses.push({ sessionId, mtime, size });
+      }
+    }
+
+    for (const { sessionId, mtime, size } of cacheMisses) {
+      parseCalls += 1;
+      let summary: SessionSummary | null;
+      try {
+        summary = await reader.getSessionSummary(sessionId, projectId);
+      } catch (error) {
+        // One unreadable session must not empty the whole list. Leave it out of
+        // the index so the next validation retries it.
+        logger.warn(
+          { err: error },
+          `[SessionIndexService] Failed to summarize session ${sessionId} in ${scopeKey}`,
+        );
+        continue;
+      }
+      if (summary) {
+        const cached = this.toCachedSummary(summary, mtime, size);
+        nextSessions[sessionId] = cached;
+        parsedSummaries.set(sessionId, { cached, summary });
+      } else {
+        nextSessions[sessionId] = this.toEmptyCachedSummary(mtime, size);
+      }
+    }
+
+    // Merge entries a concurrent single-session lookup or incremental update
+    // wrote while this scan ran: keep a newer observation of a scanned file,
+    // and keep sessions that appeared after enumeration.
+    for (const [sessionId, current] of Object.entries(index.sessions)) {
+      const scanned = nextSessions[sessionId];
+      if (scanned) {
+        if (current !== scanned && current.fileMtime > scanned.fileMtime) {
+          nextSessions[sessionId] = current;
+        }
+      } else if (
+        !seenSessionIds.has(sessionId) &&
+        !preexistingIds.has(sessionId)
+      ) {
+        nextSessions[sessionId] = current;
+      }
+    }
+
+    const indexChanged = !sameSessionMap(index.sessions, nextSessions);
+    index.sessions = nextSessions;
+    index.complete = true;
+    this.lastFullValidationAt.set(scopeKey, Date.now());
+    this.clearCoveredDirtyState(
+      scopeKey,
+      dirDirtyAtStart,
+      dirtySessionsAtStart,
+    );
+
+    if (indexChanged || !wasComplete || this.unsavedScopes.has(scopeKey)) {
+      try {
+        await this.saveIndex(sessionDir, reader);
+        this.unsavedScopes.delete(scopeKey);
+      } catch {
+        // doSaveIndex already logged. The in-memory index is correct; persist
+        // it on the next validation instead of failing this request.
+        this.unsavedScopes.add(scopeKey);
+      }
+    }
+
+    for (const [sessionId, cached] of Object.entries(nextSessions)) {
+      if (cached.isEmpty || isRetiredProviderName(cached.provider)) continue;
+      const parsed = parsedSummaries.get(sessionId);
+      summaries.push(
+        parsed?.cached === cached
+          ? parsed.summary
+          : this.cachedToSummary(sessionId, cached, projectId),
+      );
+    }
+    summaries.sort(
+      (a, b) =>
+        new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime(),
+    );
+
+    return { summaries, statCalls, parseCalls };
   }
 
   private async statSessionFilesForValidation(
@@ -1296,7 +1446,10 @@ export class SessionIndexService implements ISessionIndexService {
     const scopeKey = this.getScopeKey(sessionDir, reader);
     const index = await this.loadIndex(sessionDir, projectId, reader);
 
-    if (Object.keys(index.sessions).length === 0) {
+    // Never serve a scope that was not fully enumerated: a cold index may hold
+    // only entries written by single-session lookups. Join (or start) the
+    // deduplicated full load instead.
+    if (!isIndexComplete(index)) {
       return this.getSessionsWithCache(sessionDir, projectId, reader);
     }
 
@@ -1361,6 +1514,7 @@ export class SessionIndexService implements ISessionIndexService {
     const hasDirtySessions = Boolean(dirtySessions && dirtySessions.size > 0);
 
     const fullValidationDue =
+      !isIndexComplete(index) ||
       this.fullValidationIntervalMs <= 0 ||
       lastFullValidation === 0 ||
       now - lastFullValidation >= this.fullValidationIntervalMs;
@@ -1446,6 +1600,8 @@ export class SessionIndexService implements ISessionIndexService {
    */
   clearCache(sessionDir: string): void {
     this.indexCache.delete(sessionDir);
+    this.inFlightIndexLoads.delete(sessionDir);
+    this.unsavedScopes.delete(sessionDir);
     this.clearDirDirtyState(sessionDir);
     this.lastFullValidationAt.delete(sessionDir);
   }
