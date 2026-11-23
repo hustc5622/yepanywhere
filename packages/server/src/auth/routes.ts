@@ -3,9 +3,12 @@
  */
 
 import * as crypto from "node:crypto";
+import type { Context } from "hono";
 import { Hono } from "hono";
 import { deleteCookie, getCookie, setCookie } from "hono/cookie";
 import type { AuthService } from "./AuthService.js";
+import { PairingService } from "./PairingService.js";
+import { AuthRateLimiter, type RateLimitLockout } from "./RateLimiter.js";
 
 export const SESSION_COOKIE_NAME = "yep-anywhere-session";
 
@@ -15,6 +18,14 @@ export interface AuthRoutesDeps {
   authDisabled?: boolean;
   /** Desktop auth token (for protecting localhost-access endpoint). */
   desktopAuthToken?: string;
+  /** Optional reverse-proxy prefix (e.g. "/yep") for scoping cookie path. */
+  basePath?: string;
+  /** Whether to trust X-Forwarded-Proto / X-Real-IP headers from a reverse proxy. */
+  trustProxy?: boolean;
+  /** Optional shared rate limiter instance (default created per router). */
+  rateLimiter?: AuthRateLimiter;
+  /** Optional shared one-time pairing service (default created per router). */
+  pairingService?: PairingService;
 }
 
 interface SetupBody {
@@ -23,61 +34,178 @@ interface SetupBody {
 
 interface LoginBody {
   password: string;
+  deviceLabel?: string;
 }
 
 interface ChangePasswordBody {
   newPassword: string;
 }
 
-function shouldUseSecureCookie(c: {
-  req: { url: string; header: (name: string) => string | undefined };
-}): boolean {
-  // Honor reverse-proxy protocol hints when present.
+interface PairingCreateBody {
+  label?: string;
+}
+
+interface PairingRedeemBody {
+  token: string;
+  deviceLabel?: string;
+}
+
+interface LogoutAllBody {
+  includeCurrent?: boolean;
+}
+
+export function getSessionCookiePath(basePath?: string): string {
+  const normalized = (basePath ?? "").trim().replace(/\/+$/, "");
+  if (!normalized || normalized === "/") return "/";
+  return normalized.startsWith("/") ? normalized : `/${normalized}`;
+}
+
+export function shouldUseSecureCookie(
+  c: {
+    req: { url: string; header: (name: string) => string | undefined };
+  },
+  trustProxy = false,
+): boolean {
+  // Actual HTTPS transport always requires Secure cookies (never allow a
+  // header to downgrade a direct TLS connection unless explicitly trusted).
+  try {
+    if (new URL(c.req.url).protocol === "https:") {
+      return true;
+    }
+  } catch {
+    // Ignore malformed URLs
+  }
+
+  // Upgrade to Secure when reverse proxy reports HTTPS (Caddy / Nginx / CF).
   const forwardedProto = c.req.header("x-forwarded-proto");
   if (forwardedProto) {
     const protocol = forwardedProto.split(",")[0]?.trim().toLowerCase();
     if (protocol === "https") {
       return true;
     }
-    if (protocol === "http") {
+    if (trustProxy && protocol === "http") {
       return false;
     }
   }
 
-  try {
-    return new URL(c.req.url).protocol === "https:";
-  } catch {
-    return false;
+  return false;
+}
+
+export function setSessionCookie(
+  c: Context,
+  sessionId: string,
+  options: {
+    basePath?: string;
+    trustProxy?: boolean;
+    maxAgeSec: number;
+  },
+): void {
+  setCookie(c, SESSION_COOKIE_NAME, sessionId, {
+    httpOnly: true,
+    secure: shouldUseSecureCookie(c, options.trustProxy),
+    sameSite: "Lax",
+    path: getSessionCookiePath(options.basePath),
+    maxAge: options.maxAgeSec,
+  });
+}
+
+function clearSessionCookies(c: Context, basePath?: string): void {
+  const scopedPath = getSessionCookiePath(basePath);
+  deleteCookie(c, SESSION_COOKIE_NAME, { path: scopedPath });
+  // Also clear legacy root-scoped cookie if the app is mounted under a basePath
+  if (scopedPath !== "/") {
+    deleteCookie(c, SESSION_COOKIE_NAME, { path: "/" });
   }
+}
+
+export function getClientRateLimitKey(c: Context, trustProxy = false): string {
+  if (trustProxy) {
+    const realIp = c.req.header("x-real-ip")?.trim();
+    if (realIp) return realIp;
+    const forwardedFor = c.req.header("x-forwarded-for");
+    if (forwardedFor) {
+      const first = forwardedFor.split(",")[0]?.trim();
+      if (first) return first;
+    }
+  }
+
+  const incoming = (
+    c.env as { incoming?: { socket?: { remoteAddress?: string } } } | undefined
+  )?.incoming;
+  return incoming?.socket?.remoteAddress ?? "direct";
 }
 
 export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
   const app = new Hono();
-  const { authService, authDisabled = false, desktopAuthToken } = deps;
+  const {
+    authService,
+    authDisabled = false,
+    desktopAuthToken,
+    basePath,
+    trustProxy = false,
+  } = deps;
+  const rateLimiter = deps.rateLimiter ?? new AuthRateLimiter();
+  const pairingService = deps.pairingService ?? new PairingService();
+
+  const requireSession = async (c: Context): Promise<string | null> => {
+    const sessionId = getCookie(c, SESSION_COOKIE_NAME);
+    if (!sessionId) return null;
+    const valid = await authService.validateSession(sessionId);
+    return valid ? sessionId : null;
+  };
+
+  /**
+   * Pick up credential changes written by another process (`--setup-auth`).
+   * A lockout earned against the previous password must not outlive it, so
+   * a changed credential also clears every rate-limit bucket.
+   */
+  const syncCredentialFromDisk = async (): Promise<void> => {
+    try {
+      const result = await authService.refreshAccountFromDisk();
+      if (result.credentialChanged) {
+        rateLimiter.reset();
+        pairingService.clearAll();
+      }
+    } catch {
+      // Keep serving with the in-memory account; refresh logs its own errors.
+    }
+  };
+
+  const rateLimitedResponse = (c: Context, lockout: RateLimitLockout) => {
+    c.header("Retry-After", String(lockout.retryAfterSec));
+    return c.json(
+      {
+        error: `Too many failed attempts. Try again in ${lockout.retryAfterSec}s.`,
+        retryAfterSec: lockout.retryAfterSec,
+        lockoutSec: lockout.lockoutSec,
+        tier: lockout.tier,
+      },
+      429,
+    );
+  };
 
   /**
    * GET /api/auth/status
-   * Check authentication status
+   * Check authentication status.
    *
-   * Returns:
-   * - enabled: whether auth is enabled (from settings)
-   * - authenticated: whether user has valid session
-   * - setupRequired: whether initial setup is needed (enabled but no account)
-   * - disabledByEnv: whether auth is disabled by --auth-disable flag
-   * - authFilePath: path to auth.json (for recovery instructions)
+   * Security: never leak local filesystem `authFilePath` to unauthenticated
+   * callers when auth is enabled.
    */
   app.get("/status", async (c) => {
     const isEnabled = authService.isEnabled();
-    const base = {
+    const isSecureTransport = shouldUseSecureCookie(c, trustProxy);
+    const commonBase = {
       hasDesktopToken: !!desktopAuthToken,
       localhostOpen: authService.isLocalhostOpen(),
-      authFilePath: authService.getFilePath(),
+      pairingSupported: true,
+      isSecureTransport,
     };
 
     // If auth is disabled by env var, it overrides settings
     if (authDisabled) {
       return c.json({
-        ...base,
+        ...commonBase,
+        authFilePath: authService.getFilePath(),
         enabled: isEnabled,
         authenticated: true, // Bypass auth
         setupRequired: false,
@@ -88,7 +216,8 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
     // If auth is not enabled in settings, no auth required
     if (!isEnabled) {
       return c.json({
-        ...base,
+        ...commonBase,
+        authFilePath: authService.getFilePath(),
         enabled: false,
         authenticated: true, // No auth needed
         setupRequired: false,
@@ -101,10 +230,8 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
     const hasAccount = authService.hasAccount();
 
     if (!hasAccount) {
-      // This shouldn't happen normally since enableAuth creates account,
-      // but handle edge case
       return c.json({
-        ...base,
+        ...commonBase,
         enabled: true,
         authenticated: false,
         setupRequired: true,
@@ -114,7 +241,7 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
 
     if (!sessionId) {
       return c.json({
-        ...base,
+        ...commonBase,
         enabled: true,
         authenticated: false,
         setupRequired: false,
@@ -122,11 +249,26 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
       });
     }
 
-    const valid = await authService.validateSession(sessionId);
+    const validation = await authService.validateSessionWithRefresh(sessionId, {
+      ip: getClientRateLimitKey(c, trustProxy),
+    });
+    if (
+      validation.valid &&
+      validation.shouldRefreshCookie &&
+      validation.cookieMaxAgeSec
+    ) {
+      setSessionCookie(c, sessionId, {
+        basePath,
+        trustProxy,
+        maxAgeSec: validation.cookieMaxAgeSec,
+      });
+    }
+
     return c.json({
-      ...base,
+      ...commonBase,
+      ...(validation.valid ? { authFilePath: authService.getFilePath() } : {}),
       enabled: true,
-      authenticated: valid,
+      authenticated: validation.valid,
       setupRequired: false,
       disabledByEnv: false,
     });
@@ -135,13 +277,6 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
   /**
    * POST /api/auth/enable
    * Enable auth with a password.
-   * - Allowed only when auth is currently disabled.
-   * - Treated as "add protection now" instead of account-ownership recovery.
-   *
-   * Security model note:
-   * This server defaults to localhost with auth off. In that baseline model,
-   * enabling auth is opportunistic hardening. If auth is enabled unexpectedly,
-   * the operator can still recover with --auth-disable or --setup-auth.
    */
   app.post("/enable", async (c) => {
     const body = await c.req.json<SetupBody>();
@@ -165,6 +300,7 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
     if (!success) {
       return c.json({ error: "Failed to enable auth" }, 500);
     }
+    rateLimiter.reset();
 
     // Don't auto-login - require user to log in with their new password
     return c.json({ success: true });
@@ -173,21 +309,16 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
   /**
    * POST /api/auth/disable
    * Disable auth (requires authenticated session).
-   * Also clears the stored account so future enable is a fresh setup.
    */
   app.post("/disable", async (c) => {
-    // Require authenticated session to disable
-    const sessionId = getCookie(c, SESSION_COOKIE_NAME);
-    if (!sessionId || !(await authService.validateSession(sessionId))) {
+    const sessionId = await requireSession(c);
+    if (!sessionId) {
       return c.json({ error: "Not authenticated" }, 401);
     }
 
     await authService.disableAuth();
-
-    // Clear the session cookie
-    deleteCookie(c, SESSION_COOKIE_NAME, {
-      path: "/",
-    });
+    pairingService.clearAll();
+    clearSessionCookies(c, basePath);
 
     return c.json({ success: true });
   });
@@ -212,22 +343,21 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
       return c.json({ error: "Password must be at least 6 characters" }, 400);
     }
 
-    // Use enableAuth to also set the enabled flag
     const success = await authService.enableAuth(body.password);
     if (!success) {
       return c.json({ error: "Failed to create account" }, 500);
     }
 
-    // Auto-login after setup
     const userAgent = c.req.header("User-Agent");
-    const sessionId = await authService.createSession(userAgent);
+    const sessionId = await authService.createSession(userAgent, {
+      authMethod: "password",
+      ip: getClientRateLimitKey(c, trustProxy),
+    });
 
-    setCookie(c, SESSION_COOKIE_NAME, sessionId, {
-      httpOnly: true,
-      secure: shouldUseSecureCookie(c),
-      sameSite: "Lax",
-      path: "/",
-      maxAge: 30 * 24 * 60 * 60, // 30 days
+    setSessionCookie(c, sessionId, {
+      basePath,
+      trustProxy,
+      maxAgeSec: authService.getSessionCookieMaxAgeSec(),
     });
 
     return c.json({ success: true });
@@ -235,15 +365,22 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
 
   /**
    * POST /api/auth/login
-   * Login with password
+   * Login with password (protected by AuthRateLimiter).
    */
   app.post("/login", async (c) => {
+    await syncCredentialFromDisk();
     if (!authService.hasAccount()) {
       c.header("X-Setup-Required", "true");
       return c.json(
         { error: "No account configured", setupRequired: true },
         401,
       );
+    }
+
+    const clientKey = getClientRateLimitKey(c, trustProxy);
+    const limitCheck = rateLimiter.check(clientKey);
+    if (!limitCheck.allowed) {
+      return rateLimitedResponse(c, limitCheck);
     }
 
     const body = await c.req.json<LoginBody>();
@@ -254,18 +391,34 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
 
     const valid = await authService.verifyPassword(body.password);
     if (!valid) {
-      return c.json({ error: "Invalid password" }, 401);
+      const afterFail = rateLimiter.recordFailure(clientKey);
+      if (!afterFail.allowed) {
+        return rateLimitedResponse(c, afterFail);
+      }
+      const status = rateLimiter.describe(clientKey);
+      return c.json(
+        {
+          error: "Invalid password",
+          attemptsRemaining: status.attemptsRemaining,
+          nextLockoutSec: status.nextLockoutSec,
+          nextTier: status.nextTier,
+        },
+        401,
+      );
     }
 
+    rateLimiter.recordSuccess(clientKey);
     const userAgent = c.req.header("User-Agent");
-    const sessionId = await authService.createSession(userAgent);
+    const sessionId = await authService.createSession(userAgent, {
+      authMethod: "password",
+      deviceLabel: body.deviceLabel,
+      ip: clientKey,
+    });
 
-    setCookie(c, SESSION_COOKIE_NAME, sessionId, {
-      httpOnly: true,
-      secure: shouldUseSecureCookie(c),
-      sameSite: "Lax",
-      path: "/",
-      maxAge: 30 * 24 * 60 * 60, // 30 days
+    setSessionCookie(c, sessionId, {
+      basePath,
+      trustProxy,
+      maxAgeSec: authService.getSessionCookieMaxAgeSec(),
     });
 
     return c.json({ success: true });
@@ -273,7 +426,7 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
 
   /**
    * POST /api/auth/logout
-   * Logout (invalidate session)
+   * Logout current session.
    */
   app.post("/logout", async (c) => {
     const sessionId = getCookie(c, SESSION_COOKIE_NAME);
@@ -282,21 +435,19 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
       await authService.invalidateSession(sessionId);
     }
 
-    deleteCookie(c, SESSION_COOKIE_NAME, {
-      path: "/",
-    });
+    clearSessionCookies(c, basePath);
 
     return c.json({ success: true });
   });
 
   /**
    * POST /api/auth/change-password
-   * Change password (requires authenticated session)
+   * Change password (requires authenticated session).
+   * Revokes all other sessions and pending pairing tokens.
    */
   app.post("/change-password", async (c) => {
-    // Require authenticated session
-    const sessionId = getCookie(c, SESSION_COOKIE_NAME);
-    if (!sessionId || !(await authService.validateSession(sessionId))) {
+    const sessionId = await requireSession(c);
+    if (!sessionId) {
       return c.json({ error: "Not authenticated" }, 401);
     }
 
@@ -313,10 +464,167 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
       );
     }
 
-    const success = await authService.changePassword(body.newPassword);
+    const success = await authService.changePassword(
+      body.newPassword,
+      sessionId,
+    );
     if (!success) {
       return c.json({ error: "Failed to change password" }, 500);
     }
+
+    pairingService.clearAll();
+    rateLimiter.reset();
+    return c.json({ success: true });
+  });
+
+  /**
+   * GET /api/auth/sessions
+   * List active authenticated device sessions.
+   */
+  app.get("/sessions", async (c) => {
+    const sessionId = await requireSession(c);
+    if (!sessionId) {
+      return c.json({ error: "Not authenticated" }, 401);
+    }
+
+    const sessions = await authService.listSessions(sessionId);
+    return c.json({ sessions });
+  });
+
+  /**
+   * DELETE /api/auth/sessions/:id
+   * Revoke a specific device session by its safe public ID.
+   */
+  app.delete("/sessions/:id", async (c) => {
+    const sessionId = await requireSession(c);
+    if (!sessionId) {
+      return c.json({ error: "Not authenticated" }, 401);
+    }
+
+    const publicId = c.req.param("id");
+    const removed = await authService.revokeSessionByPublicId(publicId);
+    if (!removed) {
+      return c.json({ error: "Session not found" }, 404);
+    }
+
+    return c.json({ success: true });
+  });
+
+  /**
+   * POST /api/auth/logout-all
+   * Sign out all other devices (or every device when includeCurrent=true).
+   */
+  app.post("/logout-all", async (c) => {
+    const sessionId = await requireSession(c);
+    if (!sessionId) {
+      return c.json({ error: "Not authenticated" }, 401);
+    }
+
+    const body = await c.req
+      .json<LogoutAllBody>()
+      .catch((): LogoutAllBody => ({}));
+    pairingService.clearAll();
+
+    if (body.includeCurrent) {
+      await authService.invalidateAllSessions();
+      clearSessionCookies(c, basePath);
+      return c.json({ success: true, signedOutCurrent: true });
+    }
+
+    const revokedCount = await authService.invalidateOtherSessions(sessionId);
+    return c.json({
+      success: true,
+      signedOutCurrent: false,
+      revokedCount,
+    });
+  });
+
+  /**
+   * POST /api/auth/pairing/create
+   * Mint a short-lived, single-use pairing token (QR / `#pair=` link) for
+   * authorizing a phone browser or Android shell without typing a password.
+   */
+  app.post("/pairing/create", async (c) => {
+    if (!authService.isEnabled() || !authService.hasAccount()) {
+      return c.json({ error: "Authentication is not enabled" }, 400);
+    }
+
+    const sessionId = await requireSession(c);
+    if (!sessionId) {
+      return c.json({ error: "Not authenticated" }, 401);
+    }
+
+    const body = await c.req
+      .json<PairingCreateBody>()
+      .catch((): PairingCreateBody => ({}));
+    const created = pairingService.createToken({
+      createdBySessionId: sessionId,
+      label: body.label,
+    });
+
+    const loginBase = `${getSessionCookiePath(basePath).replace(/\/$/, "")}/login`;
+    return c.json({
+      token: created.token,
+      expiresAt: created.expiresAt,
+      ttlSeconds: created.ttlSeconds,
+      loginPath: `${loginBase}#pair=${created.token}`,
+    });
+  });
+
+  /**
+   * POST /api/auth/pairing/redeem
+   * Redeem a single-use pairing token and issue a sliding HttpOnly session cookie.
+   */
+  app.post("/pairing/redeem", async (c) => {
+    if (!authService.isEnabled() || !authService.hasAccount()) {
+      return c.json({ error: "Authentication is not enabled" }, 400);
+    }
+
+    const clientKey = getClientRateLimitKey(c, trustProxy);
+    const limitCheck = rateLimiter.check(clientKey);
+    if (!limitCheck.allowed) {
+      return rateLimitedResponse(c, limitCheck);
+    }
+
+    const body = await c.req
+      .json<PairingRedeemBody>()
+      .catch((): PairingRedeemBody => ({ token: "" }));
+
+    if (!body.token || typeof body.token !== "string") {
+      return c.json({ error: "Pairing token is required" }, 400);
+    }
+
+    const result = pairingService.redeemToken(body.token);
+    if (!result.ok) {
+      const afterFail = rateLimiter.recordFailure(clientKey);
+      if (!afterFail.allowed) {
+        return rateLimitedResponse(c, afterFail);
+      }
+      return c.json(
+        {
+          error:
+            result.reason === "expired"
+              ? "Pairing link has expired"
+              : "Invalid or already used pairing link",
+          reason: result.reason,
+        },
+        401,
+      );
+    }
+
+    rateLimiter.recordSuccess(clientKey);
+    const userAgent = c.req.header("User-Agent");
+    const sessionId = await authService.createSession(userAgent, {
+      authMethod: "pairing",
+      deviceLabel: body.deviceLabel ?? result.label,
+      ip: clientKey,
+    });
+
+    setSessionCookie(c, sessionId, {
+      basePath,
+      trustProxy,
+      maxAgeSec: authService.getSessionCookieMaxAgeSec(),
+    });
 
     return c.json({ success: true });
   });
@@ -324,10 +632,8 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
   /**
    * POST /api/auth/localhost-access
    * Toggle unauthenticated localhost access (bypasses desktop token floor).
-   * Requires valid desktop token or authenticated session.
    */
   app.post("/localhost-access", async (c) => {
-    // Verify caller has desktop token or valid session
     let authorized = false;
 
     if (desktopAuthToken) {
@@ -345,8 +651,8 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
     }
 
     if (!authorized) {
-      const sessionId = getCookie(c, SESSION_COOKIE_NAME);
-      if (sessionId && (await authService.validateSession(sessionId))) {
+      const sessionId = await requireSession(c);
+      if (sessionId) {
         authorized = true;
       }
     }

@@ -134,8 +134,11 @@ export function isAllowedHost(host: string | undefined): boolean {
  */
 export function isAllowedOrigin(origin: string | undefined): boolean {
   // No origin = same-origin request or non-browser client (allowed).
-  // "null" = about:blank, file://, sandboxed iframe, etc. (allowed).
-  if (!origin || origin === "null") return true;
+  if (!origin) return true;
+  // Never allow the opaque "null" origin (sandboxed iframes / data: URLs):
+  // combined with Access-Control-Allow-Credentials: true, it allows cross-site
+  // credentialed reads from untrusted pages.
+  if (origin === "null") return false;
   if (allowAllHosts()) return true;
 
   try {

@@ -38,6 +38,8 @@ interface AuthContextValue {
   localhostOpen: boolean;
   /** Login with password */
   login: (password: string) => Promise<void>;
+  /** Login by redeeming a one-time pairing token */
+  redeemPairing: (token: string, deviceLabel?: string) => Promise<void>;
   /** Logout current session */
   logout: () => Promise<void>;
   /** Enable auth with a password (from settings) */
@@ -77,7 +79,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
       const status = await api.getAuthStatus();
       setAuthEnabled(status.enabled);
       setAuthDisabledByEnv(status.disabledByEnv);
-      setAuthFilePath(status.authFilePath);
+      setAuthFilePath(status.authFilePath ?? "");
       setIsAuthenticated(status.authenticated);
       setIsSetupMode(status.setupRequired);
       setHasDesktopToken(status.hasDesktopToken ?? false);
@@ -122,7 +124,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
       !authDisabledByEnv &&
       location.pathname !== "/login"
     ) {
-      navigate("/login", { state: { from: location.pathname } });
+      const from = `${location.pathname}${location.search}${location.hash}`;
+      navigate("/login", { state: { from } });
     }
   }, [
     isLoading,
@@ -130,6 +133,8 @@ export function AuthProvider({ children }: AuthProviderProps) {
     authEnabled,
     authDisabledByEnv,
     location.pathname,
+    location.search,
+    location.hash,
     navigate,
   ]);
 
@@ -140,6 +145,16 @@ export function AuthProvider({ children }: AuthProviderProps) {
     // Clear the global login required flag so connections can resume
     authEvents.clearLoginRequired();
   }, []);
+
+  const redeemPairing = useCallback(
+    async (token: string, deviceLabel?: string) => {
+      await api.redeemPairingToken(token, deviceLabel);
+      setIsAuthenticated(true);
+      setIsSetupMode(false);
+      authEvents.clearLoginRequired();
+    },
+    [],
+  );
 
   const logout = useCallback(async () => {
     await api.logout();
@@ -191,6 +206,7 @@ export function AuthProvider({ children }: AuthProviderProps) {
         hasDesktopToken,
         localhostOpen,
         login,
+        redeemPairing,
         logout,
         enableAuth,
         disableAuth,

@@ -161,8 +161,12 @@ export interface Config {
   authDisabled: boolean;
   /** Cookie signing secret. Auto-generated if not provided. */
   authCookieSecret?: string;
-  /** Session TTL in milliseconds. Default: 30 days */
+  /** Session TTL in milliseconds (sliding window). Default: 30 days */
   authSessionTtlMs: number;
+  /** Maximum absolute session lifetime in milliseconds. Default: 90 days */
+  authSessionMaxTtlMs: number;
+  /** Whether to trust reverse-proxy forwarding headers (X-Forwarded-Proto, X-Real-IP). */
+  trustProxy: boolean;
   /** Whether port was explicitly set via CLI (prevents runtime changes) */
   cliPortOverride: boolean;
   /** Whether host was explicitly set via CLI (prevents runtime changes) */
@@ -171,6 +175,14 @@ export interface Config {
   openBrowser: boolean;
   /** Enable HTTPS with an auto-generated self-signed certificate. */
   httpsSelfSigned: boolean;
+  /** Optional dedicated HTTPS listener port (runs alongside the main HTTP port). 0 = disabled. */
+  tlsPort: number;
+  /** Interface for the dedicated HTTPS listener (default: 127.0.0.1). */
+  tlsHost: string;
+  /** Path to PEM certificate chain for the dedicated HTTPS listener (TLS_CERT_PATH). */
+  tlsCertPath?: string;
+  /** Path to PEM private key for the dedicated HTTPS listener (TLS_KEY_PATH). */
+  tlsKeyPath?: string;
   /** Desktop auth token for Tauri app. Requests with matching X-Desktop-Token header bypass auth. */
   desktopAuthToken?: string;
   /**
@@ -451,6 +463,13 @@ export function loadConfig(): Config {
       60 *
       60 *
       1000,
+    authSessionMaxTtlMs:
+      parseIntOrDefault(process.env.AUTH_SESSION_MAX_TTL_DAYS, 90) *
+      24 *
+      60 *
+      60 *
+      1000,
+    trustProxy: process.env.TRUST_PROXY === "true",
     // CLI override flags (set by cli.ts when --port or --host are used)
     // Also treat PORT env var as an override when explicitly set (e.g., PORT=0 for test harnesses)
     cliPortOverride:
@@ -459,6 +478,10 @@ export function loadConfig(): Config {
     cliHostOverride: process.env.CLI_HOST_OVERRIDE === "true",
     openBrowser: process.env.OPEN_BROWSER === "true",
     httpsSelfSigned: process.env.HTTPS_SELF_SIGNED === "true",
+    tlsPort: Math.max(0, parseIntOrDefault(process.env.TLS_PORT, 0)),
+    tlsHost: process.env.TLS_HOST?.trim() || "127.0.0.1",
+    tlsCertPath: process.env.TLS_CERT_PATH?.trim() || undefined,
+    tlsKeyPath: process.env.TLS_KEY_PATH?.trim() || undefined,
     desktopAuthToken:
       process.env.YEP_DESKTOP_AUTH_TOKEN ??
       process.env.DESKTOP_AUTH_TOKEN ??

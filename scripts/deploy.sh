@@ -697,15 +697,21 @@ check_agy_proxy_preflight() {
       mark_server_launchagent_sync_needed "agy proxy"
       dim "agy proxy config: LaunchAgent $server_label will be updated (YEP_AGY_PROXY removed)"
     fi
-    return 0
   fi
-  for key in YEP_AGY_PROXY NO_PROXY; do
-    [[ -n "${!key:-}" ]] || continue
-    current="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$key" "$plist" 2>/dev/null || true)"
-    if [[ "$current" != "${!key}" ]]; then
-      mark_server_launchagent_sync_needed "agy proxy"
-      dim "agy proxy config: LaunchAgent $server_label will be updated ($key changed)"
-      return 0
+  for key in YEP_AGY_PROXY NO_PROXY TLS_PORT TLS_HOST TLS_CERT_PATH TLS_KEY_PATH TRUST_PROXY; do
+    if [[ -n "${!key:-}" ]]; then
+      current="$(/usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$key" "$plist" 2>/dev/null || true)"
+      if [[ "$current" != "${!key}" ]]; then
+        mark_server_launchagent_sync_needed "server env"
+        dim "server env config: LaunchAgent $server_label will be updated ($key changed)"
+        return 0
+      fi
+    elif [[ "$key" == TLS_* || "$key" == "TRUST_PROXY" ]]; then
+      if /usr/libexec/PlistBuddy -c "Print :EnvironmentVariables:$key" "$plist" >/dev/null 2>&1; then
+        mark_server_launchagent_sync_needed "server env"
+        dim "server env config: LaunchAgent $server_label will be updated ($key removed)"
+        return 0
+      fi
     fi
   done
 }

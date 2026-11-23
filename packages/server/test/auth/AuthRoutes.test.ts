@@ -158,3 +158,266 @@ describe("Auth routes - cookie secure flag", () => {
     expect(cookie).toContain("Secure");
   });
 });
+
+describe("Auth routes - hardening, sliding sessions, device management & pairing", () => {
+  let authService: AuthService;
+  let testDir: string;
+  let now: number;
+
+  beforeEach(async () => {
+    now = 1_700_000_000_000;
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-hardening-test-"));
+    authService = new AuthService({
+      dataDir: testDir,
+      cookieSecret: "test-cookie-secret",
+      sessionTtlMs: 30 * 24 * 60 * 60 * 1000,
+      maxSessionTtlMs: 90 * 24 * 60 * 60 * 1000,
+      now: () => now,
+    });
+    await authService.initialize();
+    await authService.enableAuth("strong-password-123");
+  });
+
+  afterEach(async () => {
+    await fs.rm(testDir, { recursive: true, force: true });
+  });
+
+  it("omits authFilePath from /status when unauthenticated and reveals it when authenticated", async () => {
+    const routes = createAuthRoutes({ authService, basePath: "/yep" });
+
+    const unauthRes = await routes.request("https://39.106.189.88/status");
+    expect(unauthRes.status).toBe(200);
+    const unauthBody = (await unauthRes.json()) as Record<string, unknown>;
+    expect(unauthBody.authenticated).toBe(false);
+    expect(unauthBody.authFilePath).toBeUndefined();
+    expect(unauthBody.pairingSupported).toBe(true);
+    expect(unauthBody.isSecureTransport).toBe(true);
+
+    const loginRes = await routes.request("https://39.106.189.88/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "strong-password-123" }),
+    });
+    expect(loginRes.status).toBe(200);
+    const setCookie = loginRes.headers.get("set-cookie") ?? "";
+    expect(setCookie).toContain("Path=/yep");
+    expect(setCookie).toContain("Secure");
+
+    const authRes = await routes.request("https://39.106.189.88/status", {
+      headers: { Cookie: setCookie.split(";")[0] ?? "" },
+    });
+    const authBody = (await authRes.json()) as Record<string, unknown>;
+    expect(authBody.authenticated).toBe(true);
+    expect(authBody.authFilePath).toBe(authService.getFilePath());
+  });
+
+  it("rate-limits repeated failed password attempts with 429 and Retry-After", async () => {
+    const routes = createAuthRoutes({ authService });
+
+    for (let i = 0; i < 4; i++) {
+      const res = await routes.request("/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password: "wrong-password" }),
+      });
+      expect(res.status).toBe(401);
+    }
+
+    const fifth = await routes.request("/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "wrong-password" }),
+    });
+    expect(fifth.status).toBe(429);
+    expect(Number(fifth.headers.get("retry-after"))).toBeGreaterThan(0);
+
+    // Even a valid password is blocked during lockout
+    const duringLockout = await routes.request("/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "strong-password-123" }),
+    });
+    expect(duringLockout.status).toBe(429);
+  });
+
+  it("supports one-time pairing token creation, redemption, and device session management", async () => {
+    const routes = createAuthRoutes({ authService, basePath: "/yep" });
+
+    // Login as primary device
+    const loginRes = await routes.request("https://39.106.189.88/login", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "User-Agent": "Macintosh Safari",
+      },
+      body: JSON.stringify({ password: "strong-password-123" }),
+    });
+    const primaryCookie = (loginRes.headers.get("set-cookie") ?? "").split(
+      ";",
+    )[0];
+
+    // Create pairing token
+    const createRes = await routes.request(
+      "https://39.106.189.88/pairing/create",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: primaryCookie ?? "",
+        },
+        body: JSON.stringify({ label: "Android Phone" }),
+      },
+    );
+    expect(createRes.status).toBe(200);
+    const created = (await createRes.json()) as {
+      token: string;
+      loginPath: string;
+    };
+    expect(created.loginPath).toBe(`/yep/login#pair=${created.token}`);
+
+    // Redeem pairing token on phone
+    const redeemRes = await routes.request(
+      "https://39.106.189.88/pairing/redeem",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "User-Agent": "Android Mobile Chrome",
+        },
+        body: JSON.stringify({ token: created.token }),
+      },
+    );
+    expect(redeemRes.status).toBe(200);
+    const phoneCookie = (redeemRes.headers.get("set-cookie") ?? "").split(
+      ";",
+    )[0];
+    expect(phoneCookie).toContain(`${SESSION_COOKIE_NAME}=`);
+
+    // Second redemption of same token fails
+    const replayRes = await routes.request(
+      "https://39.106.189.88/pairing/redeem",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ token: created.token }),
+      },
+    );
+    expect(replayRes.status).toBe(401);
+
+    // List sessions shows both devices without leaking raw session IDs
+    const listRes = await routes.request("https://39.106.189.88/sessions", {
+      headers: { Cookie: primaryCookie ?? "" },
+    });
+    expect(listRes.status).toBe(200);
+    const { sessions } = (await listRes.json()) as {
+      sessions: Array<{
+        id: string;
+        isCurrent: boolean;
+        authMethod: string;
+        deviceLabel?: string;
+      }>;
+    };
+    expect(sessions).toHaveLength(2);
+    expect(sessions[0]?.isCurrent).toBe(true);
+    const phoneSession = sessions.find((s) => !s.isCurrent);
+    expect(phoneSession?.authMethod).toBe("pairing");
+    expect(phoneSession?.deviceLabel).toBe("Android Phone");
+    expect(phoneCookie).not.toContain(phoneSession?.id ?? "");
+
+    // Revoke phone session
+    const revokeRes = await routes.request(
+      `https://39.106.189.88/sessions/${phoneSession?.id}`,
+      {
+        method: "DELETE",
+        headers: { Cookie: primaryCookie ?? "" },
+      },
+    );
+    expect(revokeRes.status).toBe(200);
+
+    const phoneStatusRes = await routes.request(
+      "https://39.106.189.88/status",
+      {
+        headers: { Cookie: phoneCookie ?? "" },
+      },
+    );
+    const phoneStatus = (await phoneStatusRes.json()) as {
+      authenticated: boolean;
+    };
+    expect(phoneStatus.authenticated).toBe(false);
+  });
+
+  it("extends sliding sessions across activity and revokes other sessions on password change", async () => {
+    const routes = createAuthRoutes({ authService });
+    const loginA = await routes.request("https://39.106.189.88/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "strong-password-123" }),
+    });
+    const cookieA = (loginA.headers.get("set-cookie") ?? "").split(";")[0];
+
+    const loginB = await routes.request("https://39.106.189.88/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "strong-password-123" }),
+    });
+    const cookieB = (loginB.headers.get("set-cookie") ?? "").split(";")[0];
+
+    // Advance 20 days -> session A slides forward by another 30 days
+    now += 20 * 24 * 60 * 60 * 1000;
+    const refreshRes = await routes.request("https://39.106.189.88/status", {
+      headers: { Cookie: cookieA ?? "" },
+    });
+    expect(refreshRes.headers.get("set-cookie")).toContain(
+      `${SESSION_COOKIE_NAME}=`,
+    );
+
+    // Advance 20 more days (40 days total > 30d initial window, still valid for A, expired for idle B)
+    now += 20 * 24 * 60 * 60 * 1000;
+    const statusA = (await (
+      await routes.request("https://39.106.189.88/status", {
+        headers: { Cookie: cookieA ?? "" },
+      })
+    ).json()) as { authenticated: boolean };
+    const statusB = (await (
+      await routes.request("https://39.106.189.88/status", {
+        headers: { Cookie: cookieB ?? "" },
+      })
+    ).json()) as { authenticated: boolean };
+    expect(statusA.authenticated).toBe(true);
+    expect(statusB.authenticated).toBe(false);
+
+    // Re-login B, then change password from A -> B is revoked, A stays valid
+    const loginB2 = await routes.request("https://39.106.189.88/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "strong-password-123" }),
+    });
+    const cookieB2 = (loginB2.headers.get("set-cookie") ?? "").split(";")[0];
+
+    const changeRes = await routes.request(
+      "https://39.106.189.88/change-password",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: cookieA ?? "",
+        },
+        body: JSON.stringify({ newPassword: "rotated-password-456" }),
+      },
+    );
+    expect(changeRes.status).toBe(200);
+
+    const statusAAfter = (await (
+      await routes.request("https://39.106.189.88/status", {
+        headers: { Cookie: cookieA ?? "" },
+      })
+    ).json()) as { authenticated: boolean };
+    const statusBAfter = (await (
+      await routes.request("https://39.106.189.88/status", {
+        headers: { Cookie: cookieB2 ?? "" },
+      })
+    ).json()) as { authenticated: boolean };
+    expect(statusAAfter.authenticated).toBe(true);
+    expect(statusBAfter.authenticated).toBe(false);
+  });
+});

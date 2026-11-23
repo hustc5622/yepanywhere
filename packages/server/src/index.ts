@@ -1,6 +1,9 @@
 import { execFile } from "node:child_process";
 import * as fs from "node:fs";
-import { createServer as createHttpsServer } from "node:https";
+import {
+  type Server as HttpsServer,
+  createServer as createHttpsServer,
+} from "node:https";
 import * as os from "node:os";
 import * as path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -29,6 +32,10 @@ import {
   createStaticRoutes,
 } from "./frontend/index.js";
 import { ensureSelfSignedCertificate } from "./https/self-signed.js";
+import {
+  type HotReloadableTlsLoader,
+  createHotReloadableTlsLoader,
+} from "./https/tls-loader.js";
 import {
   SessionContentIndexService,
   SessionIndexService,
@@ -188,6 +195,8 @@ let sessionArchiveServiceForShutdown: SessionArchiveService | null = null;
 let sessionInteractionServiceForShutdown: SessionInteractionService | null =
   null;
 let interactionBrokerForShutdown: InteractionBroker | null = null;
+let tlsLoaderForShutdown: HotReloadableTlsLoader | null = null;
+let dedicatedTlsServerForShutdown: ReturnType<typeof serve> | null = null;
 let isShuttingDown = false;
 let disposeSessionDisplays: (() => void) | undefined;
 const externalRuntimeAttachAbort = new AbortController();
@@ -266,6 +275,19 @@ async function gracefulShutdown(signal: string, exitCode = 0): Promise<void> {
         error,
       );
     }
+  }
+
+  if (tlsLoaderForShutdown) {
+    tlsLoaderForShutdown.close();
+    tlsLoaderForShutdown = null;
+  }
+  if (dedicatedTlsServerForShutdown) {
+    try {
+      dedicatedTlsServerForShutdown.close();
+    } catch {
+      // Ignore close errors during shutdown
+    }
+    dedicatedTlsServerForShutdown = null;
   }
 
   closeCodexCorrelationDebugLogger();
@@ -614,6 +636,7 @@ const recentsService = new RecentsService({ dataDir: config.dataDir });
 const authService = new AuthService({
   dataDir: config.dataDir,
   sessionTtlMs: config.authSessionTtlMs,
+  maxSessionTtlMs: config.authSessionMaxTtlMs,
   cookieSecret: config.authCookieSecret,
 });
 const installService = new InstallService({
@@ -875,6 +898,7 @@ async function startServer() {
     recentsService,
     authService,
     authDisabled: config.authDisabled,
+    trustProxy: config.trustProxy,
     desktopAuthToken: config.desktopAuthToken,
     // Note: frontendProxy not passed - will be added below
     serverHost: "127.0.0.1", // Always report localhost as main binding
@@ -1036,6 +1060,8 @@ async function startServer() {
         authService,
         authDisabled: config.authDisabled,
         desktopAuthToken: config.desktopAuthToken,
+        basePath: config.basePath,
+        trustProxy: config.trustProxy,
       },
     }),
   );
@@ -1509,6 +1535,67 @@ async function startServer() {
     if (!result.success) {
       throw new Error(result.error ?? "Failed to bind CLI network socket");
     }
+  }
+
+  // Start optional dedicated HTTPS listener (e.g. TLS_PORT=8443 for TCP frp
+  // end-to-end TLS while keeping the primary HTTP port untouched for local
+  // scripts, deploy/hot-apply, Feishu runtime, and reverse proxies).
+  if (config.tlsPort > 0) {
+    const defaultCertPath = path.join(config.dataDir, "tls", "server.crt");
+    const defaultKeyPath = path.join(config.dataDir, "tls", "server.key");
+    const certPath = config.tlsCertPath ?? defaultCertPath;
+    const keyPath = config.tlsKeyPath ?? defaultKeyPath;
+
+    if (!fs.existsSync(certPath) || !fs.existsSync(keyPath)) {
+      throw new Error(
+        `TLS_PORT=${config.tlsPort} is enabled, but TLS certificate files were not found (${certPath}, ${keyPath}). Run scripts/setup-private-tls.sh or set TLS_CERT_PATH and TLS_KEY_PATH.`,
+      );
+    }
+
+    const tlsLoader = createHotReloadableTlsLoader({ certPath, keyPath });
+    tlsLoaderForShutdown = tlsLoader;
+    const certInfo = tlsLoader.getCertificateInfo();
+    const dedicatedTlsServer = serve(
+      {
+        fetch: app.fetch,
+        port: config.tlsPort,
+        hostname: config.tlsHost,
+        createServer: createHttpsServer,
+        serverOptions: tlsLoader.initialOptions,
+      },
+      (info) => {
+        console.log(
+          `[HTTPS] Dedicated TLS listener running at https://${config.tlsHost}:${info.port}${config.basePath}`,
+        );
+        if (certInfo) {
+          console.log(
+            `[HTTPS] Loaded certificate subject="${certInfo.subject}" san="${certInfo.subjectAltName ?? "none"}" validTo="${certInfo.validTo}"`,
+          );
+        }
+      },
+    );
+    applyKeepAliveTuning(dedicatedTlsServer);
+    tlsLoader.attachServer(dedicatedTlsServer as unknown as HttpsServer);
+    dedicatedTlsServerForShutdown = dedicatedTlsServer;
+    dedicatedTlsServer.on("error", (error: unknown) => {
+      const err = error as NodeJS.ErrnoException;
+      console.error(
+        `[HTTPS] Failed to bind https://${config.tlsHost}:${config.tlsPort}: ${err.message ?? "Unknown error"}`,
+      );
+      process.exit(1);
+    });
+    attachUnifiedUpgradeHandler(dedicatedTlsServer, {
+      frontendProxy,
+      isApiPath: (urlPath) =>
+        urlPath.startsWith(`${config.basePath}/api`) ||
+        urlPath.startsWith(`${config.basePath}${DSH_WEB_PATH}/`),
+      app,
+      wss,
+    });
+    await waitForServerListening(
+      dedicatedTlsServer,
+      `https://${config.tlsHost}:${config.tlsPort}`,
+    );
   }
 
   // Start maintenance server on separate port (for out-of-band diagnostics)

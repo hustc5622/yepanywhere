@@ -405,7 +405,7 @@ export function attachUnifiedUpgradeHandler(
     // Route through Hono - this will call upgradeWebSocket if matched
     // Use Promise handling instead of async/await to avoid potential issues
     Promise.resolve(app.request(url, { headers }, env))
-      .then(() => {
+      .then((response) => {
         clearTimeout(timeoutId);
 
         // Check if socket closed during async routing
@@ -424,6 +424,23 @@ export function attachUnifiedUpgradeHandler(
         const hasNewSymbols = symbolsAfter.length > symbolsBefore.length;
 
         if (!hasNewSymbols) {
+          const status = response?.status;
+          if (status === 401) {
+            debugLog("Upgrade", `[${connId}] WebSocket rejected: 401`);
+            closeSocket(
+              "HTTP/1.1 401 Unauthorized\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+              "unauthorized",
+            );
+            return;
+          }
+          if (status === 403) {
+            debugLog("Upgrade", `[${connId}] WebSocket rejected: 403`);
+            closeSocket(
+              "HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",
+              "forbidden",
+            );
+            return;
+          }
           debugLog("Upgrade", `[${connId}] No WebSocket handler matched`);
           closeSocket(
             "HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n",

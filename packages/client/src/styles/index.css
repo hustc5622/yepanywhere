@@ -363,6 +363,23 @@
   box-sizing: border-box;
 }
 
+/* Accessibility helper: keeps content reachable for screen readers and OS
+   password managers without letting it render as a stray visible control
+   (a browser-default input next to the styled field reads as a layout bug). */
+.visually-hidden,
+.sr-only {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  margin: -1px;
+  padding: 0;
+  border: 0;
+  overflow: hidden;
+  clip: rect(0 0 0 0);
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
 /* Lock the document to vertical-only panning across the whole app.
    On Tauri/Android WebView even a small horizontal scroll deep in the tree
    (e.g. a wide <pre>, a long URL, a chip overflow) lets the user drag the
@@ -12692,17 +12709,25 @@ button.context-usage-indicator--button:focus-visible {
 }
 
 .login-field input {
+  width: 100%;
   padding: var(--space-2) var(--space-3);
   border: 1px solid var(--border-input);
   border-radius: var(--radius-md);
   background: var(--bg-input);
   color: var(--text-primary);
+  font-family: var(--font-sans);
   font-size: var(--font-size-base);
+  line-height: var(--line-height-base);
 }
 
 .login-field input:focus {
   outline: none;
   border-color: var(--focus-border);
+}
+
+.login-field input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 .login-field-hint {
@@ -12743,14 +12768,184 @@ button.context-usage-indicator--button:focus-visible {
   border-radius: var(--radius-md);
 }
 
+.login-insecure-notice {
+  color: var(--warning-color, #b45309);
+  font-size: var(--font-size-sm);
+  text-align: center;
+  padding: var(--space-2) var(--space-3);
+  margin-bottom: var(--space-3);
+  background: rgba(217, 119, 6, 0.12);
+  border: 1px solid rgba(217, 119, 6, 0.3);
+  border-radius: var(--radius-md);
+}
+
+/* Failed-but-not-locked warning: how many attempts are left and what the next
+   lockout costs, so the limit is predictable instead of surprising. */
+.login-attempt-warning {
+  color: var(--warning-color);
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-base);
+  text-align: center;
+  padding: var(--space-2) var(--space-3);
+  background: rgba(217, 119, 6, 0.12);
+  border: 1px solid rgba(217, 119, 6, 0.3);
+  border-radius: var(--radius-md);
+}
+
+/* Active lockout: total duration plus the live countdown. */
+.login-lockout {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  padding: var(--space-3);
+  background: rgba(199, 78, 57, 0.1);
+  border: 1px solid rgba(199, 78, 57, 0.3);
+  border-radius: var(--radius-md);
+}
+
+.login-lockout-title {
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--error-color);
+}
+
+.login-lockout-body {
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-base);
+  color: var(--text-primary);
+}
+
+.login-lockout-hint {
+  font-size: var(--font-size-xs);
+  line-height: var(--line-height-base);
+  color: var(--text-muted);
+  overflow-wrap: anywhere;
+}
+
+.login-recovery-hint {
+  margin: var(--space-4) 0 0;
+  font-size: var(--font-size-sm);
+  line-height: var(--line-height-base);
+  color: var(--text-dimmed);
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+/* Mobile keyboards must not auto-zoom on focus, which also keeps the field and
+   the submit button at the same text size. */
+@media (max-width: 600px) {
+  .login-field input,
+  .login-button {
+    font-size: var(--font-size-input);
+  }
+}
+
+.pairing-qr-card {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-4);
+  margin-top: var(--space-3);
+  padding: var(--space-3);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+
+.pairing-qr-frame {
+  padding: var(--space-2);
+  background: #ffffff;
+  border-radius: var(--radius-sm);
+  line-height: 0;
+}
+
+.pairing-qr-details {
+  flex: 1;
+  min-width: 180px;
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+}
+
+.pairing-qr-countdown {
+  margin: 0;
+  font-size: var(--font-size-base);
+  font-weight: 600;
+  color: var(--text-primary);
+}
+
+.pairing-qr-hint {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
+.pairing-qr-actions {
+  display: flex;
+  gap: var(--space-2);
+  margin-top: var(--space-1);
+}
+
+.auth-sessions-list {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin-top: var(--space-3);
+  width: 100%;
+}
+
+.auth-session-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-md);
+  background: var(--bg-surface);
+}
+
+.auth-session-meta {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-1);
+  min-width: 0;
+}
+
+.auth-session-title {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+  font-size: var(--font-size-base);
+  font-weight: 500;
+  color: var(--text-primary);
+}
+
+.auth-session-method-badge {
+  font-size: var(--font-size-xs);
+  color: var(--text-muted);
+  padding: 2px var(--space-2);
+  border: 1px solid var(--border-color);
+  border-radius: var(--radius-sm);
+}
+
+.auth-session-dates {
+  margin: 0;
+  font-size: var(--font-size-sm);
+  color: var(--text-muted);
+}
+
 .login-button {
   padding: var(--space-2) var(--space-4);
-  border: none;
+  border: 1px solid transparent;
   border-radius: var(--radius-md);
   background: var(--app-yep-green);
   color: white;
+  font-family: var(--font-sans);
   font-size: var(--font-size-base);
   font-weight: 500;
+  line-height: var(--line-height-base);
   cursor: pointer;
   transition: background 0.15s ease;
 }

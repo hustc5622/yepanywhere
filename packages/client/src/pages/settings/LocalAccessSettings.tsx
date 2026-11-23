@@ -1,6 +1,11 @@
-import { useState } from "react";
-import { api } from "../../api/client";
+import { useCallback, useEffect, useState } from "react";
+import {
+  type AuthSessionInfo,
+  type PairingTokenResponse,
+  api,
+} from "../../api/client";
 import { FilterDropdown } from "../../components/FilterDropdown";
+import { QRCode } from "../../components/QRCode";
 import { SettingsFormSkeleton } from "../../components/SettingsSkeleton";
 import { useOptionalAuth } from "../../contexts/AuthContext";
 import {
@@ -84,6 +89,321 @@ function MobileShellChannelSettings() {
         </div>
       </div>
     </div>
+  );
+}
+
+function summarizeUserAgent(userAgent?: string): string {
+  if (!userAgent) return "Unknown device";
+  const isAndroid = /Android/i.test(userAgent);
+  const isIphone = /iPhone/i.test(userAgent);
+  const isIpad = /iPad/i.test(userAgent);
+  const isMac = /Macintosh|Mac OS X/i.test(userAgent);
+  const isWin = /Windows/i.test(userAgent);
+  const isLinux = /Linux/i.test(userAgent) && !isAndroid;
+
+  const osLabel = isIphone
+    ? "iPhone"
+    : isIpad
+      ? "iPad"
+      : isAndroid
+        ? "Android"
+        : isMac
+          ? "macOS"
+          : isWin
+            ? "Windows"
+            : isLinux
+              ? "Linux"
+              : "Device";
+
+  const browserLabel = /; wv\)/i.test(userAgent)
+    ? "App WebView"
+    : /Edg\//i.test(userAgent)
+      ? "Edge"
+      : /Chrome\//i.test(userAgent) && !/Edg\//i.test(userAgent)
+        ? "Chrome"
+        : /Firefox\//i.test(userAgent)
+          ? "Firefox"
+          : /Safari\//i.test(userAgent)
+            ? "Safari"
+            : "Browser";
+
+  return `${osLabel} · ${browserLabel}`;
+}
+
+function formatSessionTimestamp(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) return iso;
+  return date.toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+function DevicePairingAndSessions({
+  onSignedOutAll,
+}: {
+  onSignedOutAll: () => void;
+}) {
+  const { t } = useI18n();
+  const [pairing, setPairing] = useState<PairingTokenResponse | null>(null);
+  const [pairingSecondsLeft, setPairingSecondsLeft] = useState(0);
+  const [pairingLoading, setPairingLoading] = useState(false);
+  const [pairingCopied, setPairingCopied] = useState(false);
+  const [pairingError, setPairingError] = useState<string | null>(null);
+
+  const [sessions, setSessions] = useState<AuthSessionInfo[]>([]);
+  const [sessionsLoading, setSessionsLoading] = useState(true);
+  const [sessionsError, setSessionsError] = useState<string | null>(null);
+  const [busySessionId, setBusySessionId] = useState<string | null>(null);
+  const [signingOutOthers, setSigningOutOthers] = useState(false);
+
+  const loadSessions = useCallback(async () => {
+    setSessionsLoading(true);
+    setSessionsError(null);
+    try {
+      const res = await api.listAuthSessions();
+      setSessions(res.sessions);
+    } catch (err) {
+      setSessionsError(
+        err instanceof Error ? err.message : t("localAccessSessionsLoadError"),
+      );
+    } finally {
+      setSessionsLoading(false);
+    }
+  }, [t]);
+
+  useEffect(() => {
+    void loadSessions();
+  }, [loadSessions]);
+
+  useEffect(() => {
+    if (!pairing) {
+      setPairingSecondsLeft(0);
+      return;
+    }
+    const updateRemaining = () => {
+      const remaining = Math.max(
+        0,
+        Math.ceil((new Date(pairing.expiresAt).getTime() - Date.now()) / 1000),
+      );
+      setPairingSecondsLeft(remaining);
+      if (remaining === 0) {
+        setPairing(null);
+      }
+    };
+    updateRemaining();
+    const timer = window.setInterval(updateRemaining, 1000);
+    return () => window.clearInterval(timer);
+  }, [pairing]);
+
+  const handleGeneratePairing = async () => {
+    setPairingLoading(true);
+    setPairingError(null);
+    setPairingCopied(false);
+    try {
+      const result = await api.createPairingToken();
+      setPairing(result);
+    } catch (err) {
+      setPairingError(
+        err instanceof Error
+          ? err.message
+          : t("localAccessPairingCreateFailed"),
+      );
+    } finally {
+      setPairingLoading(false);
+    }
+  };
+
+  const pairingUrl = pairing
+    ? `${window.location.origin}${pairing.loginPath}`
+    : null;
+
+  const handleCopyPairingUrl = async () => {
+    if (!pairingUrl) return;
+    try {
+      await navigator.clipboard.writeText(pairingUrl);
+      setPairingCopied(true);
+      window.setTimeout(() => setPairingCopied(false), 2000);
+    } catch {
+      setPairingError(t("localAccessPairingCopyFailed"));
+    }
+  };
+
+  const handleRevokeSession = async (id: string, isCurrent: boolean) => {
+    setBusySessionId(id);
+    setSessionsError(null);
+    try {
+      await api.revokeAuthSession(id);
+      if (isCurrent) {
+        onSignedOutAll();
+        return;
+      }
+      setSessions((prev) => prev.filter((item) => item.id !== id));
+    } catch (err) {
+      setSessionsError(
+        err instanceof Error
+          ? err.message
+          : t("localAccessSessionRevokeFailed"),
+      );
+    } finally {
+      setBusySessionId(null);
+    }
+  };
+
+  const handleSignOutOthers = async () => {
+    setSigningOutOthers(true);
+    setSessionsError(null);
+    try {
+      await api.logoutAllAuthSessions(false);
+      await loadSessions();
+    } catch (err) {
+      setSessionsError(
+        err instanceof Error
+          ? err.message
+          : t("localAccessSessionRevokeFailed"),
+      );
+    } finally {
+      setSigningOutOthers(false);
+    }
+  };
+
+  const hasOtherSessions = sessions.some((item) => !item.isCurrent);
+
+  return (
+    <>
+      <div className="settings-group">
+        <div className="settings-item settings-item-stacked">
+          <div className="settings-item-row">
+            <div className="settings-item-info">
+              <strong>{t("localAccessPairingTitle")}</strong>
+              <p>{t("localAccessPairingDescription")}</p>
+            </div>
+            <button
+              type="button"
+              className="settings-button"
+              disabled={pairingLoading}
+              onClick={() => void handleGeneratePairing()}
+            >
+              {pairingLoading
+                ? t("localAccessPairingGenerating")
+                : pairing
+                  ? t("localAccessPairingRegenerate")
+                  : t("localAccessPairingGenerate")}
+            </button>
+          </div>
+
+          {pairingError && <p className="form-error">{pairingError}</p>}
+
+          {pairing && pairingUrl && (
+            <div className="pairing-qr-card">
+              <div className="pairing-qr-frame">
+                <QRCode value={pairingUrl} size={180} />
+              </div>
+              <div className="pairing-qr-details">
+                <p className="pairing-qr-countdown">
+                  {t("localAccessPairingCountdown", {
+                    seconds: pairingSecondsLeft,
+                  })}
+                </p>
+                <p className="pairing-qr-hint">
+                  {t("localAccessPairingSingleUseHint")}
+                </p>
+                <div className="pairing-qr-actions">
+                  <button
+                    type="button"
+                    className="settings-button"
+                    onClick={() => void handleCopyPairingUrl()}
+                  >
+                    {pairingCopied
+                      ? t("localAccessPairingCopied")
+                      : t("localAccessPairingCopyLink")}
+                  </button>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      <div className="settings-group">
+        <div className="settings-item settings-item-stacked">
+          <div className="settings-item-row">
+            <div className="settings-item-info">
+              <strong>{t("localAccessSessionsTitle")}</strong>
+              <p>{t("localAccessSessionsDescription")}</p>
+            </div>
+            {hasOtherSessions && (
+              <button
+                type="button"
+                className="settings-button settings-button-danger"
+                disabled={signingOutOthers}
+                onClick={() => void handleSignOutOthers()}
+              >
+                {signingOutOthers
+                  ? t("localAccessSessionsSigningOut")
+                  : t("localAccessSessionsSignOutOthers")}
+              </button>
+            )}
+          </div>
+
+          {sessionsError && <p className="form-error">{sessionsError}</p>}
+
+          {sessionsLoading ? (
+            <p className="form-hint">{t("localAccessLoading")}</p>
+          ) : sessions.length === 0 ? (
+            <p className="form-hint">{t("localAccessSessionsEmpty")}</p>
+          ) : (
+            <div className="auth-sessions-list">
+              {sessions.map((session) => (
+                <div key={session.id} className="auth-session-row">
+                  <div className="auth-session-meta">
+                    <div className="auth-session-title">
+                      <span>
+                        {session.deviceLabel ||
+                          summarizeUserAgent(session.userAgent)}
+                      </span>
+                      {session.isCurrent && (
+                        <span className="settings-status-badge settings-status-detected">
+                          {t("localAccessSessionCurrentBadge")}
+                        </span>
+                      )}
+                      <span className="auth-session-method-badge">
+                        {session.authMethod === "pairing"
+                          ? t("localAccessSessionMethodPairing")
+                          : t("localAccessSessionMethodPassword")}
+                      </span>
+                    </div>
+                    <p className="auth-session-dates">
+                      {t("localAccessSessionLastActive", {
+                        time: formatSessionTimestamp(session.lastActiveAt),
+                      })}{" "}
+                      ·{" "}
+                      {t("localAccessSessionExpires", {
+                        time: formatSessionTimestamp(session.expiresAt),
+                      })}
+                    </p>
+                  </div>
+                  {!session.isCurrent && (
+                    <button
+                      type="button"
+                      className="settings-button settings-button-danger"
+                      disabled={busySessionId === session.id}
+                      onClick={() =>
+                        void handleRevokeSession(session.id, session.isCurrent)
+                      }
+                    >
+                      {t("localAccessSessionRevoke")}
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+      </div>
+    </>
   );
 }
 
@@ -710,23 +1030,26 @@ export function LocalAccessSettings() {
           </div>
         </form>
 
-        {/* Logout - shown when auth is enabled */}
+        {/* Device pairing + active sessions + logout - shown when auth is enabled */}
         {auth.authEnabled && auth.isAuthenticated && (
-          <div className="settings-group">
-            <div className="settings-item">
-              <div className="settings-item-info">
-                <strong>{t("remoteAccessLogoutTitle")}</strong>
-                <p>{t("localAccessLogoutDescription")}</p>
+          <>
+            <DevicePairingAndSessions onSignedOutAll={auth.logout} />
+            <div className="settings-group">
+              <div className="settings-item">
+                <div className="settings-item-info">
+                  <strong>{t("remoteAccessLogoutTitle")}</strong>
+                  <p>{t("localAccessLogoutDescription")}</p>
+                </div>
+                <button
+                  type="button"
+                  className="settings-button settings-button-danger"
+                  onClick={auth.logout}
+                >
+                  {t("remoteAccessLogout")}
+                </button>
               </div>
-              <button
-                type="button"
-                className="settings-button settings-button-danger"
-                onClick={auth.logout}
-              >
-                {t("remoteAccessLogout")}
-              </button>
             </div>
-          </div>
+          </>
         )}
       </section>
     );

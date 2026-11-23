@@ -19,7 +19,11 @@ import * as crypto from "node:crypto";
 import type { MiddlewareHandler } from "hono";
 import { getCookie } from "hono/cookie";
 import type { AuthService } from "../auth/AuthService.js";
-import { SESSION_COOKIE_NAME } from "../auth/routes.js";
+import {
+  SESSION_COOKIE_NAME,
+  getClientRateLimitKey,
+  setSessionCookie,
+} from "../auth/routes.js";
 import { WS_INTERNAL_AUTHENTICATED } from "./internal-auth.js";
 
 export interface AuthMiddlewareOptions {
@@ -33,6 +37,8 @@ export interface AuthMiddlewareOptions {
    * keeps the prefix, so path exemptions are matched after stripping it.
    */
   basePath?: string;
+  /** Whether to trust reverse-proxy forwarding headers when refreshing cookies. */
+  trustProxy?: boolean;
 }
 
 /**
@@ -91,6 +97,7 @@ export function createAuthMiddleware(
     authDisabled = false,
     desktopAuthToken,
     basePath,
+    trustProxy = false,
   } = options;
 
   return async (c, next) => {
@@ -167,15 +174,32 @@ export function createAuthMiddleware(
       );
     }
 
-    // Validate session cookie
+    // Validate session cookie (and extend sliding window when due)
     const sessionId = getCookie(c, SESSION_COOKIE_NAME);
     if (!sessionId) {
       return c.json({ error: "Authentication required" }, 401);
     }
 
-    const valid = await authService.validateSession(sessionId);
-    if (!valid) {
+    const validation =
+      typeof authService.validateSessionWithRefresh === "function"
+        ? await authService.validateSessionWithRefresh(sessionId, {
+            ip: getClientRateLimitKey(c, trustProxy),
+          })
+        : {
+            valid: await authService.validateSession(sessionId),
+            shouldRefreshCookie: false,
+          };
+
+    if (!validation.valid) {
       return c.json({ error: "Session expired" }, 401);
+    }
+
+    if (validation.shouldRefreshCookie && validation.cookieMaxAgeSec) {
+      setSessionCookie(c, sessionId, {
+        basePath,
+        trustProxy,
+        maxAgeSec: validation.cookieMaxAgeSec,
+      });
     }
 
     // Mark request as authenticated (for downstream handlers if needed)

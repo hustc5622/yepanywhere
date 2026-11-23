@@ -369,6 +369,18 @@ export interface GenerateSessionTitleResponse {
 
 export interface ApiError extends Error {
   status: number;
+  /** Lockout bucket that rejected the login/pairing attempt. */
+  tier?: "soft" | "hard" | "global";
+  /** Seconds until a 429 lockout expires. */
+  retryAfterSec?: number;
+  /** Full length of the lockout rule that applied, in seconds. */
+  lockoutSec?: number;
+  /** Failed attempts still allowed before the next lockout (401 responses). */
+  attemptsRemaining?: number;
+  /** Lockout length the next failure would trigger, in seconds. */
+  nextLockoutSec?: number;
+  /** Tier the next failure would trigger. */
+  nextTier?: "soft" | "hard";
   code?: string;
   absolutePath?: string;
   path?: string;
@@ -465,12 +477,35 @@ export interface AuthStatus {
   setupRequired: boolean;
   /** Whether auth is bypassed by --auth-disable flag (for recovery) */
   disabledByEnv: boolean;
-  /** Path to auth.json file (for recovery instructions) */
-  authFilePath: string;
+  /** Path to auth.json file (only returned when authenticated or auth is off) */
+  authFilePath?: string;
   /** Whether the server has a desktop auth token (Tauri app) */
   hasDesktopToken: boolean;
   /** Whether unauthenticated localhost access is allowed */
   localhostOpen: boolean;
+  /** Whether one-time QR/link device pairing is supported */
+  pairingSupported?: boolean;
+  /** Whether the request arrived over HTTPS */
+  isSecureTransport?: boolean;
+}
+
+export interface AuthSessionInfo {
+  id: string;
+  createdAt: string;
+  lastActiveAt: string;
+  expiresAt: string;
+  maxExpiresAt: string;
+  userAgent?: string;
+  deviceLabel?: string;
+  authMethod: "password" | "pairing";
+  isCurrent: boolean;
+}
+
+export interface PairingTokenResponse {
+  token: string;
+  expiresAt: string;
+  ttlSeconds: number;
+  loginPath: string;
 }
 
 export interface CodexUsageWindow {
@@ -639,6 +674,12 @@ export async function fetchResponse(
           path?: unknown;
           details?: unknown;
           runtime?: unknown;
+          tier?: unknown;
+          retryAfterSec?: unknown;
+          lockoutSec?: unknown;
+          attemptsRemaining?: unknown;
+          nextLockoutSec?: unknown;
+          nextTier?: unknown;
         }
       | undefined;
     try {
@@ -664,6 +705,28 @@ export async function fetchResponse(
     if (errorBody?.details !== undefined) error.details = errorBody.details;
     if (errorBody?.runtime !== undefined) {
       error.runtime = errorBody.runtime as SessionRuntime;
+    }
+    if (
+      errorBody?.tier === "soft" ||
+      errorBody?.tier === "hard" ||
+      errorBody?.tier === "global"
+    ) {
+      error.tier = errorBody.tier;
+    }
+    if (errorBody?.nextTier === "soft" || errorBody?.nextTier === "hard") {
+      error.nextTier = errorBody.nextTier;
+    }
+    if (typeof errorBody?.retryAfterSec === "number") {
+      error.retryAfterSec = errorBody.retryAfterSec;
+    }
+    if (typeof errorBody?.lockoutSec === "number") {
+      error.lockoutSec = errorBody.lockoutSec;
+    }
+    if (typeof errorBody?.attemptsRemaining === "number") {
+      error.attemptsRemaining = errorBody.attemptsRemaining;
+    }
+    if (typeof errorBody?.nextLockoutSec === "number") {
+      error.nextLockoutSec = errorBody.nextLockoutSec;
     }
     if (setupRequired) error.setupRequired = true;
     throw error;
@@ -2457,6 +2520,42 @@ export const api = {
     fetchJSON<{ success: boolean }>("/auth/change-password", {
       method: "POST",
       body: JSON.stringify({ newPassword }),
+    }),
+
+  listAuthSessions: () =>
+    fetchJSON<{ sessions: AuthSessionInfo[] }>("/auth/sessions"),
+
+  revokeAuthSession: (id: string) =>
+    fetchJSON<{ success: boolean }>(
+      `/auth/sessions/${encodeURIComponent(id)}`,
+      {
+        method: "DELETE",
+      },
+    ),
+
+  logoutAllAuthSessions: (includeCurrent = false) =>
+    fetchJSON<{
+      success: boolean;
+      signedOutCurrent: boolean;
+      revokedCount?: number;
+    }>("/auth/logout-all", {
+      method: "POST",
+      body: JSON.stringify({ includeCurrent }),
+    }),
+
+  createPairingToken: (label?: string) =>
+    fetchJSON<PairingTokenResponse>("/auth/pairing/create", {
+      method: "POST",
+      body: JSON.stringify(label ? { label } : {}),
+    }),
+
+  redeemPairingToken: (token: string, deviceLabel?: string) =>
+    fetchJSON<{ success: boolean }>("/auth/pairing/redeem", {
+      method: "POST",
+      body: JSON.stringify({
+        token,
+        ...(deviceLabel ? { deviceLabel } : {}),
+      }),
     }),
 
   /** Toggle unauthenticated localhost access (desktop token floor bypass) */

@@ -123,8 +123,8 @@ describe("allowed-hosts", () => {
       expect(isAllowedOrigin(undefined)).toBe(true);
     });
 
-    it('allows "null" origin (file://, about:blank)', () => {
-      expect(isAllowedOrigin("null")).toBe(true);
+    it('rejects "null" origin (sandboxed iframes / cross-site credentialed reads)', () => {
+      expect(isAllowedOrigin("null")).toBe(false);
     });
 
     it("allows localhost origins", () => {

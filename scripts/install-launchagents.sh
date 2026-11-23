@@ -39,6 +39,11 @@ RUNTIME_LABEL="${YEP_LAUNCHD_RUNTIME_LABEL:-com.yueyuan.yepanywhere.runtime}"
 SERVER_PORT="${YEP_DEPLOY_PORT:-8022}"
 SERVER_BASE_PATH="${YEP_DEPLOY_BASE_PATH:-/yep}"
 SERVER_ALLOWED_HOSTS="${ALLOWED_HOSTS:-}"
+SERVER_TLS_PORT="${TLS_PORT:-}"
+SERVER_TLS_HOST="${TLS_HOST:-}"
+SERVER_TLS_CERT_PATH="${TLS_CERT_PATH:-}"
+SERVER_TLS_KEY_PATH="${TLS_KEY_PATH:-}"
+SERVER_TRUST_PROXY="${TRUST_PROXY:-}"
 BRIDGE_PORT="${YEP_CODEX_BRIDGE_PORT:-${CODEX_BRIDGE_PORT:-4510}}"
 BRIDGE_URL="${YEP_CODEX_BRIDGE_CONTROL_URL:-${CODEX_BRIDGE_CONTROL_URL:-http://127.0.0.1:${BRIDGE_PORT}}}"
 # External runtime splits live agent processes out of the web/API shell so the
@@ -620,6 +625,21 @@ write_server_plist() {
   )
   if [[ -n "$SERVER_ALLOWED_HOSTS" ]]; then
     env_args+=("ALLOWED_HOSTS" "$SERVER_ALLOWED_HOSTS")
+  fi
+  if [[ -n "$SERVER_TLS_PORT" ]]; then
+    env_args+=("TLS_PORT" "$SERVER_TLS_PORT")
+  fi
+  if [[ -n "$SERVER_TLS_HOST" ]]; then
+    env_args+=("TLS_HOST" "$SERVER_TLS_HOST")
+  fi
+  if [[ -n "$SERVER_TLS_CERT_PATH" ]]; then
+    env_args+=("TLS_CERT_PATH" "$SERVER_TLS_CERT_PATH")
+  fi
+  if [[ -n "$SERVER_TLS_KEY_PATH" ]]; then
+    env_args+=("TLS_KEY_PATH" "$SERVER_TLS_KEY_PATH")
+  fi
+  if [[ -n "$SERVER_TRUST_PROXY" ]]; then
+    env_args+=("TRUST_PROXY" "$SERVER_TRUST_PROXY")
   fi
   if $RUNTIME_EXTERNAL; then
     env_args+=(

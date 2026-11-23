@@ -227,6 +227,8 @@ export interface AppOptions {
   authService?: AuthService;
   /** Whether auth is disabled by env var (--auth-disable). Bypasses all auth. */
   authDisabled?: boolean;
+  /** Whether to trust reverse-proxy forwarding headers (X-Forwarded-Proto, X-Real-IP). */
+  trustProxy?: boolean;
   /** Desktop auth token for Tauri app. Requests with matching X-Desktop-Token header bypass auth. */
   desktopAuthToken?: string;
   /** Server host (for server-info endpoint) */
@@ -481,6 +483,7 @@ export function createApp(options: AppOptions): AppResult {
         authDisabled: options.authDisabled,
         desktopAuthToken: options.desktopAuthToken,
         basePath,
+        trustProxy: options.trustProxy,
       }),
     );
   }
@@ -494,6 +497,8 @@ export function createApp(options: AppOptions): AppResult {
         authService: options.authService,
         authDisabled: options.authDisabled,
         desktopAuthToken: options.desktopAuthToken,
+        basePath,
+        trustProxy: options.trustProxy,
       }),
     );
   }

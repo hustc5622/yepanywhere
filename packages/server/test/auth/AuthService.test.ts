@@ -56,3 +56,84 @@ describe("AuthService file permissions", () => {
     expect(stat.mode & 0o777).toBe(0o600);
   });
 });
+
+describe("AuthService credential reload", () => {
+  let service: AuthService;
+  let testDir: string;
+
+  beforeEach(async () => {
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-reload-test-"));
+    service = new AuthService({
+      dataDir: testDir,
+      cookieSecret: "test-secret",
+    });
+    await service.initialize();
+  });
+
+  afterEach(async () => {
+    await fs.rm(testDir, { recursive: true, force: true });
+  });
+
+  /** A second AuthService on the same data dir stands in for `yepanywhere --setup-auth`. */
+  async function runCliReset(password: string): Promise<void> {
+    const cli = new AuthService({ dataDir: testDir, cookieSecret: "cli" });
+    await cli.initialize();
+    await cli.enableAuth(password);
+  }
+
+  it("reports no change when auth.json has not been rewritten", async () => {
+    await service.enableAuth("initial-password");
+
+    await expect(service.refreshAccountFromDisk()).resolves.toEqual({
+      reloaded: false,
+      credentialChanged: false,
+    });
+  });
+
+  it("adopts a password written by another process and keeps live sessions", async () => {
+    await service.enableAuth("initial-password");
+    const liveSession = await service.createSession("test-agent", {
+      authMethod: "password",
+    });
+
+    await runCliReset("rotated-password");
+
+    await expect(service.refreshAccountFromDisk()).resolves.toEqual({
+      reloaded: true,
+      credentialChanged: true,
+    });
+    expect(await service.verifyPassword("rotated-password")).toBe(true);
+    expect(await service.verifyPassword("initial-password")).toBe(false);
+    // The running server keeps its own session table instead of adopting the
+    // one written by the short-lived CLI process.
+    expect(await service.validateSession(liveSession)).toBe(true);
+  });
+
+  it("reloads unrelated state without flagging a credential change", async () => {
+    await service.enableAuth("initial-password");
+    const cli = new AuthService({ dataDir: testDir, cookieSecret: "cli" });
+    await cli.initialize();
+    await cli.setLocalhostOpen(true);
+
+    await expect(service.refreshAccountFromDisk()).resolves.toEqual({
+      reloaded: true,
+      credentialChanged: false,
+    });
+    expect(service.isLocalhostOpen()).toBe(true);
+  });
+
+  it("ignores an unreadable auth.json instead of losing the active account", async () => {
+    await service.enableAuth("initial-password");
+    await fs.writeFile(
+      path.join(testDir, "auth.json"),
+      "{not valid json",
+      "utf-8",
+    );
+
+    await expect(service.refreshAccountFromDisk()).resolves.toEqual({
+      reloaded: false,
+      credentialChanged: false,
+    });
+    expect(await service.verifyPassword("initial-password")).toBe(true);
+  });
+});

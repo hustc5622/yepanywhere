@@ -35,6 +35,7 @@
     for (var index = 0; index < TCP_NODES.length; index += 1) {
       origins.push(TCP_NODES[index].origin);
     }
+    origins.push("https://39.106.189.88:12345");
     return origins;
   })();
   var DEPRECATED_DEFAULT_TCP_ORIGINS = [
