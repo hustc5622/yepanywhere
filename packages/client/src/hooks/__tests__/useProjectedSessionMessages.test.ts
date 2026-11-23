@@ -586,6 +586,78 @@ describe("projected session messages with a connected socket", () => {
     });
     expect(api.getSessionDisplayView).toHaveBeenCalledTimes(1);
   });
+
+  it("replaces a stale cached snapshot when HTTP returns a newer server epoch", async () => {
+    vi.useFakeTimers();
+    // Seed the module cache with an earlier visit's epoch.
+    const first = renderHook(() => useProjectedSessionMessages(options));
+    act(() =>
+      first.result.current.handleDisplayEvent("display-snapshot", snapshot(5)),
+    );
+    first.unmount();
+    vi.mocked(api.getSessionDisplayView).mockClear();
+
+    const freshSnapshot: SessionDisplaySnapshot = {
+      ...snapshot(0),
+      view: { ...snapshot().view, epoch: "e2" },
+      nodes: [
+        ...snapshot().nodes,
+        {
+          type: "question",
+          id: "q2",
+          turnId: "turn:t2",
+          question: { messageId: "u2", content: "Later prompt" },
+        },
+      ],
+      activity: { state: "completed", tools: [], runningCount: 0 },
+    };
+    api.getSessionDisplayView.mockResolvedValue(freshSnapshot);
+
+    const { result } = renderHook(() => useProjectedSessionMessages(options));
+    // Shows the cached view immediately while waiting for WS.
+    expect(result.current.displayKnownView).toEqual({ epoch: "e1", seq: 5 });
+
+    // WS is slow or silent past the grace window; HTTP fallback returns e2.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WS_SNAPSHOT_GRACE_MS);
+    });
+    expect(api.getSessionDisplayView).toHaveBeenCalledTimes(1);
+    expect(result.current.displayKnownView).toEqual({ epoch: "e2", seq: 0 });
+    expect(result.current.displayQuestions).toHaveLength(2);
+    expect(result.current.displayActivity?.state).toBe("completed");
+  });
+
+  it("retries a transient 409 conflict even when a stale cached snapshot is displayed", async () => {
+    vi.useFakeTimers();
+    const first = renderHook(() => useProjectedSessionMessages(options));
+    act(() =>
+      first.result.current.handleDisplayEvent("display-snapshot", snapshot(5)),
+    );
+    first.unmount();
+    vi.mocked(api.getSessionDisplayView).mockClear();
+
+    const freshSnapshot: SessionDisplaySnapshot = {
+      ...snapshot(1),
+      view: { ...snapshot().view, epoch: "e2" },
+      activity: { state: "completed", tools: [], runningCount: 0 },
+    };
+    api.getSessionDisplayView
+      .mockRejectedValueOnce(
+        Object.assign(new Error("Display changed"), {
+          status: 409,
+          code: "SESSION_DISPLAY_CHANGED",
+        }),
+      )
+      .mockResolvedValueOnce(freshSnapshot);
+
+    const { result } = renderHook(() => useProjectedSessionMessages(options));
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(WS_SNAPSHOT_GRACE_MS + 300);
+    });
+    expect(api.getSessionDisplayView).toHaveBeenCalledTimes(2);
+    expect(result.current.displayKnownView).toEqual({ epoch: "e2", seq: 1 });
+    expect(result.current.displayActivity?.state).toBe("completed");
+  });
 });
 
 describe("projected session messages with a cold-start prefetch", () => {

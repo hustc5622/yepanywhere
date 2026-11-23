@@ -310,6 +310,64 @@ describe("ConnectionManager", () => {
 
       expect(restored).toHaveLength(3);
     });
+
+    it("reconnects on visibility restore after max attempts exhausted into disconnected", async () => {
+      const { cm, reconnectFn, timers, visibility } = setup({ maxAttempts: 1 });
+      reconnectFn.mockRejectedValueOnce(new Error("offline"));
+      cm.start(reconnectFn);
+
+      cm.handleClose();
+      timers.advance(1000);
+      await flush();
+      expect(cm.state).toBe("disconnected");
+      expect(reconnectFn).toHaveBeenCalledTimes(1);
+
+      // Returning to the page resumes reconnection and recovers to connected.
+      reconnectFn.mockResolvedValueOnce(undefined);
+      visibility.hide();
+      visibility.show();
+      expect(cm.state).toBe("reconnecting");
+
+      timers.advance(1000);
+      await flush();
+      expect(cm.state).toBe("connected");
+      expect(reconnectFn).toHaveBeenCalledTimes(2);
+    });
+
+    it("does NOT reconnect on visibility restore after a non-retryable disconnect", () => {
+      const { cm, reconnectFn, timers, visibility } = setup();
+      cm.start(reconnectFn);
+
+      cm.handleClose(new WebSocketCloseError(4001, "Authentication required"));
+      expect(cm.state).toBe("disconnected");
+
+      visibility.hide();
+      visibility.show();
+      timers.advance(10000);
+
+      expect(cm.state).toBe("disconnected");
+      expect(reconnectFn).not.toHaveBeenCalled();
+    });
+
+    it("reconnects when browser online event fires after max attempts exhausted", async () => {
+      const { cm, reconnectFn, timers } = setup({ maxAttempts: 1 });
+      reconnectFn.mockRejectedValueOnce(new Error("offline"));
+      cm.start(reconnectFn);
+
+      cm.handleClose();
+      timers.advance(1000);
+      await flush();
+      expect(cm.state).toBe("disconnected");
+
+      reconnectFn.mockResolvedValueOnce(undefined);
+      window.dispatchEvent(new Event("online"));
+      expect(cm.state).toBe("reconnecting");
+
+      timers.advance(1000);
+      await flush();
+      expect(cm.state).toBe("connected");
+      expect(reconnectFn).toHaveBeenCalledTimes(2);
+    });
   });
 
   describe("visibility ping/pong", () => {

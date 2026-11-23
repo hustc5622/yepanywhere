@@ -127,6 +127,12 @@ export function useProjectedSessionMessages(
   const queuedPatches = useRef<unknown[]>([]);
   /** Skips the deferred initial HTTP read once WS has delivered the view. */
   const skipDeferredView = useRef<(() => void) | null>(null);
+  /**
+   * Generation that has received a fresh WS snapshot or `display-current`
+   * confirmation. Distinguishes a live WS view from a stale client cache hit
+   * so HTTP fallback can still install a newer server epoch.
+   */
+  const liveViewGeneration = useRef(-1);
 
   const install = useCallback(
     (next: SessionDisplaySnapshot) => {
@@ -330,6 +336,7 @@ export function useProjectedSessionMessages(
         else {
           install(parsed.data);
           if (snapshotRef.current === parsed.data) {
+            liveViewGeneration.current = generation.current;
             skipDeferredView.current?.();
             sessionLoadTracer.fresh(keyRef.current, "ws");
           }
@@ -356,6 +363,7 @@ export function useProjectedSessionMessages(
           held.seq >= current.seq
         ) {
           // The held (cached) projection is the server's current one.
+          liveViewGeneration.current = generation.current;
           setLoading(false);
           skipDeferredView.current?.();
           sessionLoadTracer.fresh(keyRef.current, "ws-current");
@@ -448,7 +456,8 @@ export function useProjectedSessionMessages(
             },
           });
         } catch (error) {
-          if (cancelled || snapshotRef.current) return;
+          if (cancelled || liveViewGeneration.current === currentGeneration)
+            return;
           const { status, code } = error as { status?: number; code?: string };
           if (
             status !== 409 ||
@@ -462,7 +471,7 @@ export function useProjectedSessionMessages(
           await new Promise((resolve) =>
             setTimeout(resolve, 150 * (attempt + 1)),
           );
-          if (snapshotRef.current) return;
+          if (liveViewGeneration.current === currentGeneration) return;
         }
       }
     };
@@ -476,11 +485,17 @@ export function useProjectedSessionMessages(
       void loadSnapshot()
         .then((next) => {
           if (!cancelled) sessionLoadTracer.view(key, lastViewResponse);
+          // Only protect a fresh WS view from being replaced by a slower HTTP
+          // read of a different epoch. A stale client cache hit from an earlier
+          // visit must always yield to a fresh server epoch.
+          const hasFreshLiveView =
+            liveViewGeneration.current === currentGeneration;
           if (
             next &&
             !cancelled &&
             currentGeneration === generation.current &&
-            (!snapshotRef.current ||
+            (!hasFreshLiveView ||
+              !snapshotRef.current ||
               snapshotRef.current.view.epoch === next.view.epoch)
           ) {
             install(parseDisplaySnapshot(next, "http view"));

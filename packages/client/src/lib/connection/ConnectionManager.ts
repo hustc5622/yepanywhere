@@ -118,9 +118,11 @@ export class ConnectionManager {
   private _hasReceivedHeartbeat = false;
   private _staleCheckIntervalId: number | null = null;
 
-  // Visibility ping/pong
+  // Visibility & network recovery
   private _hiddenSince: number | null = null;
   private _removeVisibilityListener: (() => void) | null = null;
+  private _removeOnlineListener: (() => void) | null = null;
+  private _nonRetryableDisconnect = false;
   private _pendingPingId: string | null = null;
   private _pongTimeoutId: number | null = null;
   private _pingCounter = 0;
@@ -193,9 +195,11 @@ export class ConnectionManager {
     this._label = options?.label ?? null;
     if (this._started) return;
     this._started = true;
+    this._nonRetryableDisconnect = false;
     this._setState("connected");
     this._startStaleCheck();
     this._startVisibilityListener();
+    this._startOnlineListener();
   }
 
   /**
@@ -208,11 +212,13 @@ export class ConnectionManager {
     this._label = null;
     this._stopStaleCheck();
     this._stopVisibilityListener();
+    this._stopOnlineListener();
     this._cancelBackoff();
     this._cancelPongTimeout();
     this._reconnectPromise = null;
     this._hasReceivedHeartbeat = false;
     this._hiddenSince = null;
+    this._nonRetryableDisconnect = false;
     this._setState("disconnected");
   }
 
@@ -238,6 +244,7 @@ export class ConnectionManager {
   markConnected(): void {
     this._reconnectAttempts = 0;
     this._reconnectPromise = null;
+    this._nonRetryableDisconnect = false;
     this._cancelBackoff();
     this._setState("connected");
   }
@@ -262,6 +269,7 @@ export class ConnectionManager {
     this._log(`error: ${error.message}, retryable=${retryable}`);
     if (this._state === "reconnecting") return; // already reconnecting
     if (!retryable) {
+      this._nonRetryableDisconnect = true;
       this._setState("disconnected", `error: ${error.message}`);
       this._emitReconnectFailed(error);
       return;
@@ -279,6 +287,7 @@ export class ConnectionManager {
     this._log(`close: ${detail}, retryable=${retryable}`);
     if (this._state === "reconnecting") return; // already reconnecting
     if (error && !retryable) {
+      this._nonRetryableDisconnect = true;
       this._setState("disconnected", `close: ${detail}`);
       this._emitReconnectFailed(error);
       return;
@@ -293,6 +302,7 @@ export class ConnectionManager {
   forceReconnect(reason?: string): void {
     this._log(`force reconnect${reason ? `: ${reason}` : ""}`);
     this._reconnectAttempts = 0;
+    this._nonRetryableDisconnect = false;
     this._cancelBackoff();
     this._reconnectPromise = null;
     this._startReconnecting(reason ?? "force");
@@ -405,6 +415,7 @@ export class ConnectionManager {
         const err = error instanceof Error ? error : new Error(String(error));
         this._log(`reconnect failed: ${err.message}`);
         if (isNonRetryableError(err)) {
+          this._nonRetryableDisconnect = true;
           this._setState("disconnected");
           this._emitReconnectFailed(err);
           return;
@@ -475,12 +486,60 @@ export class ConnectionManager {
     }
   }
 
+  private _startOnlineListener(): void {
+    this._stopOnlineListener();
+    if (
+      typeof window === "undefined" ||
+      typeof window.addEventListener !== "function"
+    ) {
+      return;
+    }
+    const handler = () => {
+      this._handleOnline();
+    };
+    window.addEventListener("online", handler);
+    this._removeOnlineListener = () =>
+      window.removeEventListener("online", handler);
+  }
+
+  private _stopOnlineListener(): void {
+    if (this._removeOnlineListener) {
+      this._removeOnlineListener();
+      this._removeOnlineListener = null;
+    }
+  }
+
+  private _handleOnline(): void {
+    if (!this._started || this._nonRetryableDisconnect) return;
+    if (
+      this._state === "disconnected" ||
+      (this._state === "reconnecting" && !this._reconnectPromise)
+    ) {
+      this.forceReconnect("network-online");
+    }
+  }
+
   private _handleBecameVisible(): void {
-    if (this._state !== "connected") return;
+    if (!this._started) return;
 
     const hiddenDuration =
       this._hiddenSince !== null ? this.timers.now() - this._hiddenSince : null;
     this._hiddenSince = null;
+
+    // After a long background/sleep period, reconnect attempts may have been
+    // exhausted. Resume reconnecting when the user returns to the page (unless
+    // the server rejected us with a non-retryable auth/origin error).
+    if (this._state === "disconnected") {
+      if (!this._nonRetryableDisconnect) {
+        this._log(
+          `visible${hiddenDuration != null ? ` after ${hiddenDuration}ms hidden` : ""} while disconnected, reconnecting`,
+        );
+        this.forceReconnect("visibility-restored");
+      }
+      return;
+    }
+
+    if (this._state !== "connected") return;
 
     // Notify consumers immediately so they can refresh data in parallel
     // with the ping/pong health check below.
