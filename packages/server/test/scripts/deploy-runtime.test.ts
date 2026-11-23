@@ -1,5 +1,6 @@
 import { spawnSync } from "node:child_process";
 import {
+  existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -503,6 +504,188 @@ verify_deploy_runtime http://unused/yep external
       expect(result.status === 0).toBe(actual === "external");
       if (actual !== "external")
         expect(result.stderr).toContain("runtime mode mismatch");
+    },
+  );
+
+  const activitySource = () => {
+    const source = readFileSync(
+      join(root, "scripts/redeploy-server.sh"),
+      "utf8",
+    );
+    return source.slice(
+      source.indexOf("server_activity_state() {"),
+      source.indexOf("\nwait_port_released()"),
+    );
+  };
+
+  const externalRuntime = {
+    YEP_RUNTIME_MODE: "external",
+    YEP_RUNTIME_PORT: "9025",
+    YEP_RUNTIME_CONTROL_URL: "http://127.0.0.1:9025",
+  };
+
+  // Password login answers the web probe with 401. The control-port fallback
+  // must keep the bearer token out of curl's argv.
+  const authProbeCurl = `
+curl() {
+  local joined="$*"
+  printf '%s\\n' "$joined" >> "$TEST_LOG.curl"
+  if [[ "$joined" == *"/api/status/workers"* && "$joined" == *"-w "* ]]; then
+    printf '%s' "\${TEST_HTTP_CODE:-401}"
+    return 0
+  fi
+  if [[ "$joined" == *"/api/status/workers"* ]]; then
+    return 22
+  fi
+  if [[ "$joined" == *":9025/workers"* ]]; then
+    local arg config_next=0
+    for arg in "$@"; do
+      if [[ "$config_next" == 1 ]]; then
+        cp "$arg" "$TEST_LOG.config"
+        config_next=0
+      elif [[ "$arg" == "--config" ]]; then
+        config_next=1
+      fi
+    done
+    if [[ "\${TEST_WORKERS_STATUS:-0}" != 0 ]]; then
+      return "\${TEST_WORKERS_STATUS}"
+    fi
+    printf '%s' "\${TEST_WORKERS_BODY}"
+    return 0
+  fi
+  printf '%s\\n' "unexpected curl: $joined" >&2
+  return 28
+}
+prepare_runtime_token() {
+  export HOME="$(dirname "$TEST_LOG")/home"
+  mkdir -p "$HOME/.yep-anywhere/runtime"
+  printf '%s\\n' 'secret-token' > "$HOME/.yep-anywhere/runtime/token"
+  unset YEP_RUNTIME_TOKEN_FILE || true
+  unset YEP_ANYWHERE_DATA_DIR || true
+  unset YEP_ANYWHERE_PROFILE || true
+}
+`;
+
+  it.each([
+    ['{"hasActiveWork":true,"queueLength":0,"activeWorkers":5}', "idle"],
+    ['{"hasActiveWork":false,"queueLength":1,"activeWorkers":5}', "idle"],
+    ['{"hasActiveWork":false,"queueLength":0}', "idle"],
+    ["not-json", "unknown"],
+  ])(
+    "reads external worker activity through the runtime token after 401: %s",
+    (workers, state) => {
+      const result = run(
+        `
+${authProbeCurl}
+${activitySource()}
+prepare_runtime_token
+SERVER_PORT=8022
+SERVER_BASE_URL=http://unused/yep
+SERVER_LAUNCHD_PLIST="$TEST_PLIST"
+lsof() { return 0; }
+export TEST_WORKERS_BODY='${workers}'
+server_activity_state
+`,
+        externalRuntime,
+      );
+      expect(result.status, result.stderr).toBe(0);
+      expect(result.stdout).toBe(state);
+      if (state === "idle") {
+        const curlLog = readFileSync(
+          join(result.dir, "fallback.log.curl"),
+          "utf8",
+        );
+        expect(curlLog).not.toContain("secret-token");
+        const configLine = curlLog
+          .split("\n")
+          .find((line) => line.includes("--config"));
+        expect(configLine).toBeTruthy();
+        const configPath = configLine?.split("--config ")[1]?.split(" ")[0];
+        expect(configPath && existsSync(configPath)).toBe(false);
+        expect(
+          readFileSync(join(result.dir, "fallback.log.config"), "utf8"),
+        ).toContain("Authorization: Bearer secret-token");
+      }
+    },
+  );
+
+  it("verifies external mode from the control port when the web probe is 401", () => {
+    const result = run(
+      `
+${authProbeCurl}
+prepare_runtime_token
+SERVER_PORT=8022
+SERVER_BASE_URL=http://unused/yep
+SERVER_LAUNCHD_PLIST="$TEST_PLIST"
+export TEST_WORKERS_BODY='{"hasActiveWork":true,"queueLength":2}'
+verify_deploy_runtime "$SERVER_BASE_URL" external
+printf '%s\\n' verified
+`,
+      externalRuntime,
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(result.stdout.trim()).toBe("verified");
+    expect(
+      readFileSync(join(result.dir, "fallback.log.curl"), "utf8"),
+    ).not.toContain("secret-token");
+  });
+
+  it.each([
+    {
+      name: "embedded runtime",
+      config: { YEP_RUNTIME_MODE: "embedded" },
+      httpCode: "401",
+      workersStatus: "0",
+      message: "inside the web server",
+    },
+    {
+      name: "external control port down",
+      config: externalRuntime,
+      httpCode: "401",
+      workersStatus: "22",
+      message: "external runtime control probe",
+    },
+    {
+      name: "non-auth HTTP failure",
+      config: externalRuntime,
+      httpCode: "500",
+      workersStatus: "0",
+      message: "could not be verified after 10 attempts",
+    },
+  ])(
+    "refuses to cut over when the 401 fallback cannot prove it is safe ($name)",
+    ({ config, httpCode, workersStatus, message }) => {
+      const result = run(
+        `
+${authProbeCurl}
+${activitySource()}
+prepare_runtime_token
+SERVER_PORT=8022
+SERVER_BASE_URL=http://unused/yep
+SERVER_LAUNCHD_PLIST="$TEST_PLIST"
+ALLOW_YEP_SESSION_INTERRUPT=false
+export TEST_HTTP_CODE='${httpCode}'
+export TEST_WORKERS_STATUS='${workersStatus}'
+export TEST_WORKERS_BODY='{"hasActiveWork":false,"queueLength":0}'
+warn() { echo "$*" >&2; }
+err() { echo "$*" >&2; }
+log() { :; }
+dim() { :; }
+sleep() { :; }
+lsof() { return 0; }
+wait_for_yep_sessions_before_cutover
+`,
+        config,
+      );
+      expect(result.status, result.stderr).not.toBe(0);
+      expect(result.stderr).toContain("Refusing to stop an unverified service");
+      expect(result.stderr).toContain(message);
+      if (httpCode !== "401") {
+        expect(result.stderr).not.toContain("Password login is enabled");
+        expect(
+          readFileSync(join(result.dir, "fallback.log.curl"), "utf8"),
+        ).not.toContain("--config");
+      }
     },
   );
 });

@@ -59,7 +59,7 @@ function readJson(filePath) {
   return JSON.parse(fs.readFileSync(absolutePath, "utf-8"));
 }
 
-async function fetchJson(url) {
+async function fetchText(url) {
   const controller = new AbortController();
   const timeout = setTimeout(() => controller.abort(), 10000);
   try {
@@ -67,12 +67,22 @@ async function fetchJson(url) {
       headers: { Accept: "application/json" },
       signal: controller.signal,
     });
-    if (!response.ok) {
-      throw new Error(`${response.status} ${response.statusText}`);
-    }
-    return await response.json();
+    const text = await response.text();
+    return {
+      status: response.status,
+      statusText: response.statusText,
+      text,
+    };
   } finally {
     clearTimeout(timeout);
+  }
+}
+
+function parseJson(text, label) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`${label} did not return JSON`);
   }
 }
 
@@ -80,6 +90,14 @@ function assertEqual(label, actual, expected) {
   if (actual !== expected) {
     throw new Error(`${label} mismatch: expected ${expected}, got ${actual}`);
   }
+}
+
+function assertBuild(label, actual, expected) {
+  if (!actual?.buildId) {
+    throw new Error(`${label} did not include buildId`);
+  }
+  assertEqual(`${label} buildId`, actual.buildId, expected.buildId);
+  assertEqual(`${label} gitCommit`, actual.gitCommit, expected.gitCommit);
 }
 
 async function main() {
@@ -90,9 +108,43 @@ async function main() {
   }
 
   const cacheBust = `deployVerify=${Date.now()}`;
-  const serverVersion = await fetchJson(
+  const versionResponse = await fetchText(
     `${args.baseUrl}/api/version?fresh=1&${cacheBust}`,
   );
+
+  const reportOk = () => {
+    console.log(
+      `[verify-deploy] OK buildId=${expected.buildId} version=${expected.version} baseUrl=${args.baseUrl}`,
+    );
+  };
+
+  // Password login hides /api/version. The static build file is served by the
+  // same process from its bundle, and it is not behind that login.
+  if (versionResponse.status === 401) {
+    const servedResponse = await fetchText(
+      `${args.baseUrl}/build-info.json?${cacheBust}`,
+    );
+    if (servedResponse.status !== 200) {
+      throw new Error(
+        `/build-info.json returned ${servedResponse.status} ${servedResponse.statusText}`,
+      );
+    }
+    const servedBuild = parseJson(
+      servedResponse.text,
+      "Served /build-info.json",
+    );
+    assertBuild("served build", servedBuild, expected);
+    reportOk();
+    console.log(
+      "[verify-deploy] /api/version requires authentication; verified the build served at /build-info.json",
+    );
+    return;
+  }
+
+  if (versionResponse.status !== 200) {
+    throw new Error(`${versionResponse.status} ${versionResponse.statusText}`);
+  }
+  const serverVersion = parseJson(versionResponse.text, "Server /api/version");
   const serverBuild = serverVersion?.build;
   if (!serverBuild?.buildId) {
     throw new Error(
@@ -103,9 +155,15 @@ async function main() {
   assertEqual("server buildId", serverBuild.buildId, expected.buildId);
   assertEqual("server gitCommit", serverBuild.gitCommit, expected.gitCommit);
 
-  const clientBuild = await fetchJson(
+  const clientResponse = await fetchText(
     `${args.baseUrl}/build-info.json?${cacheBust}`,
   );
+  if (clientResponse.status !== 200) {
+    throw new Error(
+      `/build-info.json returned ${clientResponse.status} ${clientResponse.statusText}`,
+    );
+  }
+  const clientBuild = parseJson(clientResponse.text, "Client /build-info.json");
   if (!clientBuild?.buildId) {
     throw new Error(
       "Client /build-info.json did not include buildId. The served frontend is probably an old bundle.",
@@ -115,9 +173,7 @@ async function main() {
   assertEqual("client buildId", clientBuild.buildId, expected.buildId);
   assertEqual("client gitCommit", clientBuild.gitCommit, expected.gitCommit);
 
-  console.log(
-    `[verify-deploy] OK buildId=${expected.buildId} version=${expected.version} baseUrl=${args.baseUrl}`,
-  );
+  reportOk();
   console.log(
     `[verify-deploy] server source=${serverBuild.source ?? "unknown"} entrypoint=${serverBuild.entrypoint ?? "unknown"}`,
   );

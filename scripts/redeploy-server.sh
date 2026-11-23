@@ -147,18 +147,34 @@ pid_sets_overlap() {
 }
 
 server_activity_state() {
-  local response
+  local response curl_status=0
 
   if ! lsof -iTCP:"${SERVER_PORT}" -sTCP:LISTEN -t >/dev/null 2>&1; then
-    printf '%s' "stopped"
+    DEPLOY_ACTIVITY_STATE="stopped"
+    printf '%s' "$DEPLOY_ACTIVITY_STATE"
     return 0
   fi
-  if ! response="$(curl -fsS --max-time 3 "${SERVER_BASE_URL}/api/status/workers")"; then
-    printf '%s' "unknown"
-    return 0
+  # curl -f exits 22 on HTTP 401. Password login uses that status for the
+  # unauthenticated probe; a transport failure must stay "unknown".
+  response="$(curl -fsS --max-time 3 "${SERVER_BASE_URL}/api/status/workers" 2>/dev/null)" || curl_status=$?
+  if (( curl_status != 0 )); then
+    response=""
+    if (( curl_status == 22 )); then
+      deploy_worker_status_behind_auth "${SERVER_BASE_URL}" || true
+      response="${DEPLOY_WORKER_STATUS_JSON:-}"
+    else
+      DEPLOY_WORKER_PROBE_FAILURE=""
+    fi
+    if [[ -z "$response" ]]; then
+      DEPLOY_ACTIVITY_STATE="unknown"
+      printf '%s' "$DEPLOY_ACTIVITY_STATE"
+      return 0
+    fi
   fi
 
-  printf '%s' "$response" | node -e '
+  # Keep the state in the current shell. Callers that capture stdout run this
+  # function in a subshell, which would drop DEPLOY_WORKER_PROBE_FAILURE.
+  DEPLOY_ACTIVITY_STATE="$(printf '%s' "$response" | node -e '
 let raw = "";
 process.stdin.on("data", (chunk) => raw += chunk);
 process.stdin.on("end", () => {
@@ -177,11 +193,31 @@ process.stdin.on("end", () => {
     process.stdout.write("unknown");
   }
 });
-'
+')"
+  printf '%s' "$DEPLOY_ACTIVITY_STATE"
+}
+
+report_unverified_worker_probe() {
+  if [[ "${DEPLOY_WORKER_PROBE_FAILURE:-}" == "auth-embedded" ]]; then
+    err "Port ${SERVER_PORT} is listening, but ${SERVER_BASE_URL}/api/status/workers returned 401."
+    err "Password login is enabled, and this deployment runs the agent runtime inside the web server."
+    err "Worker activity is only available through that login. Refusing to stop an unverified service."
+    err "Use --allow-yep-session-interrupt to force the cutover."
+    return 0
+  fi
+  if [[ "${DEPLOY_WORKER_PROBE_FAILURE:-}" == "auth-external" || "${DEPLOY_WORKER_PROBE_FAILURE:-}" == "auth" ]]; then
+    err "Port ${SERVER_PORT} is listening, but ${SERVER_BASE_URL}/api/status/workers returned 401."
+    err "Password login is enabled. The external runtime control probe could not verify worker activity."
+    err "Refusing to stop an unverified service. Use --allow-yep-session-interrupt to force the cutover."
+    return 0
+  fi
+  err "Port ${SERVER_PORT} is listening, but ${SERVER_BASE_URL}/api/status/workers could not be verified after 10 attempts."
+  err "Refusing to stop an unverified service. Check the configured port/base path, or use --allow-yep-session-interrupt to force the cutover."
 }
 
 wait_for_yep_sessions_before_cutover() {
   local state announced=false elapsed=0 unknown_checks=0
+  DEPLOY_WORKER_PROBE_FAILURE=""
 
   if $ALLOW_YEP_SESSION_INTERRUPT; then
     warn "Active Yep-managed work may be interrupted because --allow-yep-session-interrupt was provided."
@@ -189,7 +225,9 @@ wait_for_yep_sessions_before_cutover() {
   fi
 
   while true; do
-    state="$(server_activity_state)"
+    # Run in this shell so a 401 fallback can record why the probe failed.
+    server_activity_state >/dev/null
+    state="${DEPLOY_ACTIVITY_STATE:-unknown}"
     case "$state" in
       stopped|idle)
         if $announced; then
@@ -217,8 +255,7 @@ wait_for_yep_sessions_before_cutover() {
           sleep 1
           continue
         fi
-        err "Port ${SERVER_PORT} is listening, but ${SERVER_BASE_URL}/api/status/workers could not be verified after 10 attempts."
-        err "Refusing to stop an unverified service. Check the configured port/base path, or use --allow-yep-session-interrupt to force the cutover."
+        report_unverified_worker_probe
         return 1
         ;;
     esac
@@ -234,6 +271,50 @@ wait_port_released() {
     sleep 0.25
   done
   return 1
+}
+
+# /api/version stays behind password login. Show it when it is readable, and
+# fall back to the static build metadata the same process serves.
+print_started_server_version() {
+  local body_file http_code line
+  body_file="$(mktemp)"
+  http_code="$(curl -sS --max-time 3 -o "$body_file" -w '%{http_code}' \
+    "${SERVER_BASE_URL}/api/version" 2>/dev/null || true)"
+  if [[ "$http_code" == "200" ]]; then
+    line="$(node -e '
+let raw = "";
+process.stdin.on("data", (chunk) => { raw += chunk; });
+process.stdin.on("end", () => {
+  try {
+    const data = JSON.parse(raw);
+    process.stdout.write(`current=${data.current} protocol=${data.resumeProtocolVersion} buildId=${data.build?.buildId ?? "missing"}`);
+  } catch {
+    process.stdout.write("unparseable");
+  }
+});
+' <"$body_file" || true)"
+    rm -f "$body_file"
+    dim "${SERVER_BASE_URL}/api/version → ${line}"
+    return 0
+  fi
+  rm -f "$body_file"
+  if [[ "$http_code" != "401" ]]; then
+    dim "${SERVER_BASE_URL}/api/version → unavailable (HTTP ${http_code:-none})"
+    return 0
+  fi
+  line="$(curl -fsS --max-time 3 "${SERVER_BASE_URL}/build-info.json" 2>/dev/null | node -e '
+let raw = "";
+process.stdin.on("data", (chunk) => { raw += chunk; });
+process.stdin.on("end", () => {
+  try {
+    const data = JSON.parse(raw);
+    process.stdout.write(`version=${data.version ?? "missing"} buildId=${data.buildId ?? "missing"}`);
+  } catch {
+    process.stdout.write("unparseable");
+  }
+});
+' || true)"
+  dim "${SERVER_BASE_URL}/build-info.json → ${line}"
 }
 
 server_process_pids() {
@@ -833,13 +914,13 @@ if $DO_RESTART; then
 
   # Health-check loop. Tries up to 15s; the server usually answers within 2s
   # but Tauri activity / large data dirs can stretch first-boot.
-  # /yep/api/version is a small JSON endpoint that exists on every server build —
-  # /api/health doesn't (unmatched routes fall through to the SPA shell).
-  # The /yep prefix matches the BASE_PATH set above.
-  log "Waiting for ${SERVER_BASE_URL}/api/version ..."
+  # /health is outside the password wall. /api/version is not: with login
+  # enabled it returns 401, and treating that as "not up" would stop a healthy
+  # LaunchAgent and start a second server. The /yep prefix matches BASE_PATH.
+  log "Waiting for ${SERVER_BASE_URL}/health ..."
   HEALTH_OK=false
   for _ in $(seq 1 60); do
-    if curl -fsS "${SERVER_BASE_URL}/api/version" >/dev/null 2>&1; then
+    if curl -fsS "${SERVER_BASE_URL}/health" >/dev/null 2>&1; then
       HEALTH_OK=true
       break
     fi
@@ -857,7 +938,7 @@ if $DO_RESTART; then
     start_server_fallback
 
     for _ in $(seq 1 60); do
-      if curl -fsS "${SERVER_BASE_URL}/api/version" >/dev/null 2>&1; then
+      if curl -fsS "${SERVER_BASE_URL}/health" >/dev/null 2>&1; then
         HEALTH_OK=true
         break
       fi
@@ -871,9 +952,7 @@ if $DO_RESTART; then
     # as a successful deploy, or attempt another restart to hide the mismatch.
     verify_deploy_runtime "$SERVER_BASE_URL" "$DEPLOY_RUNTIME_MODE"
     log "Server is up."
-    # Show what the freshly started server reports.
-    SERVER_VERSION_LINE="$(curl -fsS "${SERVER_BASE_URL}/api/version" 2>/dev/null | node -e 'let raw=""; process.stdin.on("data", c => raw += c); process.stdin.on("end", () => { const d=JSON.parse(raw); console.log(`current=${d.current} protocol=${d.resumeProtocolVersion} buildId=${d.build?.buildId ?? "missing"}`); })' 2>/dev/null || true)"
-    dim "${SERVER_BASE_URL}/api/version → ${SERVER_VERSION_LINE}"
+    print_started_server_version
 
     LISTEN_PID="$(lsof -iTCP:"${SERVER_PORT}" -sTCP:LISTEN -t 2>/dev/null | head -1 || true)"
     if [[ -n "$LISTEN_PID" ]]; then
@@ -889,7 +968,7 @@ if $DO_RESTART; then
     # Relay (4400) was retired in favor of self-hosted frp tcp tunnels.
     # Skipping relay status check — see INFRA.md.
   else
-    err "Server didn't answer ${SERVER_BASE_URL}/api/version within 15s."
+    err "Server didn't answer ${SERVER_BASE_URL}/health within 15s."
     if launchd_label_loaded "$SERVER_LAUNCHD_LABEL"; then
       tail_server_launchagent_logs
     else
