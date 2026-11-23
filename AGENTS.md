@@ -20,6 +20,7 @@
 - 如果验证必须依赖浏览器自动化或重启/停止服务，先说明原因并等待确认。优先采用不干扰现有状态的检查方式。
 - 使用 `imagegen` 生成图片时，最终交付文件默认放到 `~/Downloads/`。如果项目代码需要引用该资产，可以额外复制一份到仓库内。
 - 工作树经常是 dirty 状态。只编辑当前任务需要的文件，不要回滚无关改动。
+- 排查时读取 provider 拥有的 SQLite 数据（如 `~/.cursor/acp-sessions/*/store.db`、`~/.minimax`、`~/.gemini/antigravity-cli`）必须只读打开：`sqlite3 -readonly <db>` 或 `sqlite3 'file:<db>?mode=ro'`，Node 侧用 `{ readOnly: true }`。普通 `sqlite3 <db>` 即使只执行 `select`，关闭时也会做 WAL checkpoint 改写 `store.db`/`-wal` 的 mtime；Yep 用这些 mtime 作为会话 `updatedAt`，会让大量旧会话突然排到列表顶部。也不要对这些文件 `touch`、`cp -p` 回写或批量遍历写入。
 
 ## 项目上下文
 
