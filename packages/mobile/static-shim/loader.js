@@ -19,7 +19,9 @@
   // provider in front of it. This Mac mini has moved providers several times
   // (43.226.60.75 -> 39.106.200.1 -> 39.106.189.88), so retired public
   // endpoints go into DEPRECATED_DEFAULT_TCP_ORIGINS instead of lingering as
-  // separate, permanently unreachable nodes.
+  // separate, permanently unreachable nodes. When a non-default node moves
+  // (home: 47.95.254.240 -> 39.104.66.49), RELOCATED_TCP_ORIGINS carries saved
+  // values to the same machine's new endpoint instead of the default node.
   var TCP_NODES = [
     {
       alias: "mini",
@@ -28,8 +30,8 @@
     },
     {
       alias: "home",
-      label: "47.95.254.240:5750",
-      origin: "http://47.95.254.240:5750"
+      label: "39.104.66.49:5750",
+      origin: "http://39.104.66.49:5750"
     }
   ];
   var DEFAULT_TCP_ORIGIN = TCP_NODES[0].origin;
@@ -47,6 +49,9 @@
     "http://43.226.60.75:46789",
     "http://39.106.200.1:18022"
   ];
+  var RELOCATED_TCP_ORIGINS = {
+    "http://47.95.254.240:5750": "http://39.104.66.49:5750"
+  };
   var NODE_HISTORY_LIMIT = 8;
   var TARGET_CHANGE_PATH = "/yep/projects";
   var APP_READY_TIMEOUT_MS = 12000;
@@ -386,7 +391,7 @@
   }
 
   function targetFromNodeInput(value) {
-    var node = normalizeNodeInput(value);
+    var node = relocateNode(normalizeNodeInput(value));
     if (!node) return null;
 
     var displayLabel = getNodeDisplayLabel(node);
@@ -400,12 +405,27 @@
     };
   }
 
+  function relocateNode(node) {
+    if (!node) return node;
+    var relocated = Object.prototype.hasOwnProperty.call(
+      RELOCATED_TCP_ORIGINS,
+      node.origin
+    )
+      ? RELOCATED_TCP_ORIGINS[node.origin]
+      : null;
+    return relocated ? normalizeNodeInput(relocated) : node;
+  }
+
   function getStoredActiveNode() {
     var value = readStorage(ACTIVE_NODE_STORAGE_KEY);
-    var node = value ? normalizeNodeInput(value) : null;
-    if (node && isDeprecatedDefaultNode(node.origin)) {
+    var stored = value ? normalizeNodeInput(value) : null;
+    if (stored && isDeprecatedDefaultNode(stored.origin)) {
       removeStorage(ACTIVE_NODE_STORAGE_KEY);
       return null;
+    }
+    var node = relocateNode(stored);
+    if (node && stored && node.origin !== stored.origin) {
+      writeStorage(ACTIVE_NODE_STORAGE_KEY, node.origin);
     }
     return node;
   }
@@ -421,7 +441,7 @@
     var seen = {};
 
     for (var index = 0; index < nodes.length; index += 1) {
-      var node = normalizeNodeInput(nodes[index]);
+      var node = relocateNode(normalizeNodeInput(nodes[index]));
       if (node && isDeprecatedDefaultNode(node.origin)) continue;
       if (!node || seen[node.origin]) continue;
       seen[node.origin] = true;

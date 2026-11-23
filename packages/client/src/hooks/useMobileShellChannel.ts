@@ -13,7 +13,8 @@ export type MobileShellNode = {
  * Aliases name the machine behind the tunnel, not the frps provider in front
  * of it: the `mini` endpoint has moved providers several times, and the retired
  * origins are listed in the shell loader's DEPRECATED_DEFAULT_TCP_ORIGINS so
- * stored values migrate to the current default.
+ * stored values migrate to the current default. A moved non-default node
+ * (`home`) is listed in RELOCATED_TCP_ORIGINS and follows the same machine.
  */
 export const MOBILE_SHELL_NODES: MobileShellNode[] = [
   {
@@ -23,8 +24,8 @@ export const MOBILE_SHELL_NODES: MobileShellNode[] = [
   },
   {
     alias: "home",
-    label: "47.95.254.240:5750",
-    origin: "http://47.95.254.240:5750",
+    label: "39.104.66.49:5750",
+    origin: "http://39.104.66.49:5750",
   },
 ];
 

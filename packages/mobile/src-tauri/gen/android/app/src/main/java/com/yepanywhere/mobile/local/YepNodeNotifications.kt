@@ -108,7 +108,7 @@ class YepNodeNotifications {
   companion object {
     // Fixed allowlist; iframe messages cannot choose arbitrary network targets.
     private val NODES = linkedMapOf(
-      "home" to "http://47.95.254.240:5750",
+      "home" to "http://39.104.66.49:5750",
       "mini" to "http://39.106.189.88:18022",
     )
   }

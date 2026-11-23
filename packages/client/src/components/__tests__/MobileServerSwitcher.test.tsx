@@ -15,7 +15,7 @@ vi.mock("../../hooks/useMobileShellChannel", async (importOriginal) => ({
   >()),
   useMobileShellChannel: () => ({
     isMobileShell: mocks.mobile,
-    nodeOrigin: "http://47.95.254.240:5750",
+    nodeOrigin: "http://39.104.66.49:5750",
     setNode: mocks.setNode,
   }),
 }));

@@ -116,7 +116,7 @@ describe("APK mobile shell recovery", () => {
     Object.defineProperty(dom.window, "YepNativePush", {
       value: { getNodeNotifications },
     });
-    clickSavedNode(dom, "http://47.95.254.240:5750");
+    clickSavedNode(dom, "http://39.104.66.49:5750");
     const postMessage = vi.spyOn(frame.contentWindow as Window, "postMessage");
     postClientMessage(dom, frame, {
       type: "yep-anywhere:native-push-request",
@@ -144,7 +144,7 @@ describe("APK mobile shell recovery", () => {
       }),
       "*",
     );
-    expect(frame.src).toContain("47.95.254.240:5750");
+    expect(frame.src).toContain("39.104.66.49:5750");
   });
 
   it("migrates the retired persisted endpoint to the current default", () => {
@@ -166,6 +166,25 @@ describe("APK mobile shell recovery", () => {
     expect(dom.window.document.body.classList.contains("is-loaded")).toBe(
       false,
     );
+  });
+
+  it("follows the relocated home endpoint instead of the default", () => {
+    const { dom, frame } = mountShell({
+      storedChannel: "tcp",
+      storedNode: "http://47.95.254.240:5750",
+    });
+
+    expect(frame.src).toBe("http://39.104.66.49:5750/yep/?yep-mobile-shell=1");
+    expect(
+      dom.window.localStorage.getItem("yep-anywhere-mobile-active-node"),
+    ).toBe("http://39.104.66.49:5750");
+    const savedNodes = Array.from(
+      dom.window.document.querySelectorAll<HTMLButtonElement>(
+        "[data-node-origin]",
+      ),
+    ).map((button) => button.dataset.nodeOrigin);
+    expect(savedNodes).toContain("http://39.104.66.49:5750");
+    expect(savedNodes).not.toContain("http://47.95.254.240:5750");
   });
 
   it("migrates the retired mini endpoint to the current default", () => {
@@ -354,10 +373,10 @@ describe("APK mobile shell recovery", () => {
     frame.src =
       "http://39.106.189.88:18022/yep/projects/old-project/sessions/old-session?branch=old-branch";
 
-    clickSavedNode(dom, "http://47.95.254.240:5750");
+    clickSavedNode(dom, "http://39.104.66.49:5750");
 
     expect(frame.src).toBe(
-      "http://47.95.254.240:5750/yep/projects?yep-mobile-shell=1",
+      "http://39.104.66.49:5750/yep/projects?yep-mobile-shell=1",
     );
   });
 
@@ -369,7 +388,7 @@ describe("APK mobile shell recovery", () => {
         data: {
           type: "yep-anywhere:mobile-shell-set-channel",
           channel: "tcp",
-          node: "http://47.95.254.240:5750",
+          node: "http://39.104.66.49:5750",
           path: "/yep/new-session?projectId=old-project",
         },
         source: frame.contentWindow,
@@ -377,7 +396,7 @@ describe("APK mobile shell recovery", () => {
     );
 
     expect(frame.src).toBe(
-      "http://47.95.254.240:5750/yep/projects?yep-mobile-shell=1",
+      "http://39.104.66.49:5750/yep/projects?yep-mobile-shell=1",
     );
   });
 
