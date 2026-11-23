@@ -8,6 +8,7 @@ import {
   writeClipboardText,
   writeClipboardUserInput,
 } from "../lib/clipboard";
+import { formatSmartTime } from "../lib/datetime";
 import { formatElapsed } from "../lib/formatElapsed";
 import { formatTokenCount } from "../lib/tokens";
 import type { TurnPhase } from "../lib/turnPhase";
@@ -69,7 +70,7 @@ export function MessageActions({
   placement = "row",
   onEdit,
 }: MessageActionsProps) {
-  const { t } = useI18n();
+  const { t, locale } = useI18n();
   const [copyFeedback, setCopyFeedback] = useState<CopyFeedback>(null);
   const actionsRef = useRef<HTMLSpanElement | null>(null);
 
@@ -185,7 +186,7 @@ export function MessageActions({
               : undefined
           }
         >
-          {formatShortTime(timestamp)}
+          {formatSmartTime(timestamp, locale)}
         </time>
       )}
       {durationLabel && (
@@ -345,15 +346,6 @@ function CopyPartialIcon() {
       <path d="M12 9v4M12 17h.01" />
     </svg>
   );
-}
-
-function formatShortTime(iso: string): string {
-  const date = new Date(iso);
-  if (Number.isNaN(date.getTime())) return "";
-  return date.toLocaleTimeString(undefined, {
-    hour: "2-digit",
-    minute: "2-digit",
-  });
 }
 
 function formatFullTimestamp(iso: string): string {
