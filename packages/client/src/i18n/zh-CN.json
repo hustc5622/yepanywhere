@@ -62,6 +62,8 @@
   "actionResizeDetailPanel": "调整详情面板宽度",
   "actionResizeDetailPanelHint": "拖动调整宽度，双击恢复默认比例",
   "actionShowMore": "再显示 {count} 条",
+  "sidebarProjectNeedsInput": "待处理",
+  "sidebarProjectNeedsInputTitle": "等你处理（{count}）：{names}",
   "sidebarNewSession": "新建会话",
   "sidebarInbox": "收件箱",
   "sidebarAllSessions": "全部会话",

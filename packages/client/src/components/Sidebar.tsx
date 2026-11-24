@@ -14,6 +14,13 @@ import { useI18n } from "../i18n";
 import { activityBus } from "../lib/activityBus";
 import { formatSmartTime } from "../lib/datetime";
 import { compareSessionsByPinAndUpdatedAt } from "../lib/sessionOrdering";
+import {
+  type SessionStatusRollup,
+  addToSessionStatusRollup,
+  countSessionsNeedingInput,
+  createSessionStatusRollup,
+  resolveSessionStatusBadge,
+} from "../lib/sessionStatusBadge";
 import { MobileServerSwitcher } from "./MobileServerSwitcher";
 import { ProjectGitStatusButton } from "./ProjectGitStatusButton";
 import { RemoteProjectIcon } from "./RemoteProjectIcon";
@@ -46,12 +53,35 @@ interface SessionProjectGroup {
   projectName: string;
   sessions: GlobalSessionItem[];
   latestUpdatedAt: string;
-  runningCount: number;
+  /** The group's session badges rolled up; same verdicts as the cards. */
+  status: SessionStatusRollup;
+  /** Titles of the sessions waiting on the user, for the row tooltip. */
+  needsInputTitles: (string | null)[];
   unreadCount: number;
 }
 
-function isRunningSession(session: GlobalSessionItem): boolean {
-  return session.activity === "in-turn";
+/** The badge the session card shows, from the same inputs it uses. */
+function getSessionBadgeState(session: GlobalSessionItem) {
+  return resolveSessionStatusBadge({
+    pendingInputType: session.pendingInputType,
+    activity: session.activity,
+    retryStatus: session.retryStatus,
+    lastTurnStatus: session.lastTurnStatus,
+    lastErrorMessage: session.lastErrorMessage,
+    interrupted: session.interrupted,
+    hasPendingBackgroundWork: session.runtime?.hasPendingBackgroundWork,
+  });
+}
+
+function addSessionToGroupStatus(
+  group: SessionProjectGroup,
+  session: GlobalSessionItem,
+): void {
+  const state = getSessionBadgeState(session);
+  addToSessionStatusRollup(group.status, state);
+  if (state?.kind === "approval" || state?.kind === "question") {
+    group.needsInputTitles.push(getSessionListTitle(session));
+  }
 }
 
 function canArchiveSession(session: GlobalSessionItem): boolean {
@@ -61,19 +91,26 @@ function canArchiveSession(session: GlobalSessionItem): boolean {
 /** Max number of busy session names to spell out before summarizing the rest. */
 const MAX_BUSY_NAMES = 3;
 
-/** Build a readable "A, B, C +N more" list of busy session titles for a toast. */
+/** Build a readable "A, B, C +N more" list of session titles for a toast. */
+function formatSessionNames(
+  titles: string[],
+  t: ReturnType<typeof useI18n>["t"],
+): string {
+  let label = titles.slice(0, MAX_BUSY_NAMES).join(", ");
+  if (titles.length > MAX_BUSY_NAMES) {
+    label += ` ${t("bulkArchiveMore", { count: titles.length - MAX_BUSY_NAMES })}`;
+  }
+  return label;
+}
+
 function formatBusyNames(
   busy: GlobalSessionItem[],
   t: ReturnType<typeof useI18n>["t"],
 ): string {
-  const names = busy
-    .slice(0, MAX_BUSY_NAMES)
-    .map((s) => getSessionListTitle(s) ?? t("sessionUntitled"));
-  let label = names.join(", ");
-  if (busy.length > MAX_BUSY_NAMES) {
-    label += ` ${t("bulkArchiveMore", { count: busy.length - MAX_BUSY_NAMES })}`;
-  }
-  return label;
+  return formatSessionNames(
+    busy.map((s) => getSessionListTitle(s) ?? t("sessionUntitled")),
+    t,
+  );
 }
 
 function groupSessionsByProject(
@@ -88,7 +125,7 @@ function groupSessionsByProject(
 
     if (group) {
       group.sessions.push(session);
-      if (isRunningSession(session)) group.runningCount += 1;
+      addSessionToGroupStatus(group, session);
       if (session.hasUnread) group.unreadCount += 1;
       if (
         new Date(session.updatedAt).getTime() >
@@ -99,15 +136,18 @@ function groupSessionsByProject(
       continue;
     }
 
-    groupsByProject.set(groupKey, {
+    const newGroup: SessionProjectGroup = {
       key: groupKey,
       projectId: session.projectId,
       projectName: session.projectName || session.projectId,
       sessions: [session],
       latestUpdatedAt: session.updatedAt,
-      runningCount: isRunningSession(session) ? 1 : 0,
+      status: createSessionStatusRollup(),
+      needsInputTitles: [],
       unreadCount: session.hasUnread ? 1 : 0,
-    });
+    };
+    addSessionToGroupStatus(newGroup, session);
+    groupsByProject.set(groupKey, newGroup);
   }
 
   const groups = Array.from(groupsByProject.values());
@@ -751,6 +791,26 @@ export function Sidebar({
         );
         const runningLabel = t("agentsRunning");
         const unreadLabel = t("globalSessionsStatusUnread");
+        const needsInputCount = countSessionsNeedingInput(group.status);
+        // Name the kind when every waiting session asks the same thing.
+        const needsInputLabel =
+          group.status.question === 0
+            ? t("statusBadgeApproval")
+            : group.status.approval === 0
+              ? t("statusBadgeQuestion")
+              : t("sidebarProjectNeedsInput");
+        const needsInputTitle =
+          needsInputCount > 0
+            ? t("sidebarProjectNeedsInputTitle", {
+                count: needsInputCount,
+                names: formatSessionNames(
+                  group.needsInputTitles.map(
+                    (title) => title ?? t("sessionUntitled"),
+                  ),
+                  t,
+                ),
+              })
+            : undefined;
         const project = projectsById.get(group.projectId);
         const gitStatus = project?.gitStatus;
 
@@ -781,14 +841,24 @@ export function Sidebar({
                     <RemoteProjectIcon
                       isRemoteProject={project?.isRemoteProject}
                     />
-                    {group.runningCount > 0 && (
+                    {needsInputCount > 0 && (
+                      <span
+                        className="sidebar-project-status sidebar-project-status--needs-input"
+                        title={needsInputTitle}
+                        aria-label={needsInputTitle}
+                      >
+                        <span>{needsInputLabel}</span>
+                        {needsInputCount > 1 && <span>{needsInputCount}</span>}
+                      </span>
+                    )}
+                    {group.status.running > 0 && (
                       <span
                         className="sidebar-project-status sidebar-project-status--running"
-                        title={`${group.runningCount} ${runningLabel}`}
-                        aria-label={`${group.runningCount} ${runningLabel}`}
+                        title={`${group.status.running} ${runningLabel}`}
+                        aria-label={`${group.status.running} ${runningLabel}`}
                       >
                         <ThinkingIndicator />
-                        <span>{group.runningCount}</span>
+                        <span>{group.status.running}</span>
                       </span>
                     )}
                     {group.unreadCount > 0 && (

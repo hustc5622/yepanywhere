@@ -408,6 +408,58 @@ describe("Sidebar recent session browsing", () => {
     );
   });
 
+  it("rolls waiting approvals and questions up to the collapsed project row", () => {
+    const { container, unmount } = renderSidebar([
+      createSession({
+        id: "approval",
+        title: "Approval Session",
+        activity: "waiting-input",
+        pendingInputType: "tool-approval",
+      }),
+      createSession({
+        id: "running",
+        title: "Running Session",
+        activity: "in-turn",
+      }),
+      createSession({ id: "idle", title: "Idle Session" }),
+    ]);
+
+    const needsInput = container.querySelector(
+      ".sidebar-project-status--needs-input",
+    );
+    expect(needsInput?.textContent).toBe("Approval");
+    expect(needsInput?.getAttribute("title")).toBe(
+      "Waiting for you (1): Approval Session",
+    );
+    // A waiting session is not double-counted as running.
+    expect(
+      container.querySelector(".sidebar-project-status--running")?.textContent,
+    ).toBe("1");
+    unmount();
+
+    const mixed = renderSidebar([
+      createSession({
+        id: "approval",
+        title: "Approval Session",
+        activity: "waiting-input",
+        pendingInputType: "tool-approval",
+      }),
+      createSession({
+        id: "question",
+        title: null,
+        activity: "waiting-input",
+        pendingInputType: "user-question",
+      }),
+    ]);
+    const mixedBadge = mixed.container.querySelector(
+      ".sidebar-project-status--needs-input",
+    );
+    expect(mixedBadge?.textContent).toBe("Needs you2");
+    expect(
+      mixed.container.querySelector(".sidebar-project-status--running"),
+    ).toBeNull();
+  });
+
   it("fetches remotes for visible git projects when refreshing recent sessions", async () => {
     const gitStatus = {
       isGitRepo: true,

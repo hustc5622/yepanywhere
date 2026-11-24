@@ -3404,9 +3404,25 @@ a.sidebar-nav-item {
   color: var(--thinking-color);
 }
 
-.sidebar-project-status--unread {
+/* Blocked on the user: the same blue as the card's needs-input badge, kept
+   for this state alone so it does not read as an ordinary count. */
+.sidebar-project-status--needs-input {
   background: var(--status-badge-input-bg);
   color: var(--status-badge-input-text);
+  white-space: nowrap;
+  animation: pulse-blue 2s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sidebar-project-status--needs-input {
+    animation: none;
+  }
+}
+
+/* Unread matches the green dot on unread session cards. */
+.sidebar-project-status--unread {
+  background: color-mix(in srgb, var(--app-yep-green) 16%, transparent);
+  color: var(--app-yep-green);
 }
 
 .sidebar-project-unread-dot {

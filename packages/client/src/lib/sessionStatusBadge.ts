@@ -77,3 +77,44 @@ export function resolveSessionStatusBadge({
   }
   return null;
 }
+
+/**
+ * A project's sessions rolled up from their resolved badges, so a collapsed
+ * project row reports the same states its session cards do. Counts are
+ * session counts; each session lands in exactly one bucket.
+ */
+export interface SessionStatusRollup {
+  /** Sessions blocked on a tool approval. */
+  approval: number;
+  /** Sessions blocked on a question. */
+  question: number;
+  /** Sessions in a turn, including ones retrying a failed request. */
+  running: number;
+}
+
+export function createSessionStatusRollup(): SessionStatusRollup {
+  return { approval: 0, question: 0, running: 0 };
+}
+
+export function addToSessionStatusRollup(
+  rollup: SessionStatusRollup,
+  state: SessionStatusBadgeState | null,
+): void {
+  switch (state?.kind) {
+    case "approval":
+      rollup.approval += 1;
+      return;
+    case "question":
+      rollup.question += 1;
+      return;
+    case "running":
+    case "retrying":
+      rollup.running += 1;
+      return;
+  }
+}
+
+/** Sessions that cannot make progress until the user acts. */
+export function countSessionsNeedingInput(rollup: SessionStatusRollup): number {
+  return rollup.approval + rollup.question;
+}

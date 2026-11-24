@@ -24,6 +24,25 @@
    `visibleLastTurnStatus`、`displayActivity`、`toolsMayBeActive`。
 3. **投影**：列表徽标（`client/src/lib/sessionStatusBadge.ts`）、详情页状态条
    （`SessionStreamPanes.tsx`）、输入框状态（`useSession.ts`）。
+   侧栏项目行用同一个 `resolveSessionStatusBadge()` 逐会话求值，再经
+   `addToSessionStatusRollup()` 汇总成「待审批／待回答／待处理」和运行中计数，
+   不另写判定，所以项目行与展开后的会话卡片不会不一致。
+
+## 待处理输入（审批／提问）的证据来源
+
+「等用户操作」的状态只有一个出口：`pendingInputType`（`tool-approval | user-question`）
+加 `activity: "waiting-input"`。各 harness 汇入的方式：
+
+| 来源 | 怎么进入统一状态 | 区分审批/提问 |
+| ---- | ---------------- | ------------- |
+| Yep 自有进程（Claude、Codex、Gemini ACP、agy、mcode、Cursor、Pi） | provider 把原生请求（Claude `canUseTool`、Codex app-server approval/`request_user_input`/MCP elicitation、ACP `session/request_permission` 与 `elicitation/create`、Cursor ask/plan、Pi 扩展 `confirm`）统一转成 `onToolApproval` → `Process` 待处理队列 → `waiting-input` + `InputRequest` | 是（`AskUserQuestion` 为提问，其余为审批） |
+| Codex remote bridge（`codex --remote`） | bridge `session-views` 自带 `pendingInputType` 与 `activity` | 是 |
+| dsh（只读） | 日志尾探测 `waitingInput` → 外部活跃 `waiting-input` | 否，列表按「待回答」展示 |
+| 终端里跑的 Claude 等外部会话 | 只有详情页会从历史重建未回答的 `AskUserQuestion`（`persisted-pending-input.ts`），列表拿不到 | — |
+| 其他外部 CLI 会话 | 进程／日志尾只能证明在跑，无法看到终端里的审批弹窗 | — |
+
+新增 provider 时，审批与提问一律走 `onToolApproval`，不要自建一套等待状态；
+外部会话能从日志尾判断等待输入的，在探针里返回 `waitingInput`。
 
 ## 优先级
 

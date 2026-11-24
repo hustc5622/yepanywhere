@@ -62,6 +62,8 @@
   "actionResizeDetailPanel": "Resize detail panel",
   "actionResizeDetailPanelHint": "Drag to resize; double-click to reset",
   "actionShowMore": "Show {count} more",
+  "sidebarProjectNeedsInput": "Needs you",
+  "sidebarProjectNeedsInputTitle": "Waiting for you ({count}): {names}",
   "sidebarNewSession": "New Session",
   "sidebarInbox": "Inbox",
   "sidebarAllSessions": "All Sessions",
