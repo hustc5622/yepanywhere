@@ -1,24 +1,27 @@
 # 从 Yep 更新 Harness CLI
 
-入口：**设置 → 提供商 → CLI 更新**。先检查更新，存在更高的目标版本时点击「更新 CLI」。页面提供当前版本、检查时间、安装路径、更新日志和失败重试。
+入口：**设置 → 提供商 → CLI 更新**。支持逐项检查/更新，也提供顶部的**「全部检查」**与**「一键更新全部」**（服务端串行队列执行）。页面提供当前版本、检查时间、安装路径（含包装脚本指向的底层真实路径）、更新日志和失败重试。
 
 目前支持当前 Yep 服务器上的：
 
 | Harness | 安装方式 |
 | --- | --- |
-| Codex CLI（含 Codex OSS 共用的 CLI） | `@openai/codex` 的 npm 全局安装、Homebrew cask |
+| Codex CLI（含 Codex OSS 共用的 CLI） | `@openai/codex` 的 npm 全局安装、Homebrew cask，以及受识别的 `codex-model-proxy.zsh`（`YEP_CODEX_REAL_PATH`）包装脚本 |
 | Pi Agent | `@earendil-works/pi-coding-agent` 的 npm 全局安装 |
+| Cursor CLI | `agent` / `cursor-agent` 内置自更新器（`agent update`） |
+| MiniMax Code | `@minimax/code` 的 npm 全局安装（含绑定同版本 Node 的包装脚本，固定使用 `https://npmmirror.xaminim.com/` 并保留原生依赖脚本）及官方安装器（`mcode update`） |
+| Antigravity CLI | `agy` 内置自更新器（`agy update`，自动复用 `YEP_AGY_PROXY` 分流代理） |
 | DeepSeek Harness | `@deepseek-ai/dsh` 的 npm 全局安装；更新前须停止使用该安装的 dsh Web |
 
-支持 macOS 和 Linux。远程 SSH 主机、桌面应用内置二进制、自定义包装脚本、其他包管理器以及其他 harness 暂不通过此入口更新。
+支持 macOS 和 Linux。远程 SSH 主机、桌面应用内置二进制、其他自定义包装脚本及其他包管理器暂不通过此入口更新。
 
 ## 执行与生效
 
-- 使用与 provider 相同的路径发现规则；npm 更新从真实安装目录定位 npm、Node.js 和 prefix，避免 NVM 与系统 npm 交叉安装。配置路径应指向受支持的全局安装；Homebrew 必须使用稳定的 `bin/codex` 入口。
-- Codex、Pi 查询稳定发行版本；dsh 跟随官方 npm `latest` 标签，该标签可能指向 RC。不降级到比本机更旧的版本。npm 安装固定为本次查询得到的版本，不提供任意包或命令入口。Pi 安装禁用依赖生命周期脚本。
-- 检查更新才访问包管理器，打开页面只读取本机版本；本机探测缓存 30 秒。更新前再次检测安装位置和版本，结束后复查原路径，避免将包管理器退出成功误报成 CLI 已更新。
-- 更新命令使用 Yep 服务账号执行，不提权。目录权限不足、网络错误等会在页面显示，用户可以重试。Codex、Pi 安装最多运行 10 分钟，dsh 最多 30 分钟；日志保留末尾 16,000 个字符。
-- 同一个 Yep 服务进程内一次只运行一个更新任务。任务与 HTTP 请求生命周期分离，手机断开、页面刷新或离开设置页不会取消更新；重新进入页面会读取当前任务。状态保存在服务进程内存中，**不跨 Yep 服务重启保存**。
+- 使用与 provider 相同的路径发现规则；npm 更新从真实安装目录定位 npm、Node.js 和 prefix，避免 NVM 与系统 npm 交叉安装。Codex 的 `yep-codex-proxy` 与 MiniMax Code 的 Node 固定包装脚本会做只读静态解析（不执行 shell），只更新其底层真实安装，且 MiniMax Code 会校验包装脚本指定的 Node 与 npm prefix 一致以防跨 ABI 破坏原生 SQLite 扩展。Homebrew 必须使用稳定的 `bin/codex` 入口。
+- Codex、Pi、MiniMax Code（npm）查询稳定发行版本；dsh 跟随官方 npm `latest` 标签，该标签可能指向 RC。不降级到比本机更旧的版本。npm 安装固定为本次查询得到的版本，不提供任意包或命令入口。Pi 安装禁用依赖生命周期脚本；MiniMax Code 显式允许脚本与可选依赖以确保 `better-sqlite3` 原生扩展正常编译。Cursor 与 Antigravity 通过各自内置更新器检查并更新，无需预先查询远端版本。
+- 检查更新才访问包管理器，打开页面只读取本机版本（`agy --version` 注入 `AGY_CLI_DISABLE_AUTO_UPDATE=true` 避免冷启动联网）；本机探测缓存 30 秒。更新前再次检测安装位置和版本，结束后复查原路径，避免将包管理器退出成功误报成 CLI 已更新。
+- 更新命令使用 Yep 服务账号执行，不提权。目录权限不足、网络错误等会在页面显示，用户可以重试。Codex、Pi、Cursor、MiniMax Code、Antigravity 安装最多运行 10 分钟，dsh 最多 30 分钟；日志保留末尾 16,000 个字符。
+- 同一个 Yep 服务进程内一次只运行一个更新任务；点击「一键更新全部」会在服务端创建串行队列，自动跳过忙中或不受支持的项（不会自动停止正在运行的 dsh Web），前一项失败不阻断后续项。任务与 HTTP 请求生命周期分离，手机断开、页面刷新或离开设置页不会取消更新；重新进入页面会读取当前队列与任务。状态保存在服务进程内存中，**不跨 Yep 服务重启保存**。
 - Yep runtime 报告同一 harness 存在本机执行中、等待输入、保留或已排队的任务时，更新会被拒绝。此检查不管理独立终端或其他宿主上的 CLI 进程。
 - 更新不终止已有 CLI、bridge 或 Yep 进程；它们保留已加载版本。后续启动的 CLI 进程使用新版本。已有常驻 bridge 需要在合适的维护窗口重新启动才会加载新版，更新入口不会自动重启它。
 
@@ -27,14 +30,16 @@
 接口沿用 `/api/*` 的身份验证和请求安全中间件，并遵守 `ENABLED_PROVIDERS`：
 
 - `GET /api/harness-updates`：当前安装、检查结果及任务状态。
-- `POST /api/harness-updates/:id/check`：检查稳定版本；并发检查合并。
+- `POST /api/harness-updates/check-all`：并发检查所有已启用且支持版本查询的 CLI。
+- `POST /api/harness-updates/update-all`：在服务端对所有当前可更新的 CLI 创建串行更新队列并返回 `202`；已有更新任务运行中时返回 `409`。
+- `POST /api/harness-updates/:id/check`：检查单个 CLI 的稳定版本；并发检查合并。
 - `POST /api/harness-updates/:id/update`：创建后台任务并返回 `202`；已有更新任务时返回 `409`。
 
-`:id` 只接受 `codex`、`pi`、`dsh`。客户端不能指定命令、安装路径、包名或版本。
+`:id` 只接受 `codex`、`pi`、`cursor`、`mcode`、`agy`、`dsh`。客户端不能指定命令、安装路径、包名或版本。
 
 ## 通过终端维护六种 CLI
 
-Cursor、MiniMax Code 和 Antigravity CLI 尚未接入上面的更新 API。自定义包装脚本也需要维护其背后的真实安装，不要覆盖代理、登录或模型路由配置。CLI 更新与桌面 App 更新是独立操作。
+自定义包装脚本（如本机切换了 Node 25 的 `dsh` 启动脚本）需要维护其背后的真实安装，不要覆盖代理、登录或模型路由配置。CLI 更新与桌面 App 更新是独立操作。
 
 | Harness | 原安装渠道的更新命令 |
 | --- | --- |

@@ -14,12 +14,33 @@ describe("harness update routes", () => {
         updateAvailable: false,
       }));
     const check = vi.spyOn(service, "check").mockImplementation(getInfo);
+    const checkAll = vi
+      .spyOn(service, "checkAll")
+      .mockImplementation(async (ids) =>
+        Promise.all(ids.map((id) => getInfo(id))),
+      );
     const start = vi.spyOn(service, "start").mockReturnValue({
       id: "job-1",
       status: "running",
       startedAt: "2026-10-08",
       log: "",
     });
+    const startBatch = vi
+      .spyOn(service, "startBatch")
+      .mockImplementation(async (ids) => ({
+        started: [...ids],
+        jobs: Object.fromEntries(
+          ids.map((id, index) => [
+            id,
+            {
+              id: `job-${index + 1}`,
+              status: index === 0 ? "running" : "queued",
+              startedAt: "2026-10-08",
+              log: "",
+            },
+          ]),
+        ),
+      }));
     return {
       routes: createHarnessUpdateRoutes({
         service,
@@ -28,7 +49,9 @@ describe("harness update routes", () => {
       }),
       getInfo,
       check,
+      checkAll,
       start,
+      startBatch,
     };
   }
 
@@ -89,5 +112,51 @@ describe("harness update routes", () => {
     expect(
       (await setup().routes.request("/dsh/update", { method: "POST" })).status,
     ).toBe(404);
+  });
+
+  it("supports cursor, mcode, agy, and batch check-all/update-all endpoints", async () => {
+    const { routes, checkAll, startBatch } = setup([
+      "codex",
+      "pi",
+      "cursor",
+      "mcode",
+      "agy",
+    ]);
+    const list = await routes.request("/");
+    expect(
+      (await list.json()).harnesses.map((item: { id: string }) => item.id),
+    ).toEqual(["codex", "pi", "cursor", "mcode", "agy"]);
+
+    const checkRes = await routes.request("/check-all", { method: "POST" });
+    expect(checkRes.status).toBe(200);
+    expect(checkAll).toHaveBeenCalledWith([
+      "codex",
+      "pi",
+      "cursor",
+      "mcode",
+      "agy",
+    ]);
+
+    const updateRes = await routes.request("/update-all", { method: "POST" });
+    expect(updateRes.status).toBe(202);
+    expect(startBatch).toHaveBeenCalledWith([
+      "codex",
+      "pi",
+      "cursor",
+      "mcode",
+      "agy",
+    ]);
+    expect((await updateRes.json()).started).toEqual([
+      "codex",
+      "pi",
+      "cursor",
+      "mcode",
+      "agy",
+    ]);
+
+    startBatch.mockResolvedValueOnce(null);
+    expect(
+      (await routes.request("/update-all", { method: "POST" })).status,
+    ).toBe(409);
   });
 });

@@ -736,6 +736,7 @@ export type {
   HarnessUpdateBlockReason,
   HarnessUpdateInfo,
   HarnessUpdateJob,
+  HarnessUpdateManager,
 } from "./harness-updates.js";
 export {
   extractBashCommandFromInput,

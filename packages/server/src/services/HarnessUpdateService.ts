@@ -17,6 +17,9 @@ import {
 const DISPLAY_NAMES: Record<HarnessId, string> = {
   codex: "Codex CLI",
   pi: "Pi Agent",
+  cursor: "Cursor CLI",
+  mcode: "MiniMax Code",
+  agy: "Antigravity CLI",
   dsh: "dsh",
 };
 const LOG_LIMIT = 16_000;
@@ -29,6 +32,10 @@ export interface HarnessUpdateServiceOptions {
     id: HarnessId,
     update: () => Promise<void>,
   ) => Promise<void>;
+  prepareEnv?: (
+    id: HarnessId,
+    executablePath: string,
+  ) => Promise<NodeJS.ProcessEnv | undefined>;
 }
 
 /** Jobs belong to the server, so navigating away or disconnecting is harmless. */
@@ -39,6 +46,7 @@ export class HarnessUpdateService {
   private readonly withUpdateLock: NonNullable<
     HarnessUpdateServiceOptions["withUpdateLock"]
   >;
+  private readonly prepareEnv?: HarnessUpdateServiceOptions["prepareEnv"];
   private readonly installations = new Map<
     HarnessId,
     {
@@ -65,6 +73,7 @@ export class HarnessUpdateService {
     this.isBusy = options.isBusy ?? (async () => false);
     this.withUpdateLock =
       options.withUpdateLock ?? (async (_id, update) => update());
+    this.prepareEnv = options.prepareEnv;
   }
 
   private installation(id: HarnessId): Promise<HarnessInstallation> {
@@ -81,9 +90,17 @@ export class HarnessUpdateService {
   private fingerprint(installation: HarnessInstallation): string {
     return JSON.stringify([
       installation.path,
+      installation.resolvedPath,
       installation.currentVersion,
       installation.manager,
     ]);
+  }
+
+  private supportsCheck(installation: HarnessInstallation): boolean {
+    if (installation.supportsCheck !== undefined) {
+      return installation.supportsCheck;
+    }
+    return installation.manager !== "self";
   }
 
   async getInfo(id: HarnessId): Promise<HarnessUpdateInfo> {
@@ -97,16 +114,22 @@ export class HarnessUpdateService {
         ? cached
         : undefined;
     const job = this.jobs.get(id);
+    const supportsCheck = this.supportsCheck(installation);
     return {
       id,
       displayName: DISPLAY_NAMES[id],
       path: installation.path,
+      ...(installation.resolvedPath
+        ? { resolvedPath: installation.resolvedPath }
+        : {}),
       currentVersion: installation.currentVersion,
       manager: installation.manager,
+      supportsCheck,
       latestVersion: latest?.version,
       checkedAt: latest?.checkedAt,
       updateAvailable: Boolean(
-        latest?.version &&
+        supportsCheck &&
+          latest?.version &&
           installation.currentVersion &&
           isNewerHarnessVersion(latest.version, installation.currentVersion),
       ),
@@ -134,10 +157,15 @@ export class HarnessUpdateService {
     return this.getInfo(id);
   }
 
+  async checkAll(ids: readonly HarnessId[]): Promise<HarnessUpdateInfo[]> {
+    return Promise.all(ids.map((id) => this.check(id)));
+  }
+
   private async checkLatest(id: HarnessId): Promise<void> {
     this.installations.delete(id);
     const installation = await this.installation(id);
     if (!installation.command) return;
+    if (!this.supportsCheck(installation)) return;
     const fingerprint = this.fingerprint(installation);
     try {
       const version = await getLatestHarnessVersion(id, installation, this.run);
@@ -165,8 +193,74 @@ export class HarnessUpdateService {
       log: "",
     };
     this.jobs.set(id, job);
-    void this.performUpdate(id, job);
+    void this.runQueue([{ id, job }]);
     return { ...job };
+  }
+
+  /**
+   * Queue a serial update pass for every currently eligible harness.
+   * Returns null if another update or batch is already running.
+   */
+  async startBatch(ids: readonly HarnessId[]): Promise<{
+    started: HarnessId[];
+    jobs: Record<string, HarnessUpdateJob>;
+  } | null> {
+    if (this.running) return null;
+    this.running = true;
+    try {
+      const snapshots = await Promise.all(
+        ids.map(async (id) => {
+          const [installation, busy] = await Promise.all([
+            this.installation(id),
+            this.isBusy(id),
+          ]);
+          return { id, installation, busy };
+        }),
+      );
+      const eligible = snapshots.filter(({ installation, busy }) =>
+        Boolean(installation.command && installation.currentVersion && !busy),
+      );
+      if (eligible.length === 0) {
+        this.running = false;
+        return { started: [], jobs: {} };
+      }
+      const now = new Date().toISOString();
+      const queue: Array<{ id: HarnessId; job: HarnessUpdateJob }> = [];
+      const jobs: Record<string, HarnessUpdateJob> = {};
+      for (const [i, entry] of eligible.entries()) {
+        const job: HarnessUpdateJob = {
+          id: randomUUID(),
+          status: i === 0 ? "running" : "queued",
+          startedAt: now,
+          log: "",
+        };
+        this.jobs.set(entry.id, job);
+        queue.push({ id: entry.id, job });
+        jobs[entry.id] = { ...job };
+      }
+      void this.runQueue(queue);
+      return {
+        started: eligible.map((entry) => entry.id),
+        jobs,
+      };
+    } catch (error) {
+      this.running = false;
+      throw error;
+    }
+  }
+
+  private async runQueue(
+    queue: Array<{ id: HarnessId; job: HarnessUpdateJob }>,
+  ): Promise<void> {
+    try {
+      for (const item of queue) {
+        item.job.status = "running";
+        item.job.startedAt = new Date().toISOString();
+        await this.performUpdate(item.id, item.job);
+      }
+    } finally {
+      this.running = false;
+    }
   }
 
   private async performUpdate(
@@ -187,6 +281,13 @@ export class HarnessUpdateService {
           "This harness has active work. Wait for it to finish and retry.",
         );
       job.fromVersion = installation.currentVersion;
+
+      if (installation.manager === "self") {
+        await this.performSelfUpdate(id, installation, job);
+        job.status = "completed";
+        return;
+      }
+
       const version = await getLatestHarnessVersion(id, installation, this.run);
       job.toVersion = version;
       if (isNewerHarnessVersion(version, installation.currentVersion)) {
@@ -204,6 +305,7 @@ export class HarnessUpdateService {
           const current = await this.inspect(id);
           if (
             current.path !== installation.path ||
+            current.resolvedPath !== installation.resolvedPath ||
             !current.command ||
             !current.currentVersion
           ) {
@@ -225,6 +327,7 @@ export class HarnessUpdateService {
           const updated = await this.inspect(id);
           if (
             updated.path !== installation.path ||
+            updated.resolvedPath !== installation.resolvedPath ||
             !updated.currentVersion ||
             (updated.currentVersion !== version &&
               !isNewerHarnessVersion(updated.currentVersion, version))
@@ -254,7 +357,55 @@ export class HarnessUpdateService {
     } finally {
       job.completedAt = new Date().toISOString();
       this.installations.delete(id);
-      this.running = false;
     }
+  }
+
+  private async performSelfUpdate(
+    id: HarnessId,
+    installation: HarnessInstallation,
+    job: HarnessUpdateJob,
+  ): Promise<void> {
+    await this.withUpdateLock(id, async () => {
+      if (await this.isBusy(id)) {
+        throw new Error(
+          "This harness has active work. Wait for it to finish and retry.",
+        );
+      }
+      const current = await this.inspect(id);
+      if (
+        current.path !== installation.path ||
+        current.resolvedPath !== installation.resolvedPath ||
+        !current.command ||
+        !current.currentVersion
+      ) {
+        throw new Error(
+          "The CLI installation changed while preparing the update. Check again before updating.",
+        );
+      }
+      job.fromVersion = current.currentVersion;
+      const baseCommand = harnessInstallCommand(id, current);
+      const extraEnv = this.prepareEnv
+        ? await this.prepareEnv(id, baseCommand.file)
+        : undefined;
+      const command = extraEnv
+        ? {
+            ...baseCommand,
+            env: { ...process.env, ...extraEnv, ...baseCommand.env },
+          }
+        : baseCommand;
+      await this.run(command, {
+        timeoutMs: 10 * 60_000,
+        onOutput: (text) => {
+          job.log = `${job.log}${text}`.slice(-LOG_LIMIT);
+        },
+      });
+      const updated = await this.inspect(id);
+      if (updated.path !== installation.path || !updated.currentVersion) {
+        throw new Error(
+          "The update finished, but the CLI at the original path could not report its version. Check the log and retry.",
+        );
+      }
+      job.toVersion = updated.currentVersion;
+    });
   }
 }

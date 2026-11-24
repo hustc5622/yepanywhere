@@ -1323,9 +1323,21 @@ export const api = {
       { method: "POST" },
     ),
 
+  checkAllHarnessUpdates: () =>
+    fetchJSON<{ harnesses: HarnessUpdateInfo[] }>(
+      "/harness-updates/check-all",
+      { method: "POST" },
+    ),
+
   updateHarness: (id: HarnessId) =>
     fetchJSON<{ job: HarnessUpdateJob }>(
       `/harness-updates/${encodeURIComponent(id)}/update`,
+      { method: "POST" },
+    ),
+
+  updateAllHarnesses: () =>
+    fetchJSON<{ started: HarnessId[]; jobs: Record<string, HarnessUpdateJob> }>(
+      "/harness-updates/update-all",
       { method: "POST" },
     ),
 

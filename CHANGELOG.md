@@ -8,6 +8,9 @@ and this independent release line uses calendar versions in `YYYY.M.N` format.
 ## [Unreleased]
 
 ### Added
+- 扩展「设置 → 提供商 → CLI 更新」能力，全面接入 Cursor CLI（`cursor`）、MiniMax Code（`mcode`）、Antigravity CLI（`agy`）并新增服务端托管的「全部检查」与「一键更新全部」：
+  - 新增 `POST /api/harness-updates/check-all` 与 `POST /api/harness-updates/update-all`；「一键更新全部」在服务端串行队列执行所有当前可更新的 CLI（跳过忙中或不受支持的项，不自动停止 dsh Web，前一项失败不阻断后续项），断开连接或离开页面不受影响，返回后可查看排队、运行与完成日志。
+  - Codex 支持静态识别 `codex-model-proxy.zsh`（`YEP_CODEX_REAL_PATH`）模型代理包装脚本，直接检查并更新底层真实 npm/Homebrew 安装；MiniMax Code 支持 npm 全局安装（固定 `https://npmmirror.xaminim.com/` 并保留原生 SQLite 扩展安装脚本）、Node 固定包装脚本（校验 Node ABI 一致性）及官方安装器自更新；Cursor CLI 与 Antigravity CLI 接入内置自更新器（`agent update` / `agy update`，`agy` 读取版本时禁用后台自更新，执行更新时自动复用 `YEP_AGY_PROXY` 分流代理）。详情见 `docs/project/harness-updates.md`。
 - 新增反向代理站点门禁复用 Yep 登录态能力（`GET /api/auth/gate-verify`、`GET /api/auth/gate-bridge`）：在不扩大主会话 Cookie `Path` 作用域的前提下，签发独立低权限的根路径门禁 Cookie `yep-gate-session`（仅含会话公开 ID 与持久化 HMAC 签名，无法用于调用 Yep API，随设备踢出、改密、登出和会话滑动窗口实时联动）。配合 Caddy `forward_auth` 保护同域根路径落地页时，已在 Yep 登录过的设备自动无感放行，未登录设备跳至 Yep 登录页（支持密码与 `#pair=` 配对），登录页新增对 `?redirect=` 同源跨 `BASE_PATH` 路径的回跳支持。
 - 右侧「会话索引」状态卡片新增当前会话操作栏（位于「会话 ID」下方）：提供一键「复制会话信息」按钮，以及与侧栏会话列表一致的「更多操作」菜单（置顶、复制标题、复制会话信息、复制项目目录、重命名、生成标题、克隆、分享链接、本会话资源、压缩上下文、目标、归档、标为已读/未读、终止进程等），打开不在左侧最近列表中的历史会话时也能直接复制信息或执行会话操作；同时优化固定定位下拉菜单在较矮视口（含移动端抽屉）内的贴边与滚动表现。
 - 新增公网端到端 TLS 与低摩擦设备认证能力：服务端支持通过 `TLS_PORT`、`TLS_CERT_PATH`、`TLS_KEY_PATH` 开启与主 HTTP 端口并行的独立 HTTPS 监听（支持证书文件热重载与纯 IP TLS 1.3 透传 TCP frp，零影响本机脚本、部署与飞书运行），附带 `scripts/setup-private-tls.sh` 一键生成 10 年期私有根 CA 与 IP/域名证书，说明见 `docs/project/public-access-security.md`；认证系统升级为 30 天滑动窗口 / 90 天绝对上限的 `HttpOnly` 会话，新增一次性二维码 / `#pair=` 授权链接设备配对（`POST /api/auth/pairing/create|redeem`）与已登录设备会话管理（`GET /api/auth/sessions`、`DELETE /api/auth/sessions/:id`、`POST /api/auth/logout-all`），同时补齐防爆破登录限流、改密自动吊销其他设备会话、Cookie 按 `BASE_PATH` 隔离、未认证隐藏本机 `authFilePath`、拒绝 `Origin: null` 跨站凭证读取、WebSocket 鉴权失败返回 `401`，以及登录重定向保留完整 URL query 参数。

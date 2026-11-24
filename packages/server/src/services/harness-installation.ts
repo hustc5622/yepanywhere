@@ -1,17 +1,31 @@
 import { execFile } from "node:child_process";
 import { constants } from "node:fs";
-import { access, readFile, realpath } from "node:fs/promises";
+import { access, readFile, realpath, stat } from "node:fs/promises";
 import { homedir } from "node:os";
-import { delimiter, dirname, join, resolve } from "node:path";
-import type { HarnessId, HarnessUpdateBlockReason } from "@yep-anywhere/shared";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
+import type {
+  HarnessId,
+  HarnessUpdateBlockReason,
+  HarnessUpdateManager,
+} from "@yep-anywhere/shared";
 import { findDshCliPath } from "../dsh/cli.js";
 import { findCodexCliPath, findPiCliPath } from "../sdk/cli-detection.js";
+import { findAgyPath } from "../sdk/providers/agy.js";
+import { findCursorAgentPath } from "../sdk/providers/cursor-cli.js";
+import { findMcodePath } from "../sdk/providers/mcode.js";
 
-export const HARNESS_PACKAGES: Record<HarnessId, string> = {
+export const HARNESS_PACKAGES: Partial<Record<HarnessId, string>> = {
   codex: "@openai/codex",
   pi: "@earendil-works/pi-coding-agent",
+  mcode: "@minimax/code",
   dsh: "@deepseek-ai/dsh",
 };
+
+export const HARNESS_REGISTRIES: Partial<Record<HarnessId, string>> = {
+  mcode: "https://npmmirror.xaminim.com/",
+};
+
+const MAX_WRAPPER_BYTES = 8 * 1024;
 
 export interface HarnessCommand {
   file: string;
@@ -61,14 +75,24 @@ export const runHarnessCommand: RunHarnessCommand = (command, options = {}) =>
 
 export interface HarnessInstallation {
   path?: string;
+  /** Underlying CLI executable when `path` is a recognized wrapper script. */
+  resolvedPath?: string;
   currentVersion?: string;
-  manager?: "npm" | "brew";
+  manager?: HarnessUpdateManager;
+  supportsCheck?: boolean;
   blockedReason?: HarnessUpdateBlockReason;
   error?: string;
   command?: HarnessCommand;
 }
 
-export function parseHarnessVersion(value: string): string | undefined {
+export function parseHarnessVersion(
+  value: string,
+  id?: HarnessId,
+): string | undefined {
+  if (id === "cursor") {
+    const dated = value.match(/\b\d{4}\.\d{2}\.\d{2}-[0-9A-Za-z._-]+\b/)?.[0];
+    if (dated) return dated;
+  }
   return value.match(
     /\b\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?\b/,
   )?.[0];
@@ -133,6 +157,116 @@ async function executable(path: string): Promise<boolean> {
   }
 }
 
+async function readSmallTextFile(path: string): Promise<string | null> {
+  try {
+    const info = await stat(path);
+    if (!info.isFile() || info.size === 0 || info.size > MAX_WRAPPER_BYTES) {
+      return null;
+    }
+    const content = await readFile(path, "utf8");
+    if (content.includes("\0")) return null;
+    return content;
+  } catch {
+    return null;
+  }
+}
+
+interface WrapperTarget {
+  targetPath: string;
+  expectedNodePath?: string;
+}
+
+/**
+ * Statically inspect known managed wrapper scripts without executing them:
+ * - Codex model-proxy wrapper (`codex-model-proxy.zsh` + `YEP_CODEX_REAL_PATH`)
+ * - MiniMax Code Node-pinned wrapper (`exec <node> <mcode> "$@"`)
+ */
+async function resolveManagedWrapperTarget(
+  id: HarnessId,
+  wrapperPath: string,
+  resolvedWrapper: string,
+): Promise<WrapperTarget | null> {
+  if (id !== "codex" && id !== "mcode") return null;
+  const content = await readSmallTextFile(resolvedWrapper);
+  if (!content) return null;
+
+  if (id === "codex") {
+    if (!content.includes("codex-model-proxy.zsh")) return null;
+    const match = content.match(
+      /^\s*(?:export\s+)?YEP_CODEX_REAL_PATH=(?:"([^"\n]+)"|'([^'\n]+)'|([^\s#]+))/m,
+    );
+    const candidate =
+      match?.[1] ??
+      match?.[2] ??
+      match?.[3] ??
+      process.env.YEP_CODEX_REAL_PATH?.trim();
+    if (!candidate || !isAbsolute(candidate)) return null;
+    if (!(await executable(candidate))) return null;
+    const resolvedCandidate = await realpath(candidate);
+    if (resolvedCandidate === resolvedWrapper) return null;
+    return { targetPath: candidate };
+  }
+
+  // MiniMax Code Node-pinned shell wrapper (e.g. ~/.local/bin/mcode).
+  const execMatch = content.match(
+    /^\s*exec\s+(?:"([^"\n]+)"|'([^'\n]+)'|(\/\S+))\s+(?:"([^"\n]+)"|'([^'\n]+)'|(\/\S+))\s+"\$@"/m,
+  );
+  if (!execMatch) return null;
+  const nodePath = execMatch[1] ?? execMatch[2] ?? execMatch[3];
+  const targetPath = execMatch[4] ?? execMatch[5] ?? execMatch[6];
+  if (!nodePath || !targetPath) return null;
+  if (!isAbsolute(nodePath) || !isAbsolute(targetPath)) return null;
+  if (!(await executable(nodePath)) || !(await executable(targetPath))) {
+    return null;
+  }
+  const resolvedTarget = await realpath(targetPath);
+  if (resolvedTarget === resolvedWrapper || wrapperPath === targetPath) {
+    return null;
+  }
+  return { targetPath, expectedNodePath: nodePath };
+}
+
+async function findHarnessPath(id: HarnessId): Promise<string | null> {
+  switch (id) {
+    case "codex":
+      return findCodexCliPath();
+    case "pi":
+      return findPiCliPath();
+    case "cursor":
+      return findCursorAgentPath();
+    case "mcode":
+      return findMcodePath();
+    case "agy":
+      return findAgyPath();
+    case "dsh":
+      return findDshCliPath();
+  }
+}
+
+function versionCommandFor(id: HarnessId, path: string): HarnessCommand {
+  if (id === "agy") {
+    return {
+      file: path,
+      args: ["--version"],
+      env: {
+        ...process.env,
+        AGY_CLI_DISABLE_AUTO_UPDATE: "true",
+      },
+    };
+  }
+  return { file: path, args: ["--version"] };
+}
+
+function isOfficialMcodeInstallerPath(path: string, resolved: string): boolean {
+  const installDir =
+    process.env.MCODE_INSTALL_DIR?.trim() || join(homedir(), ".minimax-code");
+  const expectedPrefix = `${resolve(installDir)}/`;
+  return (
+    resolve(path).startsWith(expectedPrefix) ||
+    resolved.startsWith(expectedPrefix)
+  );
+}
+
 /** Recognize the actual install tree, never guess based on a PATH npm. */
 export async function inspectHarnessInstallation(
   id: HarnessId,
@@ -143,23 +277,26 @@ export async function inspectHarnessInstallation(
   } = {},
 ): Promise<HarnessInstallation> {
   const path =
-    options.path !== undefined
-      ? options.path
-      : await (id === "codex"
-          ? findCodexCliPath()
-          : id === "dsh"
-            ? findDshCliPath()
-            : findPiCliPath());
+    options.path !== undefined ? options.path : await findHarnessPath(id);
   if (!path) return { blockedReason: "not_installed" };
   if ((options.platform ?? process.platform) === "win32") {
     return { path, blockedReason: "unsupported_platform" };
   }
   const run = options.run ?? runHarnessCommand;
-  const resolved = await realpath(path);
-  const info: HarnessInstallation = { path };
+  const resolvedOriginal = await realpath(path);
+  const wrapper = await resolveManagedWrapperTarget(id, path, resolvedOriginal);
+  const effectivePath = wrapper?.targetPath ?? path;
+  const resolved = wrapper ? await realpath(effectivePath) : resolvedOriginal;
+
+  const info: HarnessInstallation = {
+    path,
+    ...(wrapper ? { resolvedPath: effectivePath } : {}),
+  };
+
   try {
     info.currentVersion = parseHarnessVersion(
-      await run({ file: path, args: ["--version"] }),
+      await run(versionCommandFor(id, effectivePath)),
+      id,
     );
     if (!info.currentVersion) {
       info.error =
@@ -173,16 +310,33 @@ export async function inspectHarnessInstallation(
   if (resolved.includes(".app/")) {
     return { ...info, blockedReason: "unsupported_install" };
   }
+
+  if (id === "cursor" || id === "agy") {
+    if (!(await executable(effectivePath))) {
+      return { ...info, blockedReason: "unsupported_install" };
+    }
+    return {
+      ...info,
+      manager: "self",
+      supportsCheck: false,
+      command: {
+        file: effectivePath,
+        args: ["update"],
+      },
+    };
+  }
+
   if (id === "codex" && resolved.includes("/Caskroom/codex/")) {
     const prefix = resolved.split("/Caskroom/codex/")[0] as string;
     // A version-pinned Caskroom path would disappear during the upgrade.
-    if (resolve(path) !== join(prefix, "bin", "codex")) {
+    if (resolve(effectivePath) !== join(prefix, "bin", "codex")) {
       return { ...info, blockedReason: "unsupported_install" };
     }
     const brew = join(prefix, "bin", "brew");
     return {
       ...info,
       manager: "brew",
+      supportsCheck: true,
       ...((await executable(brew))
         ? {
             command: {
@@ -199,44 +353,88 @@ export async function inspectHarnessInstallation(
     };
   }
 
-  const suffix = `/lib/node_modules/${HARNESS_PACKAGES[id]}`;
-  for (let dir = dirname(resolved); dir !== dirname(dir); dir = dirname(dir)) {
-    if (!dir.endsWith(suffix)) continue;
-    try {
-      const manifest = JSON.parse(
-        await readFile(join(dir, "package.json"), "utf8"),
-      );
-      if (manifest.name !== HARNESS_PACKAGES[id]) continue;
-      const prefix = dir.slice(0, -suffix.length);
-      // A global install must own the bin entry as well as the package tree.
-      if ((await realpath(join(prefix, "bin", id))) !== resolved) continue;
-      const npm = join(prefix, "bin", "npm");
-      const node = join(prefix, "bin", "node");
-      if (!(await executable(npm)) || !(await executable(node))) {
+  const packageName = HARNESS_PACKAGES[id];
+  if (packageName) {
+    const suffix = `/lib/node_modules/${packageName}`;
+    for (
+      let dir = dirname(resolved);
+      dir !== dirname(dir);
+      dir = dirname(dir)
+    ) {
+      if (!dir.endsWith(suffix)) continue;
+      try {
+        const manifest = JSON.parse(
+          await readFile(join(dir, "package.json"), "utf8"),
+        );
+        if (manifest.name !== packageName) continue;
+        const prefix = dir.slice(0, -suffix.length);
+        // A global install must own the bin entry as well as the package tree.
+        if ((await realpath(join(prefix, "bin", id))) !== resolved) continue;
+        const npm = join(prefix, "bin", "npm");
+        const node = join(prefix, "bin", "node");
+        if (!(await executable(npm)) || !(await executable(node))) {
+          return {
+            ...info,
+            manager: "npm",
+            supportsCheck: true,
+            blockedReason: "package_manager_missing",
+          };
+        }
+        // When invoked via a Node-pinned wrapper (e.g. mcode), ensure the wrapper's
+        // Node runtime matches the npm prefix so native addons match the ABI.
+        if (wrapper?.expectedNodePath) {
+          const [expectedReal, prefixNodeReal] = await Promise.all([
+            realpath(wrapper.expectedNodePath),
+            realpath(node),
+          ]);
+          if (expectedReal !== prefixNodeReal) {
+            return { ...info, blockedReason: "unsupported_install" };
+          }
+        }
+        const registry = HARNESS_REGISTRIES[id];
         return {
           ...info,
           manager: "npm",
-          blockedReason: "package_manager_missing",
-        };
-      }
-      return {
-        ...info,
-        manager: "npm",
-        command: {
-          file: npm,
-          args: ["--prefix", prefix],
-          env: {
-            ...process.env,
-            PATH: `${join(prefix, "bin")}${delimiter}${process.env.PATH ?? ""}`,
-            CI: "1",
-            npm_config_update_notifier: "false",
+          supportsCheck: true,
+          command: {
+            file: npm,
+            args: [
+              "--prefix",
+              prefix,
+              ...(registry ? [`--registry=${registry}`] : []),
+            ],
+            env: {
+              ...process.env,
+              PATH: `${join(prefix, "bin")}${delimiter}${process.env.PATH ?? ""}`,
+              CI: "1",
+              npm_config_update_notifier: "false",
+            },
           },
-        },
-      };
-    } catch {
-      // A similarly named directory is not evidence of a supported install.
+        };
+      } catch {
+        // A similarly named directory is not evidence of a supported install.
+      }
     }
   }
+
+  // Official MiniMax Code standalone installer (~/.minimax-code/bin/mcode).
+  if (
+    id === "mcode" &&
+    !wrapper &&
+    isOfficialMcodeInstallerPath(effectivePath, resolved) &&
+    (await executable(effectivePath))
+  ) {
+    return {
+      ...info,
+      manager: "self",
+      supportsCheck: false,
+      command: {
+        file: effectivePath,
+        args: ["update"],
+      },
+    };
+  }
+
   return { ...info, blockedReason: "unsupported_install" };
 }
 
@@ -245,7 +443,13 @@ export async function getLatestHarnessVersion(
   installation: HarnessInstallation,
   run: RunHarnessCommand,
 ): Promise<string> {
-  if (!installation.command) throw new Error("Unsupported CLI installation");
+  if (!installation.command || installation.manager === "self") {
+    throw new Error("Unsupported CLI installation");
+  }
+  const packageName = HARNESS_PACKAGES[id];
+  if (installation.manager === "npm" && !packageName) {
+    throw new Error("Unsupported CLI installation");
+  }
   const command = installation.command;
   const output = await run(
     {
@@ -255,7 +459,7 @@ export async function getLatestHarnessVersion(
           ? [
               ...command.args,
               "view",
-              `${HARNESS_PACKAGES[id]}@latest`,
+              `${packageName}@latest`,
               "version",
               "--json",
             ]
@@ -281,25 +485,41 @@ export async function getLatestHarnessVersion(
 export function harnessInstallCommand(
   id: HarnessId,
   installation: HarnessInstallation,
-  version: string,
+  version?: string,
 ): HarnessCommand {
-  if (!installation.command || !allowedUpdateVersion(id, version)) {
+  if (!installation.command) {
+    throw new Error("Invalid CLI update plan");
+  }
+  if (installation.manager === "self") {
+    return installation.command;
+  }
+  if (!version || !allowedUpdateVersion(id, version)) {
     throw new Error("Invalid CLI update plan");
   }
   const command = installation.command;
+  if (installation.manager === "brew") {
+    return {
+      ...command,
+      args: ["upgrade", "--cask", "codex"],
+    };
+  }
+  const packageName = HARNESS_PACKAGES[id];
+  if (!packageName) {
+    throw new Error("Invalid CLI update plan");
+  }
   return {
     ...command,
-    args:
-      installation.manager === "npm"
-        ? [
-            ...command.args,
-            "install",
-            "--global",
-            `${HARNESS_PACKAGES[id]}@${version}`,
-            "--no-audit",
-            "--no-fund",
-            ...(id === "pi" ? ["--ignore-scripts"] : []),
-          ]
-        : ["upgrade", "--cask", "codex"],
+    args: [
+      ...command.args,
+      "install",
+      "--global",
+      `${packageName}@${version}`,
+      "--no-audit",
+      "--no-fund",
+      ...(id === "pi" ? ["--ignore-scripts"] : []),
+      ...(id === "mcode"
+        ? ["--ignore-scripts=false", "--include=optional"]
+        : []),
+    ],
   };
 }

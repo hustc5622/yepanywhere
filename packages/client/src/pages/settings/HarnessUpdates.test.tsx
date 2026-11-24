@@ -14,7 +14,9 @@ vi.mock("../../api/client", () => ({
   api: {
     getHarnessUpdates: vi.fn(),
     checkHarnessUpdate: vi.fn(),
+    checkAllHarnessUpdates: vi.fn(),
     updateHarness: vi.fn(),
+    updateAllHarnesses: vi.fn(),
     stopDshWeb: vi.fn(),
     launchDshWeb: vi.fn(),
   },
@@ -48,8 +50,22 @@ describe("HarnessUpdates", () => {
       harnesses: [installed],
     });
     vi.mocked(api.checkHarnessUpdate).mockResolvedValue({ harness: available });
+    vi.mocked(api.checkAllHarnessUpdates).mockResolvedValue({
+      harnesses: [available],
+    });
     vi.mocked(api.updateHarness).mockResolvedValue({
       job: { id: "job-1", status: "running", startedAt: "2026-10-08", log: "" },
+    });
+    vi.mocked(api.updateAllHarnesses).mockResolvedValue({
+      started: ["codex"],
+      jobs: {
+        codex: {
+          id: "job-1",
+          status: "running",
+          startedAt: "2026-10-08",
+          log: "",
+        },
+      },
     });
   });
   afterEach(() => vi.useRealTimers());
@@ -255,5 +271,74 @@ describe("HarnessUpdates", () => {
     await screen.findByText("harnessUpdatesDshRunning");
     expect(api.launchDshWeb).toHaveBeenCalledOnce();
     expect(api.updateHarness).not.toHaveBeenCalled();
+  });
+
+  it("supports self-updating CLIs and one-click check-all / update-all actions", async () => {
+    const agy: HarnessUpdateInfo = {
+      id: "agy",
+      displayName: "Antigravity CLI",
+      path: "/local/bin/agy",
+      currentVersion: "1.5.15",
+      manager: "self",
+      supportsCheck: false,
+      canUpdate: true,
+      updateAvailable: false,
+    };
+    const wrappedCodex: HarnessUpdateInfo = {
+      ...installed,
+      path: "/local/bin/yep-codex-proxy",
+      resolvedPath: "/nvm/bin/codex",
+    };
+    vi.mocked(api.getHarnessUpdates).mockResolvedValue({
+      harnesses: [wrappedCodex, agy],
+    });
+    vi.mocked(api.checkAllHarnessUpdates).mockResolvedValue({
+      harnesses: [
+        { ...wrappedCodex, latestVersion: "0.2.0", updateAvailable: true },
+        agy,
+      ],
+    });
+    vi.mocked(api.updateAllHarnesses).mockResolvedValue({
+      started: ["codex", "agy"],
+      jobs: {
+        codex: {
+          id: "job-1",
+          status: "running",
+          startedAt: "2026-10-08",
+          log: "",
+        },
+        agy: {
+          id: "job-2",
+          status: "queued",
+          startedAt: "2026-10-08",
+          log: "",
+        },
+      },
+    });
+
+    render(<HarnessUpdates />);
+    const agyUpdate = await screen.findByRole("button", {
+      name: "harnessUpdatesUpdateFor Antigravity CLI",
+    });
+    // Self-updating CLIs don't have a separate Check button and can update directly.
+    expect(
+      screen.queryByRole("button", {
+        name: "harnessUpdatesCheckFor Antigravity CLI",
+      }),
+    ).toBeNull();
+    expect(agyUpdate.hasAttribute("disabled")).toBe(false);
+    expect(screen.getByText("/nvm/bin/codex")).toBeTruthy();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "harnessUpdatesCheckAll" }),
+    );
+    await screen.findByText("harnessUpdatesAvailable 0.2.0");
+    expect(api.checkAllHarnessUpdates).toHaveBeenCalledOnce();
+
+    fireEvent.click(
+      screen.getByRole("button", { name: "harnessUpdatesUpdateAll" }),
+    );
+    await screen.findByText("harnessUpdatesQueuedHint");
+    expect(api.updateAllHarnesses).toHaveBeenCalledOnce();
   });
 });

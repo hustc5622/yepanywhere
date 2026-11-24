@@ -487,4 +487,232 @@ describe("harness installation discovery", () => {
       ),
     ).rejects.toThrow("timed out");
   });
+
+  it("resolves Codex model-proxy wrappers to their underlying npm installation", async () => {
+    const { prefix, path: realCodex } = await npmInstall();
+    const wrapperDir = await realpath(
+      await mkdtemp(join(tmpdir(), "yep-codex-wrapper-")),
+    );
+    temporary.push(wrapperDir);
+    const wrapper = join(wrapperDir, "yep-codex-proxy");
+    await writeFile(
+      wrapper,
+      [
+        "#!/bin/zsh",
+        `export YEP_CODEX_REAL_PATH=${realCodex}`,
+        'exec /bin/zsh /repo/scripts/codex-model-proxy.zsh "$@"',
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+    const run = vi.fn<RunHarnessCommand>(async (command) => {
+      expect(command.file).toBe(realCodex);
+      expect(command.args).toEqual(["--version"]);
+      return "codex-cli 0.167.0";
+    });
+    const info = await inspectHarnessInstallation("codex", {
+      path: wrapper,
+      run,
+    });
+    expect(info).toMatchObject({
+      path: wrapper,
+      resolvedPath: realCodex,
+      currentVersion: "0.167.0",
+      manager: "npm",
+      supportsCheck: true,
+      command: { file: join(prefix, "bin/npm"), args: ["--prefix", prefix] },
+    });
+  });
+
+  it("recognizes MiniMax Code npm installs via Node-pinned wrappers and uses the MiniMax registry", async () => {
+    const prefix = await realpath(await mkdtemp(join(tmpdir(), "yep-mcode-")));
+    temporary.push(prefix);
+    const root = join(prefix, "lib/node_modules/@minimax/code");
+    await mkdir(root, { recursive: true });
+    await mkdir(join(prefix, "bin"), { recursive: true });
+    await writeFile(
+      join(root, "package.json"),
+      JSON.stringify({ name: "@minimax/code" }),
+    );
+    await writeFile(join(root, "cli.js"), "", { mode: 0o755 });
+    const realMcode = join(prefix, "bin/mcode");
+    await symlink(join(root, "cli.js"), realMcode);
+    for (const bin of ["npm", "node"]) {
+      await writeFile(join(prefix, "bin", bin), "", { mode: 0o755 });
+    }
+    const wrapperDir = await realpath(
+      await mkdtemp(join(tmpdir(), "yep-mcode-wrapper-")),
+    );
+    temporary.push(wrapperDir);
+    const wrapper = join(wrapperDir, "mcode");
+    await writeFile(
+      wrapper,
+      [
+        "#!/bin/zsh",
+        `export PATH="${prefix}/bin:$PATH"`,
+        `exec ${join(prefix, "bin/node")} ${realMcode} "$@"`,
+      ].join("\n"),
+      { mode: 0o755 },
+    );
+
+    const info = await inspectHarnessInstallation("mcode", {
+      path: wrapper,
+      run: async () => "0.7.6",
+    });
+    expect(info).toMatchObject({
+      path: wrapper,
+      resolvedPath: realMcode,
+      currentVersion: "0.7.6",
+      manager: "npm",
+      supportsCheck: true,
+      command: {
+        file: join(prefix, "bin/npm"),
+        args: ["--prefix", prefix, "--registry=https://npmmirror.xaminim.com/"],
+      },
+    });
+    const installCmd = harnessInstallCommand("mcode", info, "0.8.0");
+    expect(installCmd.args).toContain("@minimax/code@0.8.0");
+    expect(installCmd.args).toContain(
+      "--registry=https://npmmirror.xaminim.com/",
+    );
+    expect(installCmd.args).toContain("--ignore-scripts=false");
+    expect(installCmd.args).toContain("--include=optional");
+
+    // Reject wrapper pointing to a different Node binary to avoid ABI mismatch.
+    const otherNode = join(wrapperDir, "other-node");
+    await writeFile(otherNode, "", { mode: 0o755 });
+    await writeFile(
+      wrapper,
+      `#!/bin/zsh\nexec ${otherNode} ${realMcode} "$@"\n`,
+      { mode: 0o755 },
+    );
+    const mismatched = await inspectHarnessInstallation("mcode", {
+      path: wrapper,
+      run: async () => "0.7.6",
+    });
+    expect(mismatched.blockedReason).toBe("unsupported_install");
+    expect(mismatched.command).toBeUndefined();
+  });
+
+  it("supports Cursor CLI and Antigravity CLI built-in updaters", async () => {
+    const dir = await realpath(await mkdtemp(join(tmpdir(), "yep-self-")));
+    temporary.push(dir);
+    const agent = join(dir, "agent");
+    const agy = join(dir, "agy");
+    await writeFile(agent, "", { mode: 0o755 });
+    await writeFile(agy, "", { mode: 0o755 });
+
+    const cursorInfo = await inspectHarnessInstallation("cursor", {
+      path: agent,
+      run: async () => "2026.11.05-86047df",
+    });
+    expect(cursorInfo).toMatchObject({
+      path: agent,
+      currentVersion: "2026.11.05-86047df",
+      manager: "self",
+      supportsCheck: false,
+      command: { file: agent, args: ["update"] },
+    });
+
+    const agyVersionRun = vi.fn<RunHarnessCommand>(async (command) => {
+      expect(command.env?.AGY_CLI_DISABLE_AUTO_UPDATE).toBe("true");
+      return "1.5.15";
+    });
+    const agyInfo = await inspectHarnessInstallation("agy", {
+      path: agy,
+      run: agyVersionRun,
+    });
+    expect(agyInfo).toMatchObject({
+      path: agy,
+      currentVersion: "1.5.15",
+      manager: "self",
+      supportsCheck: false,
+      command: { file: agy, args: ["update"] },
+    });
+  });
+
+  it("runs self-updater with prepareEnv and executes batch updates serially", async () => {
+    const versions: Record<string, string> = {
+      codex: "0.1.0",
+      agy: "1.5.15",
+      cursor: "2026.11.05-86047df",
+      pi: "1.0.0",
+    };
+    const order: string[] = [];
+    const inspect = vi.fn(async (id: string): Promise<HarnessInstallation> => {
+      if (id === "pi") {
+        return {
+          path: "/opt/bin/pi",
+          currentVersion: versions.pi,
+          blockedReason: "unsupported_install",
+        };
+      }
+      if (id === "agy" || id === "cursor") {
+        return {
+          path: `/local/bin/${id}`,
+          currentVersion: versions[id],
+          manager: "self",
+          supportsCheck: false,
+          command: { file: `/local/bin/${id}`, args: ["update"] },
+        };
+      }
+      return {
+        path: "/node/bin/codex",
+        currentVersion: versions.codex,
+        manager: "npm",
+        supportsCheck: true,
+        command: { file: "/node/bin/npm", args: ["--prefix", "/node"] },
+      };
+    });
+    const run = vi.fn<RunHarnessCommand>(async (command) => {
+      if (command.args.includes("view")) return '"0.2.0"';
+      order.push(command.file);
+      if (command.file === "/node/bin/npm") {
+        versions.codex = "0.2.0";
+      } else if (command.file === "/local/bin/agy") {
+        expect(command.env?.HTTPS_PROXY).toBe("http://127.0.0.1:9999");
+        versions.agy = "1.6.0";
+      } else if (command.file === "/local/bin/cursor") {
+        throw new Error("network hiccup");
+      }
+      return "ok";
+    });
+    const service = new HarnessUpdateService({
+      inspect,
+      run,
+      prepareEnv: async (id) =>
+        id === "agy" ? { HTTPS_PROXY: "http://127.0.0.1:9999" } : undefined,
+    });
+
+    const batch = await service.startBatch(["codex", "pi", "cursor", "agy"]);
+    expect(batch?.started).toEqual(["codex", "cursor", "agy"]);
+    expect(batch?.jobs.codex?.status).toBe("running");
+    expect(batch?.jobs.cursor?.status).toBe("queued");
+    expect(batch?.jobs.agy?.status).toBe("queued");
+    expect(await service.startBatch(["codex"])).toBeNull();
+
+    await vi.waitFor(async () => {
+      const agyInfo = await service.getInfo("agy");
+      expect(agyInfo.job?.status).toBe("completed");
+    });
+
+    expect(order).toEqual([
+      "/node/bin/npm",
+      "/local/bin/cursor",
+      "/local/bin/agy",
+    ]);
+    expect((await service.getInfo("codex")).job).toMatchObject({
+      status: "completed",
+      fromVersion: "0.1.0",
+      toVersion: "0.2.0",
+    });
+    expect((await service.getInfo("cursor")).job).toMatchObject({
+      status: "failed",
+      error: "network hiccup",
+    });
+    expect((await service.getInfo("agy")).job).toMatchObject({
+      status: "completed",
+      fromVersion: "1.5.15",
+      toVersion: "1.6.0",
+    });
+  });
 });

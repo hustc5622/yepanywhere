@@ -5,11 +5,13 @@ import { SettingsListSkeleton } from "../../components/SettingsSkeleton";
 import { useI18n } from "../../i18n";
 import "./HarnessUpdates.css";
 
+type PendingAction = HarnessId | "all-check" | "all-update" | null;
+
 export function HarnessUpdates() {
   const { t } = useI18n();
   const [harnesses, setHarnesses] = useState<HarnessUpdateInfo[]>([]);
   const [loading, setLoading] = useState(true);
-  const [pending, setPending] = useState<HarnessId | null>(null);
+  const [pending, setPending] = useState<PendingAction>(null);
   const [error, setError] = useState<string | null>(null);
   const [confirmDshStop, setConfirmDshStop] = useState(false);
   const mounted = useRef(false);
@@ -90,6 +92,35 @@ export function HarnessUpdates() {
     }
   };
 
+  const actAll = async (action: "check" | "update") => {
+    if (actionInFlight.current) return;
+    actionInFlight.current = true;
+    ++generation.current;
+    setPending(action === "check" ? "all-check" : "all-update");
+    setError(null);
+    try {
+      if (action === "check") {
+        const { harnesses: updated } = await api.checkAllHarnessUpdates();
+        if (mounted.current) setHarnesses(updated);
+      } else {
+        const { jobs } = await api.updateAllHarnesses();
+        if (mounted.current) {
+          setHarnesses((current) =>
+            current.map((item) =>
+              jobs[item.id] ? { ...item, job: jobs[item.id] } : item,
+            ),
+          );
+        }
+      }
+    } catch (err) {
+      if (mounted.current)
+        setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      actionInFlight.current = false;
+      if (mounted.current) setPending(null);
+    }
+  };
+
   const controlDsh = async (action: "start" | "stop") => {
     if (actionInFlight.current) return;
     actionInFlight.current = true;
@@ -110,16 +141,51 @@ export function HarnessUpdates() {
     }
   };
 
-  const running = harnesses.some((item) => item.job?.status === "running");
+  const running = harnesses.some(
+    (item) => item.job?.status === "running" || item.job?.status === "queued",
+  );
+  const anyCheckable = harnesses.some((item) => item.supportsCheck !== false);
+  const anyUpdatable = harnesses.some((item) => item.canUpdate);
+
   return (
     <section
       className="settings-section harness-updates"
       aria-labelledby="harness-updates-title"
     >
-      <h2 id="harness-updates-title">{t("harnessUpdatesTitle")}</h2>
-      <p className="settings-section-description">
-        {t("harnessUpdatesDescription")}
-      </p>
+      <div className="harness-updates-header">
+        <div>
+          <h2 id="harness-updates-title">{t("harnessUpdatesTitle")}</h2>
+          <p className="settings-section-description">
+            {t("harnessUpdatesDescription")}
+          </p>
+        </div>
+        {!loading && harnesses.length > 0 && (
+          <div className="settings-item-actions harness-updates-batch-actions">
+            {anyCheckable && (
+              <button
+                type="button"
+                className="settings-button settings-button-secondary"
+                disabled={!!pending || running}
+                onClick={() => void actAll("check")}
+              >
+                {pending === "all-check"
+                  ? t("harnessUpdatesWorking")
+                  : t("harnessUpdatesCheckAll")}
+              </button>
+            )}
+            <button
+              type="button"
+              className="settings-button"
+              disabled={!!pending || running || !anyUpdatable}
+              onClick={() => void actAll("update")}
+            >
+              {pending === "all-update" || running
+                ? t("harnessUpdatesRunning")
+                : t("harnessUpdatesUpdateAll")}
+            </button>
+          </div>
+        )}
+      </div>
       <p className="settings-hint">{t("harnessUpdatesEffect")}</p>
       {loading && <SettingsListSkeleton label={t("harnessUpdatesLoading")} />}
       {!loading && harnesses.length === 0 && !error && (
@@ -128,6 +194,8 @@ export function HarnessUpdates() {
       <div className="settings-group">
         {harnesses.map((item) => {
           const isRunning = item.job?.status === "running";
+          const isQueued = item.job?.status === "queued";
+          const supportsCheck = item.supportsCheck !== false;
           const blockMessages = {
             not_installed: "harnessUpdatesNotInstalled",
             unsupported_install: "harnessUpdatesUnsupported",
@@ -135,6 +203,10 @@ export function HarnessUpdates() {
             package_manager_missing: "harnessUpdatesManagerMissing",
             busy: "harnessUpdatesBusy",
           } as const;
+          const unchangedCompletion =
+            item.job?.status === "completed" &&
+            Boolean(item.job.fromVersion) &&
+            item.job.fromVersion === item.job.toVersion;
           return (
             <div className="settings-item settings-item-stacked" key={item.id}>
               <div className="settings-item-row">
@@ -146,7 +218,7 @@ export function HarnessUpdates() {
                         item.currentVersion ?? t("harnessUpdatesUnknown"),
                     })}
                   </p>
-                  {item.latestVersion && (
+                  {supportsCheck && item.latestVersion && (
                     <p>
                       {item.updateAvailable || !item.currentVersion
                         ? t("harnessUpdatesAvailable", {
@@ -159,21 +231,28 @@ export function HarnessUpdates() {
                           )}
                     </p>
                   )}
+                  {!supportsCheck && item.manager === "self" && (
+                    <p className="settings-hint">
+                      {t("harnessUpdatesSelfUpdaterHint")}
+                    </p>
+                  )}
                 </div>
                 <div className="settings-item-actions">
-                  <button
-                    type="button"
-                    className="settings-button settings-button-secondary"
-                    disabled={!!pending || running}
-                    aria-label={t("harnessUpdatesCheckFor", {
-                      name: item.displayName,
-                    })}
-                    onClick={() => void act(item.id, "check")}
-                  >
-                    {pending === item.id
-                      ? t("harnessUpdatesWorking")
-                      : t("harnessUpdatesCheck")}
-                  </button>
+                  {supportsCheck && (
+                    <button
+                      type="button"
+                      className="settings-button settings-button-secondary"
+                      disabled={!!pending || running}
+                      aria-label={t("harnessUpdatesCheckFor", {
+                        name: item.displayName,
+                      })}
+                      onClick={() => void act(item.id, "check")}
+                    >
+                      {pending === item.id
+                        ? t("harnessUpdatesWorking")
+                        : t("harnessUpdatesCheck")}
+                    </button>
+                  )}
                   <button
                     type="button"
                     className="settings-button"
@@ -181,7 +260,9 @@ export function HarnessUpdates() {
                       !!pending ||
                       running ||
                       !item.canUpdate ||
-                      (!item.updateAvailable && item.job?.status !== "failed")
+                      (supportsCheck &&
+                        !item.updateAvailable &&
+                        item.job?.status !== "failed")
                     }
                     aria-label={t("harnessUpdatesUpdateFor", {
                       name: item.displayName,
@@ -190,9 +271,11 @@ export function HarnessUpdates() {
                   >
                     {isRunning
                       ? t("harnessUpdatesRunning")
-                      : item.job?.status === "failed"
-                        ? t("harnessUpdatesRetry")
-                        : t("harnessUpdatesUpdate")}
+                      : isQueued
+                        ? t("harnessUpdatesQueued")
+                        : item.job?.status === "failed"
+                          ? t("harnessUpdatesRetry")
+                          : t("harnessUpdatesUpdate")}
                   </button>
                 </div>
               </div>
@@ -255,7 +338,7 @@ export function HarnessUpdates() {
                   )}
                 </>
               )}
-              {item.blockedReason && !isRunning && (
+              {item.blockedReason && !isRunning && !isQueued && (
                 <p className="settings-hint">
                   {t(
                     item.id === "dsh" && item.blockedReason === "busy"
@@ -277,16 +360,25 @@ export function HarnessUpdates() {
                     {t("harnessUpdatesContinues")}
                   </p>
                 )}
+                {isQueued && (
+                  <p className="settings-hint">
+                    {t("harnessUpdatesQueuedHint")}
+                  </p>
+                )}
                 {item.job?.status === "completed" && (
                   <p className="settings-hint">
-                    {t(
-                      item.id === "dsh"
-                        ? "harnessUpdatesDshCompleted"
-                        : "harnessUpdatesCompleted",
-                      {
-                        version: item.job.toVersion ?? "",
-                      },
-                    )}
+                    {unchangedCompletion
+                      ? t("harnessUpdatesAlreadyLatest", {
+                          version: item.job.toVersion ?? "",
+                        })
+                      : t(
+                          item.id === "dsh"
+                            ? "harnessUpdatesDshCompleted"
+                            : "harnessUpdatesCompleted",
+                          {
+                            version: item.job.toVersion ?? "",
+                          },
+                        )}
                   </p>
                 )}
                 {item.job?.status === "failed" && (
@@ -302,6 +394,12 @@ export function HarnessUpdates() {
                   {item.path && (
                     <p>
                       <code>{item.path}</code>
+                      {item.resolvedPath && item.resolvedPath !== item.path && (
+                        <>
+                          {" → "}
+                          <code>{item.resolvedPath}</code>
+                        </>
+                      )}
                       {item.manager && ` · ${item.manager}`}
                     </p>
                   )}

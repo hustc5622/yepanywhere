@@ -125,6 +125,7 @@ import { createVersionRoutes } from "./routes/version.js";
 import { EmbeddedRuntimeController } from "./runtime/EmbeddedRuntimeController.js";
 import { RuntimeEventStore } from "./runtime/RuntimeEventStore.js";
 import type { RuntimeController } from "./runtime/types.js";
+import { agySpawnEnv } from "./sdk/providers/agy.js";
 import {
   configureClaudeRemoteExecutors,
   configureClaudeSessionFileObserver,
@@ -1726,6 +1727,12 @@ export function createApp(options: AppOptions): AppResult {
               throw new Error("DSH Web management is unavailable");
             await options.dshWebService.withUpdateLock(update);
           } else await update();
+        },
+        prepareEnv: async (id, executablePath) => {
+          if (id !== "agy") return undefined;
+          const { AGY_CLI_DISABLE_AUTO_UPDATE: _disabled, ...env } =
+            await agySpawnEnv(executablePath);
+          return env;
         },
       }),
     }),
