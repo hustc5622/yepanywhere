@@ -9,10 +9,12 @@ import type { ReactNode } from "react";
 import { useEffect, useMemo, useState } from "react";
 import { Link } from "react-router-dom";
 import { useSubagentDetail } from "../contexts/SubagentDetailContext";
+import { useOptionalToastContext } from "../contexts/ToastContext";
 import { useDocumentVisibility } from "../hooks/useDocumentVisibility";
 import { useGitStatus } from "../hooks/useGitStatus";
 import { useSessionFileIndex } from "../hooks/useSessionFileIndex";
 import { useI18n } from "../i18n";
+import { writeClipboardText } from "../lib/clipboard";
 import {
   type CodexAgentStatus,
   codexAgentStatusLabel,
@@ -40,6 +42,11 @@ import type {
 import { FilePreviewPanel } from "./FilePreviewPanel";
 import { ProviderBadge } from "./ProviderBadge";
 import { SessionFileDiffPanel } from "./SessionFileDiffPanel";
+import {
+  SessionMenu,
+  type SessionMenuProps,
+  copySessionInfo,
+} from "./SessionMenu";
 import { SessionSavedFilePanel } from "./SessionSavedFilePanel";
 import { CodexNativeGoalBlock } from "./blocks/codex/CodexNativeGoalBlock";
 import {
@@ -66,6 +73,11 @@ const COVERAGE_REASON_KEYS: Record<
   "workspace-mismatch": "sessionSavedCoverageWorkspace",
 };
 
+type InspectorSessionMenuProps = Omit<
+  SessionMenuProps,
+  "useFixedPositioning" | "useEllipsisIcon" | "className" | "triggerLabel"
+>;
+
 interface SessionInspectorProps {
   presentation: InspectorPresentation;
   isOpen?: boolean;
@@ -81,6 +93,7 @@ interface SessionInspectorProps {
   activeToolApproval?: ActiveToolApproval;
   projectId: string;
   sessionId: string;
+  sessionTitle?: string | null;
   branchId?: string;
   provider?: ProviderName;
   model?: string;
@@ -89,6 +102,7 @@ interface SessionInspectorProps {
   basePath?: string;
   status: SessionStatus;
   processState?: string;
+  sessionMenuProps?: InspectorSessionMenuProps;
   onSelectMessage: (messageId: string) => void;
 }
 
@@ -170,6 +184,7 @@ export function SessionInspector({
   activeToolApproval,
   projectId,
   sessionId,
+  sessionTitle,
   branchId,
   provider,
   model,
@@ -178,12 +193,15 @@ export function SessionInspector({
   basePath = "",
   status,
   processState,
+  sessionMenuProps,
   onSelectMessage,
 }: SessionInspectorProps) {
   const { t, locale } = useI18n();
+  const toast = useOptionalToastContext();
   const subagentDetail = useSubagentDetail();
   const [activeTab, setActiveTab] = useState<InspectorTab>("questions");
   const [copiedSessionId, setCopiedSessionId] = useState(false);
+  const [copiedSessionInfo, setCopiedSessionInfo] = useState(false);
   const pageVisible = useDocumentVisibility();
   const isVisible = isOpen && pageVisible;
   const {
@@ -300,6 +318,12 @@ export function SessionInspector({
     return () => window.clearTimeout(timeout);
   }, [copiedSessionId]);
 
+  useEffect(() => {
+    if (!copiedSessionInfo) return;
+    const timeout = window.setTimeout(() => setCopiedSessionInfo(false), 1500);
+    return () => window.clearTimeout(timeout);
+  }, [copiedSessionInfo]);
+
   const handleCopySessionId = async () => {
     try {
       await writeClipboardText(sessionId);
@@ -308,6 +332,43 @@ export function SessionInspector({
       console.error("Failed to copy session ID:", error);
     }
   };
+
+  const handleCopySessionInfo = async () => {
+    try {
+      await copySessionInfo({
+        sessionId,
+        projectId,
+        title: sessionTitle ?? sessionMenuProps?.title,
+        provider: provider ?? sessionMenuProps?.provider,
+      });
+      setCopiedSessionInfo(true);
+      toast?.showToast(t("sessionMenuInfoCopied"), "success");
+    } catch (error) {
+      console.error("Failed to copy session info:", error);
+      toast?.showToast(t("sessionMenuInfoCopyFailed"), "error");
+    }
+  };
+
+  const inspectorMenuProps: InspectorSessionMenuProps | undefined =
+    sessionMenuProps
+      ? {
+          ...sessionMenuProps,
+          onRename: () => {
+            if (presentation === "drawer") {
+              onClose?.();
+            }
+            sessionMenuProps.onRename();
+          },
+          onGoal: sessionMenuProps.onGoal
+            ? () => {
+                if (presentation === "drawer") {
+                  onClose?.();
+                }
+                sessionMenuProps.onGoal?.();
+              }
+            : undefined,
+        }
+      : undefined;
 
   if (presentation === "drawer" && !isOpen) return null;
 
@@ -426,6 +487,34 @@ export function SessionInspector({
           >
             {copiedSessionId ? <CopiedIcon /> : <CopyIcon />}
           </button>
+        </div>
+        <div
+          className="session-inspector-actions"
+          role="group"
+          aria-label={t("sessionInspectorActions")}
+        >
+          <button
+            type="button"
+            className={`session-inspector-action-btn${copiedSessionInfo ? " is-copied" : ""}`}
+            onClick={handleCopySessionInfo}
+            title={t("sessionMenuCopyInfo")}
+          >
+            {copiedSessionInfo ? <CopiedIcon /> : <CopyIcon />}
+            <span>
+              {copiedSessionInfo
+                ? t("sessionInspectorSessionIdCopied")
+                : t("sessionMenuCopyInfo")}
+            </span>
+          </button>
+          {inspectorMenuProps && (
+            <SessionMenu
+              {...inspectorMenuProps}
+              useFixedPositioning
+              useEllipsisIcon
+              triggerLabel={t("sessionInspectorMoreActions")}
+              className="session-inspector-menu"
+            />
+          )}
         </div>
         {!hasLegacyDetails &&
           !legacyDetailsDeferred &&
@@ -1774,28 +1863,6 @@ function getStatusLabel(
       : t("sessionInspectorSelf");
   }
   return t("sessionInspectorIdle");
-}
-
-async function writeClipboardText(text: string): Promise<void> {
-  if (navigator.clipboard?.writeText) {
-    await navigator.clipboard.writeText(text);
-    return;
-  }
-
-  const textarea = document.createElement("textarea");
-  textarea.value = text;
-  textarea.setAttribute("readonly", "");
-  textarea.style.position = "fixed";
-  textarea.style.left = "-9999px";
-  textarea.style.top = "0";
-  document.body.appendChild(textarea);
-  textarea.select();
-
-  try {
-    document.execCommand("copy");
-  } finally {
-    document.body.removeChild(textarea);
-  }
 }
 
 function CloseIcon() {

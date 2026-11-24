@@ -1737,6 +1737,8 @@
   "sessionInspectorSessionId": "Session ID",
   "sessionInspectorCopySessionId": "Copy session ID",
   "sessionInspectorSessionIdCopied": "Copied!",
+  "sessionInspectorActions": "Session actions",
+  "sessionInspectorMoreActions": "More",
   "sessionInspectorStatus": "Status",
   "sessionInspectorPlan": "Plan",
   "sessionInspectorPlanProgress": "{completed}/{total} complete",

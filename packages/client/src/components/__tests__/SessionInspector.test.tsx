@@ -5,12 +5,14 @@ import {
   screen,
   waitFor,
 } from "@testing-library/react";
-import type { SessionQuestion } from "@yep-anywhere/shared";
+import { type SessionQuestion, toUrlProjectId } from "@yep-anywhere/shared";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
+import { api } from "../../api/client";
 import { SubagentDetailContext } from "../../contexts/SubagentDetailContext";
 import * as fileIndexHook from "../../hooks/useSessionFileIndex";
 import { I18nProvider } from "../../i18n";
+import * as clipboard from "../../lib/clipboard";
 import { UI_KEYS } from "../../lib/storageKeys";
 import type { Message, ProviderName } from "../../types";
 import { SessionInspector } from "../SessionInspector";
@@ -725,5 +727,99 @@ describe("SessionInspector", () => {
 
     expect(screen.getByText("Backend prompt 1")).not.toBeNull();
     expect(screen.getByText("Backend prompt 13")).not.toBeNull();
+  });
+
+  it("copies full session info directly from the status card", async () => {
+    const projectPath = "/Users/someone/Desktop/work/api-testing";
+    const projectId = toUrlProjectId(projectPath);
+    const writeSpy = vi
+      .spyOn(clipboard, "writeClipboardText")
+      .mockResolvedValue(undefined);
+    vi.spyOn(api, "getSessionSourceFile").mockResolvedValue({
+      path: "/Users/someone/.pi/sessions/session-1.jsonl",
+    });
+
+    window.localStorage.setItem(UI_KEYS.locale, "en");
+    render(
+      <MemoryRouter>
+        <I18nProvider>
+          <SessionInspector
+            presentation="sidebar"
+            messages={[]}
+            projectId={projectId}
+            sessionId="session-1"
+            sessionTitle="Historical Leaderboard Session"
+            provider="pi"
+            status={{ owner: "none" }}
+            onSelectMessage={vi.fn()}
+          />
+        </I18nProvider>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Copy session info" }));
+
+    await waitFor(() => expect(writeSpy).toHaveBeenCalledTimes(1));
+    const copiedText = writeSpy.mock.calls[0]?.[0] ?? "";
+    expect(copiedText).toContain("Title: Historical Leaderboard Session");
+    expect(copiedText).toContain("Session ID: session-1");
+    expect(copiedText).toContain("Provider: pi");
+    expect(copiedText).toContain(`Project: ${projectPath}`);
+    expect(copiedText).toContain(
+      "File: /Users/someone/.pi/sessions/session-1.jsonl",
+    );
+    expect(copiedText).toContain(`/projects/${projectId}/sessions/session-1`);
+    await waitFor(() => {
+      expect(screen.getByRole("button", { name: "Copied!" })).not.toBeNull();
+    });
+  });
+
+  it("exposes the full session menu in the inspector and closes drawer on rename", () => {
+    const onClose = vi.fn();
+    const onRename = vi.fn();
+    const onTogglePin = vi.fn();
+    const projectId = toUrlProjectId("/Users/someone/Desktop/work/api-testing");
+
+    window.localStorage.setItem(UI_KEYS.locale, "en");
+    render(
+      <MemoryRouter>
+        <I18nProvider>
+          <SessionInspector
+            presentation="drawer"
+            isOpen
+            onClose={onClose}
+            messages={[]}
+            projectId={projectId}
+            sessionId="session-1"
+            sessionTitle="Historical Session"
+            provider="pi"
+            status={{ owner: "none" }}
+            sessionMenuProps={{
+              sessionId: "session-1",
+              projectId,
+              title: "Historical Session",
+              isPinned: false,
+              isArchived: false,
+              provider: "pi",
+              onTogglePin,
+              onToggleArchive: vi.fn(),
+              onRename,
+            }}
+            onSelectMessage={vi.fn()}
+          />
+        </I18nProvider>
+      </MemoryRouter>,
+    );
+
+    fireEvent.click(screen.getByRole("button", { name: "Session options" }));
+    expect(screen.getByRole("button", { name: "Copy title" })).not.toBeNull();
+    expect(
+      screen.getByRole("button", { name: "Copy project directory" }),
+    ).not.toBeNull();
+    expect(screen.getByRole("button", { name: "Pin" })).not.toBeNull();
+
+    fireEvent.click(screen.getByRole("button", { name: "Rename" }));
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(onRename).toHaveBeenCalledTimes(1);
   });
 });

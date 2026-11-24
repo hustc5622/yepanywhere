@@ -3,7 +3,7 @@ import { useEffect, useRef, useState } from "react";
 import { createPortal } from "react-dom";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
-import { useToastContext } from "../contexts/ToastContext";
+import { useOptionalToastContext } from "../contexts/ToastContext";
 import { useRemoteBasePath } from "../hooks/useRemoteBasePath";
 import { useI18n } from "../i18n";
 import { appPath } from "../lib/apiPath";
@@ -106,6 +106,30 @@ export function buildSessionInfoText(input: {
     .join("\n");
 }
 
+export async function copySessionInfo(input: {
+  sessionId: string;
+  projectId: string;
+  title?: string | null;
+  provider?: string;
+}): Promise<void> {
+  // Best-effort: a provider that cannot name its file yet (in-flight turn,
+  // bridge-only session) must not take the whole copy down with it, so the
+  // File row simply drops out.
+  const sourceFile = await api
+    .getSessionSourceFile(input.projectId, input.sessionId)
+    .catch(() => null);
+  await writeClipboardText(
+    buildSessionInfoText({
+      sessionId: input.sessionId,
+      projectId: input.projectId,
+      title: input.title,
+      provider: input.provider,
+      sourceFile: sourceFile?.path ?? null,
+      sourceFileHost: sourceFile?.remoteHost ?? null,
+    }),
+  );
+}
+
 export interface SessionMenuProps {
   sessionId: string;
   projectId: string;
@@ -139,6 +163,8 @@ export interface SessionMenuProps {
   onGoal?: () => void;
   /** Use "..." icon instead of chevron */
   useEllipsisIcon?: boolean;
+  /** Optional visible label rendered beside the trigger icon */
+  triggerLabel?: string;
   /** Whether session sharing is configured */
   sharingConfigured?: boolean;
   /** Called to share the session as a snapshot */
@@ -174,11 +200,13 @@ export function SessionMenu({
   sharingConfigured,
   onShare,
   useEllipsisIcon = false,
+  triggerLabel,
   className = "",
   useFixedPositioning = false,
 }: SessionMenuProps) {
   const { t } = useI18n();
-  const { showToast } = useToastContext();
+  const toast = useOptionalToastContext();
+  const showToast = toast?.showToast;
   const navigate = useNavigate();
   const basePath = useRemoteBasePath();
   const projectPath = decodeProjectPath(projectId);
@@ -190,9 +218,11 @@ export function SessionMenu({
   const [isGeneratingTitle, setIsGeneratingTitle] = useState(false);
   const [isShareDialogOpen, setIsShareDialogOpen] = useState(false);
   const [dropdownPosition, setDropdownPosition] = useState<{
-    top: number;
+    top?: number;
+    bottom?: number;
     left?: number;
     right?: number;
+    maxHeight?: number;
   } | null>(null);
   const wrapperRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -248,24 +278,29 @@ export function SessionMenu({
         const rightPosition = window.innerWidth - rect.right;
         const margin = 8;
 
-        // Check if dropdown would overflow bottom of viewport
-        const wouldOverflowBottom =
-          rect.bottom + margin + dropdownHeight > window.innerHeight;
-
-        // Calculate vertical position - show above trigger if it would overflow bottom
-        const top = wouldOverflowBottom
-          ? rect.top - dropdownHeight - margin
-          : rect.bottom + margin;
+        const spaceBelow = window.innerHeight - rect.bottom - margin * 2;
+        const spaceAbove = rect.top - margin * 2;
+        const openAbove =
+          spaceBelow < dropdownHeight && spaceAbove > spaceBelow;
+        const verticalPosition = openAbove
+          ? {
+              bottom: window.innerHeight - rect.top + margin,
+              maxHeight: Math.max(120, spaceAbove),
+            }
+          : {
+              top: rect.bottom + margin,
+              maxHeight: Math.max(120, spaceBelow),
+            };
 
         // If right-aligned would overflow left edge, use left-aligned instead
         if (rect.right - dropdownWidth < margin) {
           setDropdownPosition({
-            top,
+            ...verticalPosition,
             left: rect.left,
           });
         } else {
           setDropdownPosition({
-            top,
+            ...verticalPosition,
             right: rightPosition,
           });
         }
@@ -337,26 +372,16 @@ export function SessionMenu({
     setDropdownPosition(null);
     triggerRef.current?.blur();
     try {
-      // Best-effort: a provider that cannot name its file yet (in-flight turn,
-      // bridge-only session) must not take the whole copy down with it, so the
-      // File row simply drops out.
-      const sourceFile = await api
-        .getSessionSourceFile(projectId, sessionId)
-        .catch(() => null);
-      await writeClipboardText(
-        buildSessionInfoText({
-          sessionId,
-          projectId,
-          title,
-          provider,
-          sourceFile: sourceFile?.path ?? null,
-          sourceFileHost: sourceFile?.remoteHost ?? null,
-        }),
-      );
-      showToast(t("sessionMenuInfoCopied"), "success");
+      await copySessionInfo({
+        sessionId,
+        projectId,
+        title,
+        provider,
+      });
+      showToast?.(t("sessionMenuInfoCopied"), "success");
     } catch (error) {
       console.error("Failed to copy session info:", error);
-      showToast(t("sessionMenuInfoCopyFailed"), "error");
+      showToast?.(t("sessionMenuInfoCopyFailed"), "error");
     }
   };
 
@@ -367,10 +392,10 @@ export function SessionMenu({
     triggerRef.current?.blur();
     try {
       await writeClipboardText(projectPath);
-      showToast(t("sessionMenuProjectPathCopied"), "success");
+      showToast?.(t("sessionMenuProjectPathCopied"), "success");
     } catch (error) {
       console.error("Failed to copy project directory:", error);
-      showToast(t("sessionMenuProjectPathCopyFailed"), "error");
+      showToast?.(t("sessionMenuProjectPathCopyFailed"), "error");
     }
   };
 
@@ -380,10 +405,10 @@ export function SessionMenu({
     triggerRef.current?.blur();
     try {
       await writeClipboardText(title?.trim() || t("sessionUntitled"));
-      showToast(t("sessionMenuTitleCopied"), "success");
+      showToast?.(t("sessionMenuTitleCopied"), "success");
     } catch (error) {
       console.error("Failed to copy session title:", error);
-      showToast(t("sessionMenuTitleCopyFailed"), "error");
+      showToast?.(t("sessionMenuTitleCopyFailed"), "error");
     }
   };
 
@@ -397,10 +422,10 @@ export function SessionMenu({
     try {
       const result = await api.generateSessionTitle(projectId, sessionId);
       await onTitleGenerated?.(result.title);
-      showToast(t("sessionTitleGenerated"), "success");
+      showToast?.(t("sessionTitleGenerated"), "success");
     } catch (error) {
       console.error("Failed to generate session title:", error);
-      showToast(
+      showToast?.(
         error instanceof Error
           ? error.message
           : t("sessionTitleGenerationFailed"),
@@ -440,10 +465,15 @@ export function SessionMenu({
   const dropdownStyle = useFixedPositioning
     ? {
         position: "fixed" as const,
-        top: dropdownPosition?.top ?? 100,
+        ...(dropdownPosition?.bottom !== undefined
+          ? { top: "auto" as const, bottom: dropdownPosition.bottom }
+          : { top: dropdownPosition?.top ?? 100 }),
         ...(dropdownPosition?.left !== undefined
           ? { left: dropdownPosition.left }
           : { right: dropdownPosition?.right ?? 20 }),
+        ...(dropdownPosition?.maxHeight !== undefined
+          ? { maxHeight: dropdownPosition.maxHeight }
+          : {}),
       }
     : undefined;
 
@@ -786,6 +816,9 @@ export function SessionMenu({
           >
             <polyline points="6 9 12 15 18 9" />
           </svg>
+        )}
+        {triggerLabel && (
+          <span className="session-menu-trigger-label">{triggerLabel}</span>
         )}
       </button>
       {isOpen && renderDropdown()}

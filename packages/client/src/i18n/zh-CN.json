@@ -1737,6 +1737,8 @@
   "sessionInspectorSessionId": "会话 ID",
   "sessionInspectorCopySessionId": "复制会话 ID",
   "sessionInspectorSessionIdCopied": "已复制！",
+  "sessionInspectorActions": "会话操作",
+  "sessionInspectorMoreActions": "更多操作",
   "sessionInspectorStatus": "状态",
   "sessionInspectorPlan": "计划",
   "sessionInspectorPlanProgress": "{completed}/{total} 完成",

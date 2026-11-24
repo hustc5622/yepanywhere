@@ -26,7 +26,7 @@ import { ProcessInfoModal } from "../components/ProcessInfoModal";
 import { ReadOnlySessionBar } from "../components/ReadOnlySessionBar";
 import { RemoteProjectIcon } from "../components/RemoteProjectIcon";
 import { SessionInspector } from "../components/SessionInspector";
-import { SessionMenu } from "../components/SessionMenu";
+import { SessionMenu, type SessionMenuProps } from "../components/SessionMenu";
 import {
   SessionSearchBar,
   type SessionSearchOccurrence,
@@ -2464,6 +2464,55 @@ function SessionPageContent({
     </svg>
   );
 
+  const sessionMenuProps:
+    | Omit<
+        SessionMenuProps,
+        "useFixedPositioning" | "useEllipsisIcon" | "className" | "triggerLabel"
+      >
+    | undefined = !loading
+    ? {
+        sessionId: actualSessionId,
+        projectId,
+        title: displayTitle,
+        isPinned,
+        isArchived,
+        hasUnread,
+        provider: effectiveProvider,
+        processId: status.owner === "self" ? status.processId : undefined,
+        canArchive,
+        archiveBlockReason,
+        onTogglePin: handleTogglePin,
+        onToggleArchive: handleToggleArchive,
+        onToggleRead: handleToggleRead,
+        onRename: handleStartEditingTitle,
+        onTitleGenerated: (generatedTitle) => {
+          setLocalCustomTitle(generatedTitle);
+        },
+        onTitleGenerationStateChange: setIsGeneratingTitle,
+        onClone: (newSessionId) => {
+          navigate(
+            `${basePath}/projects/${projectId}/sessions/${newSessionId}`,
+          );
+        },
+        onTerminate: handleTerminate,
+        onCompact:
+          (session?.provider === "pi" && status.owner !== "external") ||
+          (session?.provider === "codex" &&
+            status.owner === "self" &&
+            status.processId)
+            ? handleCompact
+            : undefined,
+        onGoal:
+          session?.provider === "codex" &&
+          status.owner !== "external" &&
+          !isReadOnlySession
+            ? () => void openCodexGoal()
+            : undefined,
+        sharingConfigured,
+        onShare: handleShare,
+      }
+    : undefined;
+
   const content = (
     <div
       className={
@@ -2548,52 +2597,9 @@ function SessionPageContent({
                     {t("sessionArchivedBadge")}
                   </span>
                 )}
-                {!loading && (
+                {sessionMenuProps && (
                   <SessionMenu
-                    sessionId={sessionId}
-                    projectId={projectId}
-                    title={displayTitle}
-                    isPinned={isPinned}
-                    isArchived={isArchived}
-                    hasUnread={hasUnread}
-                    provider={session?.provider}
-                    processId={
-                      status.owner === "self" ? status.processId : undefined
-                    }
-                    canArchive={canArchive}
-                    archiveBlockReason={archiveBlockReason}
-                    onTogglePin={handleTogglePin}
-                    onToggleArchive={handleToggleArchive}
-                    onToggleRead={handleToggleRead}
-                    onRename={handleStartEditingTitle}
-                    onTitleGenerated={(generatedTitle) => {
-                      setLocalCustomTitle(generatedTitle);
-                    }}
-                    onTitleGenerationStateChange={setIsGeneratingTitle}
-                    onClone={(newSessionId) => {
-                      navigate(
-                        `${basePath}/projects/${projectId}/sessions/${newSessionId}`,
-                      );
-                    }}
-                    onTerminate={handleTerminate}
-                    onCompact={
-                      (session?.provider === "pi" &&
-                        status.owner !== "external") ||
-                      (session?.provider === "codex" &&
-                        status.owner === "self" &&
-                        status.processId)
-                        ? handleCompact
-                        : undefined
-                    }
-                    onGoal={
-                      session?.provider === "codex" &&
-                      status.owner !== "external" &&
-                      !isReadOnlySession
-                        ? () => void openCodexGoal()
-                        : undefined
-                    }
-                    sharingConfigured={sharingConfigured}
-                    onShare={handleShare}
+                    {...sessionMenuProps}
                     useFixedPositioning
                     useEllipsisIcon
                   />
@@ -2925,6 +2931,7 @@ function SessionPageContent({
             activeToolApproval={activeToolApproval}
             projectId={projectId}
             sessionId={actualSessionId}
+            sessionTitle={displayTitle}
             provider={effectiveProvider}
             model={session?.model ?? navState?.initialModel}
             reasoningEffort={
@@ -2934,6 +2941,7 @@ function SessionPageContent({
             basePath={basePath}
             status={status}
             processState={processState}
+            sessionMenuProps={sessionMenuProps}
             onSelectMessage={handleSelectMessage}
           />
         ) : null
@@ -2960,6 +2968,7 @@ function SessionPageContent({
           activeToolApproval={activeToolApproval}
           projectId={projectId}
           sessionId={actualSessionId}
+          sessionTitle={displayTitle}
           provider={effectiveProvider}
           model={session?.model ?? navState?.initialModel}
           reasoningEffort={
@@ -2969,6 +2978,7 @@ function SessionPageContent({
           basePath={basePath}
           status={status}
           processState={processState}
+          sessionMenuProps={sessionMenuProps}
           onSelectMessage={handleSelectMessage}
         />
       )}
