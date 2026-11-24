@@ -73,8 +73,19 @@ describe("getModelContextWindow", () => {
 describe("agy context windows", () => {
   it("uses agy's compaction limit instead of the raw Gemini window", () => {
     expect(getModelContextWindow("gemini-4-neon", "agy")).toBe(512_000);
+    expect(getModelContextWindow("gemini-4-carbon", "agy")).toBe(512_000);
+    expect(getModelContextWindow("gemini-4-carbon-high", "agy")).toBe(512_000);
     expect(getModelContextWindow("gemini-4-argon-high", "agy")).toBe(512_000);
+    expect(getModelContextWindow("gemini-4-hydrogen-xhigh", "agy")).toBe(
+      512_000,
+    );
+    expect(getModelContextWindow("gemini-pro-orchestrator", "agy")).toBe(
+      512_000,
+    );
     expect(getModelContextWindow("gemini-pro-orchestrator-neon", "agy")).toBe(
+      512_000,
+    );
+    expect(getModelContextWindow("gemini-pro-orchestrator-argon", "agy")).toBe(
       512_000,
     );
     expect(getModelContextWindow("gemini-3.8-flash-low", "agy")).toBe(256_000);
@@ -107,6 +118,14 @@ describe("getLlmGatewayModelDefaultLimits", () => {
     ).toEqual({
       context: 256_000,
       output: 128_000,
+    });
+    expect(getLlmGatewayModelDefaultLimits("gemini-4-carbon")).toEqual({
+      context: 1_048_576,
+      output: 1_048_576,
+    });
+    expect(getLlmGatewayModelDefaultLimits("gemini-3.1-pro")).toEqual({
+      context: 1_048_576,
+      output: 65_536,
     });
   });
 

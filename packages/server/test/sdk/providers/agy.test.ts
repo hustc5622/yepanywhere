@@ -18,14 +18,19 @@ import {
 } from "../../../src/sdk/providers/agy.js";
 import { inferAgyNativeToolName } from "../../../src/sessions/agy-tools.js";
 
-// `agy models` output captured from Antigravity CLI 1.5.13 (Google AI Pro).
+// `agy models` output captured from Antigravity CLI 1.5.16 (Google AI Ultra).
 const MODELS_OUTPUT = [
   "Fetching available models...",
   "gemini-4-neon-high\tGemini 4 Neon (High)",
   "gemini-4-neon-xhigh\tGemini 4 Neon (XHigh)",
   "gemini-4-neon-medium\tGemini 4 Neon (Medium)",
   "gemini-4-neon-low\tGemini 4 Neon (Low)",
+  "gemini-4-carbon-medium\tGemini 4 Carbon (Medium)",
+  "gemini-4-carbon-high\tGemini 4 Carbon (High)",
+  "gemini-4-carbon-low\tGemini 4 Carbon (Low)",
   "gemini-pro-orchestrator-neon\tOrchestrator (Neon)",
+  "gemini-pro-orchestrator\tOrchestrator (Carbon)",
+  "gemini-pro-orchestrator-argon\tOrchestrator (Argon)",
   "gemini-3.8-flash-high\tGemini 3.8 Flash (High)",
   "gemini-3.8-flash-medium\tGemini 3.8 Flash (Medium)",
   "gemini-3.8-flash-low\tGemini 3.8 Flash (Low)",
@@ -37,7 +42,10 @@ describe("agy model catalog", () => {
     const models = buildAgyModelCatalog(parseAgyModelsOutput(MODELS_OUTPUT));
     expect(models.map((model) => model.id)).toEqual([
       "gemini-4-neon",
+      "gemini-4-carbon",
       "gemini-pro-orchestrator-neon",
+      "gemini-pro-orchestrator",
+      "gemini-pro-orchestrator-argon",
       "gemini-3.8-flash",
       "gpt-oss-120b-medium",
     ]);
@@ -49,9 +57,22 @@ describe("agy model catalog", () => {
     expect(neon?.defaultReasoningEffort).toBe("high");
     // agy compacts at its own per-model limit, not the raw 1M Gemini window.
     expect(neon?.contextWindow).toBe(512_000);
-    expect(models[2]?.contextWindow).toBe(256_000);
-    // A single-tier slug stays whole, exactly like agy's ACP option value.
+    const carbon = models[1];
+    expect(carbon?.name).toBe("Gemini 4 Carbon");
+    expect(
+      carbon?.supportedReasoningEfforts?.map((e) => e.reasoningEffort),
+    ).toEqual(["low", "medium", "high"]);
+    expect(carbon?.defaultReasoningEffort).toBe("high");
+    expect(carbon?.contextWindow).toBe(512_000);
+    // Orchestrator variants stay standalone with fixed reasoning budgets.
     expect(models[3]).toEqual({
+      id: "gemini-pro-orchestrator",
+      name: "Orchestrator (Carbon)",
+      contextWindow: 512_000,
+    });
+    expect(models[5]?.contextWindow).toBe(256_000);
+    // A single-tier slug stays whole, exactly like agy's ACP option value.
+    expect(models[6]).toEqual({
       id: "gpt-oss-120b-medium",
       name: "GPT-OSS 120B (Medium)",
       contextWindow: 80_000,

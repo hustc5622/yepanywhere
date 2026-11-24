@@ -402,6 +402,8 @@ const LLM_GATEWAY_MODEL_LIMIT_RULES: ReadonlyArray<
   ["claude-sonnet", { context: 200_000, output: 64_000 }],
   ["claude-fable", { context: 1_000_000, output: 128_000 }],
   ["claude", { context: 200_000, output: 64_000 }],
+  // Google Gemini 4 Carbon — 1,048,576 unified context window (input + thinking + output; Long Decode, not capped at 64K).
+  ["gemini-4-carbon", { context: 1_048_576, output: 1_048_576 }],
   // Google Gemini 2.5 / 3.x — 1,048,576 context, 65,536 output.
   ["gemini", { context: 1_048_576, output: 65_536 }],
   // OpenAI GPT-5.x / Codex.
@@ -471,13 +473,18 @@ export function getLlmGatewayModelDefaultLimits(
  * written once the next request would exceed it. That limit — not 1M — is the
  * usable window, so the meter uses it.
  *
- * Verified against real transcripts (2026-11, agy 1.5.x):
+ * Verified against real transcripts and bundled `model_profiles` (2026-11, agy 1.5.16):
+ * - `gemini-4-carbon-high` (enum M427 → M417, limit 512000): raw model has a 1M
+ *   unified window, but agy's checkpointer still compacts at 512K.
  * - `gemini-4-argon-high` (enum M417, limit 512000) compacted at ~510K;
- *   `gemini-4-neon-high` ran to ~401K without compacting.
- * - `gemini-3.8-flash-high` (not in `model_profiles`, default limit 256000)
+ *   `gemini-4-neon-high` / `gemini-4-hydrogen-*` (M432/M465 profiles, limit 512000).
+ * - `gemini-pro-orchestrator` (`Orchestrator (Carbon)`, enum M667, limit 512000,
+ *   executor M669 → M432) and Neon/Argon Orchestrator variants (M537/M668/M681, 512000).
+ * - `gemini-3.8-flash-{high,medium,low}` (M318/M319/M320 → M318, limit 256000)
  *   compacted at ~254K.
- * - Claude models use 256000 (an 840K `claude-1m` variant is an experiment);
- *   `gpt-oss-120b-medium` uses 80000.
+ * - Claude models default to 256000 (M400..M405 also carry a `claude-1m_840k`
+ *   840K variant under `base.checkpoint-variant`, kept at 256K until verified
+ *   against a real Claude transcript); `gpt-oss-120b-medium` uses 80000.
  *
  * Matched by longest prefix against the family id or the full tiered slug.
  */
