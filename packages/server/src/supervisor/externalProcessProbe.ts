@@ -266,16 +266,31 @@ function parseLsofCwdRecords(
   }
 }
 
+const PROBED_PROVIDERS = [
+  "claude",
+  "gemini",
+  "codex",
+  "pi",
+  "agy",
+  "cursor",
+  "mcode",
+] as const satisfies readonly FileChangeEvent["provider"][];
+
 function commandMatchesAnyProvider(command: string): boolean {
-  return (
-    commandMatchesProvider("claude", command) ||
-    commandMatchesProvider("gemini", command) ||
-    commandMatchesProvider("codex", command) ||
-    commandMatchesProvider("pi", command)
+  return PROBED_PROVIDERS.some((provider) =>
+    commandMatchesProvider(provider, command),
   );
 }
 
-function commandMatchesProvider(
+/**
+ * agy subcommands that answer and exit (catalog, quota and auth probes,
+ * including Yep's own). They never drive a session.
+ */
+const AGY_SHORT_LIVED =
+  /(?:^|[/\s])agy\s+(?:models|usage|credits|login|logout|update|version|help|--version|-v|--help|-h|--login)\b/;
+
+/** Whether a process command line belongs to a provider's CLI. Exported for tests. */
+export function commandMatchesProvider(
   provider: FileChangeEvent["provider"],
   command: string,
 ): boolean {
@@ -291,6 +306,21 @@ function commandMatchesProvider(
       return /(?:^|[\/\s])pi(?:\.[cm]?js|[-_]coding[-_]agent)?(?:[\/\s]|$)/.test(
         normalized,
       );
+    case "agy":
+      // `agy` (interactive) and `agy acp` driven by another ACP client.
+      return (
+        /(?:^|[/\s])agy(?:\s|$)/.test(normalized) &&
+        !AGY_SHORT_LIVED.test(normalized)
+      );
+    case "cursor":
+      // The Cursor IDE's background agent worker is not a CLI session.
+      return (
+        (/(?:^|[/\s])cursor-agent(?:\s|$)/.test(normalized) ||
+          /\.local\/bin\/agent(?:\s|$)/.test(normalized)) &&
+        !normalized.includes("cursor-agent-worker")
+      );
+    case "mcode":
+      return /(?:^|[/\s])mcode(?:\s|$)/.test(normalized);
     default:
       return false;
   }

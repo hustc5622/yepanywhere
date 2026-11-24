@@ -110,6 +110,8 @@ export interface ProcessStateEvent {
   lastErrorMessage?: string;
   /** Present while the provider is retrying a failed request. */
   retryStatus?: SessionRetryStatus;
+  /** Idle, but provider background work will start a turn on its own. */
+  hasPendingBackgroundWork?: boolean;
   timestamp: string;
 }
 

@@ -53,7 +53,7 @@ import {
   type SessionRuntimeProcess,
   deriveSessionRuntime,
   pendingInputTypeFromProcess,
-  presentLastTurnStatus,
+  presentRuntimeLastTurnStatus,
 } from "../sessions/session-runtime.js";
 import type { ISessionReader } from "../sessions/types.js";
 import type { ExternalSessionTracker } from "../supervisor/ExternalSessionTracker.js";
@@ -849,7 +849,11 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
             ownership.owner === "none" ? session.interrupted : undefined,
           lastTurnStatus: bridgedSession
             ? bridgedSession.session.lastTurnStatus
-            : presentLastTurnStatus(session.lastTurnStatus, ownership),
+            : presentRuntimeLastTurnStatus(
+                session.lastTurnStatus,
+                runtime,
+                process,
+              ),
           lastErrorMessage: bridgedSession
             ? bridgedSession.session.lastErrorMessage
             : session.lastErrorMessage,
@@ -981,9 +985,9 @@ export function createGlobalSessionsRoutes(deps: GlobalSessionsDeps): Hono {
         model: session.model,
         reasoningEffort: session.reasoningEffort,
         serviceTier: session.serviceTier,
-        lastTurnStatus: presentLastTurnStatus(
+        lastTurnStatus: presentRuntimeLastTurnStatus(
           session.lastTurnStatus,
-          runtime.ownership,
+          runtime,
         ),
         lastErrorMessage: session.lastErrorMessage,
         retryStatus: session.retryStatus,

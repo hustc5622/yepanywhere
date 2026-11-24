@@ -416,6 +416,10 @@ export class ClaudeSessionReader implements ISessionReader {
         model,
         serviceTier: runtimeConfig.serviceTier,
         interrupted,
+        lastTurnStatus: this.branchLastTurnStatus(
+          conversationMessages,
+          interrupted,
+        ),
       };
     } catch {
       return null;
@@ -676,6 +680,44 @@ export class ClaudeSessionReader implements ISessionReader {
 
     // No result message - still running or interrupted
     return "running";
+  }
+
+  /**
+   * The active branch's last turn status. A user stop is recorded as a
+   * "[Request interrupted by user]" prompt; any other branch that stops
+   * mid-turn is incomplete.
+   */
+  private branchLastTurnStatus(
+    messages: ClaudeSessionEntry[],
+    interrupted: boolean,
+  ): SessionSummary["lastTurnStatus"] {
+    const last = messages.at(-1);
+    if (!last) return undefined;
+    if (!interrupted) return "completed";
+    if (last.type === "user") {
+      const content = (last as { message?: { content?: unknown } }).message
+        ?.content;
+      const texts =
+        typeof content === "string"
+          ? [content]
+          : Array.isArray(content)
+            ? content.flatMap((block) =>
+                block &&
+                typeof block === "object" &&
+                (block as { type?: unknown }).type === "text" &&
+                typeof (block as { text?: unknown }).text === "string"
+                  ? [(block as { text: string }).text]
+                  : [],
+              )
+            : [];
+      if (
+        texts.some((text) =>
+          text.trimStart().startsWith("[Request interrupted by user"),
+        )
+      )
+        return "interrupted";
+    }
+    return "incomplete";
   }
 
   /**

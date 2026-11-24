@@ -30,6 +30,7 @@ import {
   type ContextCompactEvent,
   type ContextCumulativeUsage,
   SESSION_TITLE_MAX_LENGTH,
+  type SessionLastTurnStatus,
   type SessionQuestion,
   type SubagentDescriptor,
   type SubagentStatus,
@@ -215,6 +216,8 @@ interface CodexSummaryScan {
   cumulativeUsage?: ContextCumulativeUsage;
   compactCount: number;
   compactEvents?: ContextCompactEvent[];
+  /** Status of the newest turn, from its start and terminal markers. */
+  lastTurnStatus?: SessionLastTurnStatus;
   compactionOffsets: number[];
   responseUserTurns: CodexUserTurnScan[];
   eventUserTurns: CodexUserTurnScan[];
@@ -540,6 +543,43 @@ function hasDisplayableCodexInheritedHistory(
     }
     return codexEntryOutputCount(entry, false, []) > 0;
   });
+}
+
+/**
+ * Fold one rollout entry into the newest turn's status. A started turn or a
+ * new prompt is `incomplete` until a terminal marker closes it:
+ * `task_complete`/`turn_complete` (completed, or failed with an error) or
+ * `turn_aborted` (interrupted).
+ */
+export function nextCodexLastTurnStatus(
+  current: SessionLastTurnStatus | undefined,
+  entry: CodexSessionEntry,
+): SessionLastTurnStatus | undefined {
+  if (entry.type !== "event_msg") return current;
+  const payload = entry.payload as { type?: unknown; error?: unknown };
+  switch (payload.type) {
+    case "task_started":
+    case "turn_started":
+    case "user_message":
+      return "incomplete";
+    case "task_complete":
+    case "turn_complete":
+      return payload.error !== undefined && payload.error !== null
+        ? "failed"
+        : "completed";
+    case "turn_aborted":
+      return "interrupted";
+    default:
+      return current;
+  }
+}
+
+export function deriveCodexLastTurnStatus(
+  entries: readonly CodexSessionEntry[],
+): SessionLastTurnStatus | undefined {
+  let status: SessionLastTurnStatus | undefined;
+  for (const entry of entries) status = nextCodexLastTurnStatus(status, entry);
+  return status;
 }
 
 /**
@@ -1266,6 +1306,7 @@ export class CodexSessionReader implements ISessionReader {
     let logicalBytes = 0;
     let contextUsage: ContextUsage | undefined;
     let compactCount = 0;
+    let lastTurnStatus: SessionLastTurnStatus | undefined;
     let lastContextTokens: number | undefined;
     let tokenCountAfterCompaction = false;
     let tokenCountTurns = 0;
@@ -1386,6 +1427,7 @@ export class CodexSessionReader implements ISessionReader {
         metaEntry ??= entry;
         continue;
       }
+      lastTurnStatus = nextCodexLastTurnStatus(lastTurnStatus, entry);
 
       if (entry.type === "turn_context") {
         firstTurnContext ??= entry;
@@ -1724,6 +1766,7 @@ export class CodexSessionReader implements ISessionReader {
       cumulativeUsage,
       compactCount,
       compactEvents: compactEvents.length > 0 ? compactEvents : undefined,
+      lastTurnStatus,
       compactionOffsets,
       responseUserTurns,
       eventUserTurns,
@@ -2233,6 +2276,7 @@ export class CodexSessionReader implements ISessionReader {
       cumulativeUsage,
       compactCount: scan.compactCount,
       compactEvents: scan.compactEvents,
+      ...(scan.lastTurnStatus ? { lastTurnStatus: scan.lastTurnStatus } : {}),
       provider,
       ...(metaEntry.payload.forked_from_id
         ? { forkParentSessionId: metaEntry.payload.forked_from_id }
@@ -2352,6 +2396,7 @@ export class CodexSessionReader implements ISessionReader {
         cumulativeUsage,
         compactCount,
         compactEvents,
+        lastTurnStatus: deriveCodexLastTurnStatus(visibleEntries),
         provider,
         ...(metaEntry.payload.forked_from_id
           ? { forkParentSessionId: metaEntry.payload.forked_from_id }
@@ -2813,7 +2858,8 @@ export class CodexSessionReader implements ISessionReader {
   }
 
   getIndexScopeKey(sessionDir: string): string {
-    return `codex::${sessionDir}::${this.projectPath ?? "*"}`;
+    // Rebuild summaries cached before they carried `lastTurnStatus`.
+    return `codex::${sessionDir}::${this.projectPath ?? "*"}::turn-status-v1`;
   }
 
   async listSessionFiles(_sessionDir: string): Promise<SessionFileEntry[]> {

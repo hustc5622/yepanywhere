@@ -417,6 +417,20 @@ export class SessionDisplayReducer {
     if (state !== "running" && state !== "unknown") this.stopStreaming();
     if (["completed", "interrupted", "failed", "incomplete"].includes(state))
       this.compactionRun = undefined;
+    // Nothing runs an incomplete session any more: a call without a result
+    // will never get one, so stop showing it as running. `background` keeps
+    // its tools running, and `unknown` cannot tell either way.
+    if (state === "incomplete") {
+      for (const tool of this.tools.values()) {
+        if (tool.step.status !== "running") continue;
+        tool.step = {
+          ...tool.step,
+          version: tool.step.version + 1,
+          status: "unknown",
+        };
+        this.releasePreview(tool);
+      }
+    }
     const last = this.nodes.at(-1);
     this.runtime =
       state === "running" &&

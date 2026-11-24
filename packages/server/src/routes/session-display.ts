@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
 import { join } from "node:path";
 import {
+  type AgentActivity,
   type InputRequest,
   type ProviderName,
   SESSION_DISPLAY_INITIAL_TURN_LIMIT,
@@ -88,7 +89,10 @@ import {
   collectSessionFileEdits,
   reconstructSessionBaseline,
 } from "../sessions/session-file-changes.js";
-import { presentLastTurnStatus } from "../sessions/session-runtime.js";
+import {
+  type SessionLifecycleTurnOutcome,
+  resolveSessionLifecycle,
+} from "../sessions/session-lifecycle.js";
 import type { GetSessionOptions, LoadedSession } from "../sessions/types.js";
 import { isUserPromptMessage } from "../sessions/user-prompt-message.js";
 import { compactQuestionText } from "../sessions/user-questions.js";
@@ -125,11 +129,19 @@ export interface SessionDisplayRuntimeState {
   provider?: ProviderName;
   toolsMayBeActive: boolean;
   /**
-   * Who drives the session. A transcript that stops mid-turn is only shown
-   * as incomplete when nobody does (see `presentLastTurnStatus`).
+   * Who drives the session. A transcript that stops mid-turn is hidden while
+   * a live writer may still extend it (see `resolveSessionLifecycle`).
    */
   owner?: "self" | "external" | "none";
   pendingInputRequest?: InputRequest | null;
+  /** Activity of the owned process, when `owner` is `self`. */
+  processState?: AgentActivity;
+  /** The owned idle process still holds provider-side background work. */
+  hasPendingBackgroundWork?: boolean;
+  /** How the owned process saw its most recent turn end. */
+  lastTurnOutcome?: SessionLifecycleTurnOutcome;
+  /** Inspecting the live runtime failed; liveness cannot be told. */
+  runtimeUnavailable?: boolean;
 }
 
 export interface SessionDisplayRoutesDeps {
@@ -846,19 +858,40 @@ export function createSessionDisplaySource(
       resolved.runtime.toolsMayBeActive,
       resolved.runtime.pendingInputRequest?.id,
       resolved.runtime.owner,
+      resolved.runtime.processState,
+      resolved.runtime.hasPendingBackgroundWork === true,
+      resolved.runtime.runtimeUnavailable === true,
     ]);
+  };
+  const lifecycle = (
+    resolved: ResolvedDisplaySession,
+    persistedStatus?: SessionLastTurnStatus,
+  ) => {
+    const runtime = resolved.runtime;
+    const self = runtime.owner === "self";
+    return resolveSessionLifecycle({
+      process: self
+        ? {
+            id: "display",
+            // Older runtime sources report only whether tools may be active.
+            state:
+              runtime.processState ??
+              (runtime.toolsMayBeActive ? "in-turn" : "idle"),
+            hasPendingBackgroundWork: runtime.hasPendingBackgroundWork,
+            lastTurnOutcome: runtime.lastTurnOutcome,
+          }
+        : null,
+      pendingInput: Boolean(runtime.pendingInputRequest),
+      externalActive:
+        runtime.owner === "external" || (!self && runtime.toolsMayBeActive),
+      runtimeUnavailable: runtime.runtimeUnavailable,
+      persistedLastTurnStatus: persistedStatus,
+    });
   };
   const activity = (
     resolved: ResolvedDisplaySession,
     persistedStatus?: SessionLastTurnStatus,
-  ) => {
-    if (resolved.runtime.pendingInputRequest) return "waiting-input" as const;
-    if (resolved.runtime.toolsMayBeActive) return "running" as const;
-    const lastTurnStatus = presentLastTurnStatus(persistedStatus, {
-      owner: resolved.runtime.owner ?? "none",
-    });
-    return lastTurnStatus ?? ("unknown" as const);
-  };
+  ) => lifecycle(resolved, persistedStatus).displayActivity;
   const encode = (source: "native" | "reader", cursor: string) =>
     Buffer.from(JSON.stringify({ source, cursor })).toString("base64url");
   const decode = (
@@ -940,10 +973,13 @@ export function createSessionDisplaySource(
                     },
                   }
                 : {}),
+              // Codex reports a newest turn nobody finished as interrupted
+              // without timing; unless a live writer explains it, it stopped
+              // mid-turn.
               activity: activity(
                 resolved,
                 native.inferredLatestTurnId
-                  ? undefined
+                  ? "incomplete"
                   : native.summary.lastTurnStatus,
               ),
               stamp: sourceStamp,
@@ -1015,7 +1051,9 @@ export function createSessionDisplaySource(
             : loaded.pagination?.hasOlderMessages
               ? loaded.pagination.truncatedBeforeMessageId
               : undefined;
-        const statuses = loaded.summary.lastTurnStatus;
+        const statuses =
+          loaded.summary.lastTurnStatus ??
+          (loaded.summary.interrupted ? "incomplete" : undefined);
         return {
           provider: resolved.source.provider,
           messages: selectedMessages,

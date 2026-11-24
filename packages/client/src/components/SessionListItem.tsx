@@ -445,6 +445,7 @@ export function SessionListItem({
     lastTurnStatus,
     lastErrorMessage,
     interrupted,
+    hasPendingBackgroundWork: runtime?.hasPendingBackgroundWork,
   });
   const compactView = useSessionStatusBadgeView(compactState);
   const getCompactActivityIndicator = () => {
@@ -605,6 +606,7 @@ export function SessionListItem({
                     lastTurnStatus={lastTurnStatus}
                     lastErrorMessage={lastErrorMessage}
                     retryStatus={retryStatus}
+                    hasPendingBackgroundWork={runtime?.hasPendingBackgroundWork}
                   />
                 )}
               </span>

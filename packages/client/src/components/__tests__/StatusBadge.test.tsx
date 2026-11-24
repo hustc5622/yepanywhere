@@ -202,6 +202,43 @@ describe("SessionStatusBadge", () => {
     }
   });
 
+  it("shows a background badge for an idle process with background work", () => {
+    const { container } = renderBadge(
+      <SessionStatusBadge
+        status={{
+          owner: "self",
+          processId: "p1",
+          permissionMode: "default",
+          modeVersion: 0,
+        }}
+        activity="idle"
+        hasPendingBackgroundWork
+        lastTurnStatus="completed"
+      />,
+    );
+    const badge = container.querySelector(".notification-background");
+    expect(badge).not.toBeNull();
+    expect(badge?.textContent).toBe("Background");
+    expect(container.querySelector(".thinking-indicator-pill")).toBeNull();
+  });
+
+  it("lets a running turn outrank background work", () => {
+    const { container } = renderBadge(
+      <SessionStatusBadge
+        status={{
+          owner: "self",
+          processId: "p1",
+          permissionMode: "default",
+          modeVersion: 0,
+        }}
+        activity="in-turn"
+        hasPendingBackgroundWork
+      />,
+    );
+    expect(container.querySelector(".thinking-indicator-pill")).not.toBeNull();
+    expect(container.querySelector(".notification-background")).toBeNull();
+  });
+
   it("never shows a terminal badge while the session is running", () => {
     const { container } = renderBadge(
       <SessionStatusBadge

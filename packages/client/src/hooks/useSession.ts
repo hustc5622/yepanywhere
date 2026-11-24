@@ -1562,9 +1562,14 @@ export function useSession(
             void fetchSessionMetadata().catch(() => {});
         } else if (
           activity &&
-          ["completed", "interrupted", "failed", "incomplete"].includes(
-            activity.state ?? "",
-          )
+          // Background work runs outside the turn: the prompt is free.
+          [
+            "background",
+            "completed",
+            "interrupted",
+            "failed",
+            "incomplete",
+          ].includes(activity.state ?? "")
         )
           setProcessState("idle");
         return;

@@ -119,6 +119,7 @@ import {
   findSessionSummaryAcrossProviders,
   resolveSessionSources,
 } from "../sessions/provider-resolution.js";
+import { resolveSessionLifecycle } from "../sessions/session-lifecycle.js";
 import {
   isLocatableSessionId,
   locateSession,
@@ -127,7 +128,7 @@ import {
   deriveSessionRuntime,
   pendingInputTypeFromProcess,
   pendingInputTypeFromRequest,
-  presentLastTurnStatus,
+  presentRuntimeLastTurnStatus,
 } from "../sessions/session-runtime.js";
 import {
   findOwningRemoteExecutor,
@@ -991,8 +992,20 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       deps.sessionMetadataService?.getProvider(sessionId),
     getBranchState: getCodexForkBranchState,
     getRuntimeState: async (sessionId) => {
+      // A runtime that cannot be asked is not proof that nothing runs. Say
+      // so instead of reporting the session as unowned.
+      let runtimeUnavailable = false;
       const [process, bridgeView] = await Promise.all([
-        runtimeController.getProcessSnapshotForSession(sessionId),
+        runtimeController
+          .getProcessSnapshotForSession(sessionId)
+          .catch((error: unknown) => {
+            runtimeUnavailable = true;
+            getLogger().warn(
+              { err: error, sessionId },
+              "Runtime state unavailable for session display",
+            );
+            return null;
+          }),
         getBridgeSessionView(deps, sessionId),
       ]);
       const pendingInputRequest = await sessionCommandService.getPendingInput(
@@ -1002,16 +1015,32 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
       const externalActive =
         (deps.externalTracker?.isExternal(sessionId) ?? false) ||
         (bridgeView !== null && isActiveBridgeSessionView(bridgeView));
+      const lifecycle = resolveSessionLifecycle({
+        process,
+        pendingInput: pendingInputRequest !== null,
+        externalActive,
+        externalActivity:
+          bridgeView?.activity ??
+          deps.externalTracker?.getExternalActivity?.(sessionId),
+        runtimeUnavailable,
+      });
       return {
         provider: process?.provider ?? bridgeView?.session.provider,
         projectId: process?.projectId ?? bridgeView?.session.projectId,
-        owner: process ? "self" : externalActive ? "external" : "none",
-        toolsMayBeActive:
-          process?.state === "in-turn" ||
-          process?.state === "waiting-input" ||
-          pendingInputRequest !== null ||
-          externalActive,
+        owner: lifecycle.runtime.ownership.owner,
+        toolsMayBeActive: lifecycle.toolsMayBeActive,
         pendingInputRequest,
+        ...(process
+          ? {
+              processState: process.state,
+              hasPendingBackgroundWork:
+                lifecycle.runtime.hasPendingBackgroundWork === true,
+              ...(process.lastTurnOutcome
+                ? { lastTurnOutcome: process.lastTurnOutcome }
+                : {}),
+            }
+          : {}),
+        ...(runtimeUnavailable ? { runtimeUnavailable } : {}),
       };
     },
   });
@@ -1487,7 +1516,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
         compactEvents: sessionSummary?.compactEvents,
         lastTurnStatus: bridgedSession
           ? bridgedSession.session.lastTurnStatus
-          : presentLastTurnStatus(sessionSummary?.lastTurnStatus, ownership),
+          : presentRuntimeLastTurnStatus(
+              sessionSummary?.lastTurnStatus,
+              runtime,
+              process,
+            ),
         lastErrorMessage: bridgedSession
           ? bridgedSession.session.lastErrorMessage
           : sessionSummary?.lastErrorMessage,
@@ -2630,7 +2663,11 @@ export function createSessionsRoutes(deps: SessionsDeps): Hono {
             : undefined),
         lastTurnStatus: bridgedSession
           ? bridgedSession.session.lastTurnStatus
-          : presentLastTurnStatus(session.lastTurnStatus, ownership),
+          : presentRuntimeLastTurnStatus(
+              session.lastTurnStatus,
+              runtime,
+              process,
+            ),
         lastErrorMessage: bridgedSession
           ? bridgedSession.session.lastErrorMessage
           : session.lastErrorMessage,

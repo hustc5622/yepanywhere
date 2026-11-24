@@ -622,6 +622,31 @@ describe("SessionDisplayReducer", () => {
     ).toEqual(["First complete", "Second complete"]);
   });
 
+  it("stops showing open tools as running once the session is incomplete", () => {
+    const model = new SessionDisplayReducer(view, "agy");
+    for (const event of [prompt, tool("a"), result("a"), tool("b")])
+      model.message(event, true);
+    model.setRuntime("incomplete");
+    const snapshot = model.snapshot();
+    expect(snapshot.activity).toMatchObject({
+      state: "incomplete",
+      runningCount: 0,
+    });
+    expect(groups(snapshot)[0]?.status).not.toBe("running");
+  });
+  it("keeps background tools running and the block open", () => {
+    const model = new SessionDisplayReducer(view, "agy");
+    for (const event of [prompt, tool("a"), result("a"), tool("b")])
+      model.message(event, true);
+    model.setRuntime("background");
+    const snapshot = model.snapshot();
+    expect(snapshot.activity).toMatchObject({
+      state: "background",
+      runningCount: 1,
+    });
+    expect(groups(snapshot)[0]?.status).toBe("running");
+    SessionDisplaySnapshotSchema.parse(snapshot);
+  });
   it("does not reopen a completed run for a repeated tool lifecycle update", () => {
     const model = new SessionDisplayReducer(view, "codex");
     for (const event of [prompt, tool("a"), result("a"), terminal])

@@ -447,6 +447,7 @@ export const SessionDisplayActivitySchema = z
       "waiting-input",
       "finishing",
       "hold",
+      "background",
       "completed",
       "interrupted",
       "failed",

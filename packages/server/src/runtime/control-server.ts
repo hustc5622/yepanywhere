@@ -573,6 +573,9 @@ export function createRuntimeControlApp(
                 process.pendingInputRequest,
               ),
               retryStatus: process.retryStatus,
+              ...(process.hasPendingBackgroundWork
+                ? { hasPendingBackgroundWork: true }
+                : {}),
               timestamp,
             });
           }

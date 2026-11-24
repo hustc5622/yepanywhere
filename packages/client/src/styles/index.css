@@ -6625,6 +6625,12 @@ a.sidebar-nav-item {
   color: var(--status-badge-owned-text);
 }
 
+/* Idle between prompts while a background task keeps working */
+.status-badge.notification-background {
+  background: var(--status-badge-running-bg);
+  color: var(--status-badge-running-text);
+}
+
 /* The last turn was stopped on purpose: settled, nothing to fix */
 .status-badge.notification-interrupted {
   background: var(--bg-hover);
@@ -14089,6 +14095,11 @@ button.context-usage-indicator--button:focus-visible {
 .session-badge-hold {
   background: var(--status-badge-owned-bg);
   color: var(--status-badge-owned-text);
+}
+
+.session-badge-background {
+  background: var(--status-badge-running-bg);
+  color: var(--status-badge-running-text);
 }
 
 .session-badge-interrupted {

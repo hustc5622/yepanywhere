@@ -6,18 +6,59 @@ import {
 } from "../../src/sessions/session-runtime.js";
 
 describe("presentLastTurnStatus", () => {
-  it("shows a history that stops mid-turn only when nobody drives it", () => {
+  it("shows a history that stops mid-turn only when nothing still writes it", () => {
     expect(presentLastTurnStatus("incomplete", { owner: "none" })).toBe(
       "incomplete",
     );
-    // An owner (or an external agent) writes exactly that shape while it
-    // works; its live state is authoritative.
+    // A live writer (an external agent, or an owner whose state is not
+    // known to be settled) writes exactly that shape while it works.
     expect(
       presentLastTurnStatus("incomplete", { owner: "self" }),
     ).toBeUndefined();
     expect(
       presentLastTurnStatus("incomplete", { owner: "external" }),
     ).toBeUndefined();
+    for (const activity of ["in-turn", "waiting-input", "hold"] as const) {
+      expect(
+        presentLastTurnStatus("incomplete", { owner: "self", activity }),
+      ).toBeUndefined();
+    }
+    expect(
+      presentLastTurnStatus("incomplete", {
+        owner: "self",
+        activity: "idle",
+        hasPendingBackgroundWork: true,
+      }),
+    ).toBeUndefined();
+  });
+
+  it("shows an idle owner's mid-turn history once its own outcome is stale", () => {
+    const now = 1_000_000;
+    // Idle, no turn outcome observed (e.g. resumed without a turn).
+    expect(
+      presentLastTurnStatus("incomplete", {
+        owner: "self",
+        activity: "idle",
+        now,
+      }),
+    ).toBe("incomplete");
+    // Just finished: trust the process while the transcript flushes.
+    expect(
+      presentLastTurnStatus("incomplete", {
+        owner: "self",
+        activity: "idle",
+        lastTurnOutcome: { status: "completed", endedAt: now - 1_000 },
+        now,
+      }),
+    ).toBe("completed");
+    expect(
+      presentLastTurnStatus("incomplete", {
+        owner: "self",
+        activity: "idle",
+        lastTurnOutcome: { status: "completed", endedAt: now - 60_000 },
+        now,
+      }),
+    ).toBe("incomplete");
   });
 
   it("always passes recorded outcomes", () => {

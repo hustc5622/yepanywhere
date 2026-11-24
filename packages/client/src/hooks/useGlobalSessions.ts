@@ -123,15 +123,27 @@ function updateRuntimeSnapshot(
   session: GlobalSessionItem,
   ownership: GlobalSessionItem["ownership"],
   activity: GlobalSessionItem["activity"],
+  hasPendingBackgroundWork = false,
 ): GlobalSessionItem["runtime"] {
-  const isBusy = isBusyActivity(activity) || ownership.owner === "external";
-  const block = isBusy ? getSessionArchiveBlock(ownership, activity) : {};
+  // Background work only counts for an owned process that is idle.
+  const background =
+    hasPendingBackgroundWork &&
+    ownership.owner === "self" &&
+    activity === "idle";
+  const isBusy =
+    isBusyActivity(activity) || ownership.owner === "external" || background;
+  const block = isBusy
+    ? getSessionArchiveBlock(ownership, activity, {
+        hasPendingBackgroundWork: background,
+      })
+    : {};
   return {
     ...session.runtime,
     ownership,
     activity,
     isBusy,
     hasResidentWorker: ownership.owner === "self" && activity === "idle",
+    hasPendingBackgroundWork: background || undefined,
     canArchive: !isBusy,
     archiveBlockCode: block.archiveBlockCode,
     archiveBlockReason: block.archiveBlockReason,
@@ -607,7 +619,12 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
                 ? undefined
                 : session.pendingInputType,
             activity,
-            runtime: updateRuntimeSnapshot(session, event.ownership, activity),
+            runtime: updateRuntimeSnapshot(
+              session,
+              event.ownership,
+              activity,
+              session.runtime?.hasPendingBackgroundWork,
+            ),
           };
         }),
       );
@@ -658,6 +675,7 @@ export function useGlobalSessions(options: UseGlobalSessionsOptions = {}) {
               session,
               session.ownership,
               event.activity,
+              event.hasPendingBackgroundWork,
             ),
           };
         }),

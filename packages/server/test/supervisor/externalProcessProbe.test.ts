@@ -54,8 +54,11 @@ vi.mock("node:fs/promises", () => ({
   },
 }));
 
-const { hasActiveExternalProviderProcess, resetExternalProcessProbeCache } =
-  await import("../../src/supervisor/externalProcessProbe.js");
+const {
+  commandMatchesProvider,
+  hasActiveExternalProviderProcess,
+  resetExternalProcessProbeCache,
+} = await import("../../src/supervisor/externalProcessProbe.js");
 
 function lsofFieldOutput(entries: Array<[number, string]>): string {
   return entries.map(([pid, cwd]) => `p${pid}\nfcwd\nn${cwd}`).join("\n");
@@ -178,5 +181,64 @@ describe("externalProcessProbe", () => {
         excludePids: [101],
       }),
     ).resolves.toBe(false);
+  });
+
+  it("finds agy, Cursor and MiniMax Code CLI processes", async () => {
+    psStdout = [
+      "  101 /Users/me/.local/bin/agy acp",
+      "  102 /Users/me/.local/bin/cursor-agent --resume abc",
+    ].join("\n");
+    procCwds.set(102, "/tmp/project");
+    lsofStdout = lsofFieldOutput([
+      [101, "/tmp/project"],
+      [102, "/tmp/project"],
+    ]);
+    await expect(
+      hasActiveExternalProviderProcess({
+        provider: "agy",
+        projectPath: "/tmp/project",
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      hasActiveExternalProviderProcess({
+        provider: "cursor",
+        projectPath: "/tmp/project",
+      }),
+    ).resolves.toBe(true);
+    await expect(
+      hasActiveExternalProviderProcess({
+        provider: "mcode",
+        projectPath: "/tmp/project",
+      }),
+    ).resolves.toBe(false);
+  });
+});
+
+describe("commandMatchesProvider", () => {
+  it.each([
+    ["agy", "/Users/me/.local/bin/agy", true],
+    ["agy", "/Users/me/.local/bin/agy acp", true],
+    ["agy", "agy --model gemini", true],
+    ["agy", "/Users/me/.local/bin/agy models", false],
+    ["agy", "agy usage --json", false],
+    ["agy", "agy --version", false],
+    ["agy", "/tmp/agy-fork-helper", false],
+    ["cursor", "/Users/me/.local/bin/cursor-agent", true],
+    ["cursor", "/Users/me/.local/bin/agent acp", true],
+    [
+      "cursor",
+      "/Users/me/Library/Application Support/Cursor/User/globalStorage/anysphere.cursor-agent-worker/agent-cli/.local/bin/cursor-agent --disable-sigusr1",
+      false,
+    ],
+    ["cursor", "/usr/libexec/storeagent", false],
+    ["mcode", "node /Users/me/.nvm/versions/node/v22/bin/mcode", true],
+    ["mcode", "node /Users/me/.nvm/versions/node/v22/bin/mcode acp", true],
+    [
+      "mcode",
+      "/Applications/MiniMax Code.app/Contents/MacOS/MiniMax Code",
+      false,
+    ],
+  ] as const)("%s matches %s: %s", (provider, command, expected) => {
+    expect(commandMatchesProvider(provider, command)).toBe(expected);
   });
 });

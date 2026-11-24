@@ -9,11 +9,12 @@ import type {
  * One session's status as the session list shows it. Every badge variant
  * (sidebar, global list, compact) derives from this so they cannot drift.
  *
- * Priority: needs input > retrying > running > paused > failed > interrupted
- * > incomplete > nothing.
+ * Priority: needs input > retrying > running > paused > background work >
+ * failed > interrupted > incomplete > nothing.
  */
 export type SessionStatusBadgeState =
   | { kind: "running" }
+  | { kind: "background" }
   | {
       kind:
         | "approval"
@@ -36,6 +37,8 @@ export interface SessionStatusBadgeInput {
   lastErrorMessage?: string;
   /** Claude's legacy flag; means the same as `lastTurnStatus: "incomplete"`. */
   interrupted?: boolean;
+  /** The owned process is idle but still runs provider background work. */
+  hasPendingBackgroundWork?: boolean;
 }
 
 export function resolveSessionStatusBadge({
@@ -45,6 +48,7 @@ export function resolveSessionStatusBadge({
   lastTurnStatus,
   lastErrorMessage,
   interrupted,
+  hasPendingBackgroundWork,
 }: SessionStatusBadgeInput): SessionStatusBadgeState | null {
   if (pendingInputType || activity === "waiting-input") {
     return {
@@ -63,6 +67,7 @@ export function resolveSessionStatusBadge({
       : { kind: "running" };
   }
   if (activity === "hold") return { kind: "hold" };
+  if (hasPendingBackgroundWork) return { kind: "background" };
   if (lastTurnStatus === "failed" || lastErrorMessage) {
     return { kind: "failed", detail: lastErrorMessage };
   }

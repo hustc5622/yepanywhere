@@ -1,55 +1,22 @@
-import { getSessionArchiveBlock } from "@yep-anywhere/shared";
 import type {
   AgentActivity,
   PendingInputType,
   SessionLastTurnStatus,
-  SessionRetryStatus,
   SessionRuntime,
 } from "@yep-anywhere/shared";
-import type { PermissionMode } from "../sdk/types.js";
 import type { SessionOwnership } from "../supervisor/types.js";
+import {
+  LAST_TURN_OUTCOME_GRACE_MS,
+  type SessionLifecycleTurnOutcome,
+  type SessionRuntimeProcess,
+  resolveSessionLifecycle,
+} from "./session-lifecycle.js";
 
-export interface SessionRuntimeProcess {
-  id: string;
-  state: AgentActivity | { type: AgentActivity };
-  permissionMode?: PermissionMode;
-  modeVersion?: number;
-  retryStatus?: SessionRetryStatus;
-  pendingInputRequest?: { type: string; id?: string } | null;
-  getPendingInputRequest?: () => { type: string; id?: string } | null;
-}
-
-export function getProcessActivity(
-  process: SessionRuntimeProcess,
-): AgentActivity {
-  const activity =
-    typeof process.state === "string" ? process.state : process.state.type;
-  switch (activity) {
-    case "in-turn":
-    case "idle":
-    case "waiting-input":
-    case "hold":
-    case "terminated":
-      return activity;
-  }
-}
-
-export function isBusyActivity(activity: AgentActivity | undefined): boolean {
-  return (
-    activity === "in-turn" ||
-    activity === "waiting-input" ||
-    activity === "hold"
-  );
-}
-
-function buildSelfOwnership(process: SessionRuntimeProcess): SessionOwnership {
-  return {
-    owner: "self",
-    processId: process.id,
-    permissionMode: process.permissionMode as PermissionMode,
-    modeVersion: process.modeVersion,
-  };
-}
+export {
+  getProcessActivity,
+  isBusyActivity,
+  type SessionRuntimeProcess,
+} from "./session-lifecycle.js";
 
 export interface DeriveSessionRuntimeOptions {
   process?: SessionRuntimeProcess | null;
@@ -58,38 +25,11 @@ export interface DeriveSessionRuntimeOptions {
   fallbackOwnership?: SessionOwnership;
 }
 
-export function deriveSessionRuntime({
-  process,
-  externalActive = false,
-  externalActivity,
-  fallbackOwnership,
-}: DeriveSessionRuntimeOptions): SessionRuntime {
-  const ownership = process
-    ? buildSelfOwnership(process)
-    : externalActive
-      ? ({ owner: "external" } as const)
-      : (fallbackOwnership ?? { owner: "none" as const });
-
-  const activity = process
-    ? getProcessActivity(process)
-    : externalActive
-      ? externalActivity
-      : undefined;
-
-  const isBusy =
-    isBusyActivity(activity) ||
-    (ownership.owner === "external" && externalActive);
-  const hasResidentWorker = Boolean(process && activity === "idle");
-  const block = isBusy ? getSessionArchiveBlock(ownership, activity) : {};
-
-  return {
-    ownership,
-    activity,
-    isBusy,
-    hasResidentWorker,
-    canArchive: !isBusy,
-    ...block,
-  };
+/** Runtime half of {@link resolveSessionLifecycle}, for callers without history. */
+export function deriveSessionRuntime(
+  options: DeriveSessionRuntimeOptions,
+): SessionRuntime {
+  return resolveSessionLifecycle(options).runtime;
 }
 
 export function pendingInputTypeFromRequest(
@@ -120,15 +60,53 @@ export function pendingInputRequestIdFromProcess(
  * The persisted last-turn status as the user should see it.
  *
  * `incomplete` is read off the transcript's shape: the history stops
- * mid-turn. A live owner writes exactly that shape while it works, and an
- * owned process reports how its turns end (including turns the agent starts
- * on its own) through its live state. So `incomplete` is only shown when
- * nothing owns or drives the session; explicit outcomes always pass.
+ * mid-turn. A live writer (an owned process in a turn, on hold, waiting for
+ * input or holding background work, or an external agent) writes exactly that
+ * shape while it works, so it is hidden then. An owned process that is idle
+ * has finished its turn: its own observed outcome wins briefly while the
+ * transcript flushes, after which a mid-turn history is shown as incomplete.
+ * Explicit outcomes always pass. Prefer {@link resolveSessionLifecycle},
+ * which applies the same rule together with the runtime verdict.
  */
 export function presentLastTurnStatus(
   status: SessionLastTurnStatus | undefined,
-  liveness: { owner: SessionOwnership["owner"] },
+  liveness: {
+    owner: SessionOwnership["owner"];
+    activity?: AgentActivity;
+    hasPendingBackgroundWork?: boolean;
+    lastTurnOutcome?: SessionLifecycleTurnOutcome;
+    now?: number;
+  },
 ): SessionLastTurnStatus | undefined {
-  if (status === "incomplete" && liveness.owner !== "none") return undefined;
+  if (status !== "incomplete") return status;
+  if (liveness.owner === "none") return status;
+  if (liveness.owner === "external") return undefined;
+  // Owned: only an idle process without background work has settled.
+  if (
+    liveness.activity !== "idle" ||
+    liveness.hasPendingBackgroundWork === true
+  )
+    return undefined;
+  const outcome = liveness.lastTurnOutcome;
+  const now = liveness.now ?? Date.now();
+  if (outcome && now - outcome.endedAt < LAST_TURN_OUTCOME_GRACE_MS)
+    return outcome.status;
   return status;
+}
+
+/**
+ * {@link presentLastTurnStatus} for a runtime already resolved by
+ * {@link deriveSessionRuntime}, with the owned process' own turn outcome.
+ */
+export function presentRuntimeLastTurnStatus(
+  status: SessionLastTurnStatus | undefined,
+  runtime: SessionRuntime,
+  process?: Pick<SessionRuntimeProcess, "lastTurnOutcome"> | null,
+): SessionLastTurnStatus | undefined {
+  return presentLastTurnStatus(status, {
+    owner: runtime.ownership.owner,
+    activity: runtime.activity,
+    hasPendingBackgroundWork: runtime.hasPendingBackgroundWork,
+    lastTurnOutcome: process?.lastTurnOutcome,
+  });
 }

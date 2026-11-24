@@ -265,6 +265,13 @@ export type ProcessState =
   | { type: "terminated"; reason: string; error?: Error };
 
 // Process info (for API responses)
+/** How a turn ended, as the owning process observed its closing `result`. */
+export interface ProcessTurnOutcome {
+  status: "completed" | "interrupted" | "failed";
+  /** Epoch ms when the result arrived. */
+  endedAt: number;
+}
+
 export interface ProcessInfo {
   id: string;
   sessionId: string;
@@ -300,6 +307,13 @@ export interface ProcessInfo {
   executor?: string;
   /** OS PID of the spawned agent child process */
   pid?: number;
+  /**
+   * Idle, but the provider still holds background work (an agy background
+   * command or timer) that will start a turn on its own.
+   */
+  hasPendingBackgroundWork?: boolean;
+  /** Outcome of the most recent turn, cleared when the next turn starts. */
+  lastTurnOutcome?: ProcessTurnOutcome;
 }
 
 // Process events for subscribers

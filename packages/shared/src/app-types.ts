@@ -261,13 +261,20 @@ export type SessionArchiveBlockCode =
   | "agent_in_turn"
   | "waiting_input"
   | "agent_on_hold"
-  | "external_active";
+  | "external_active"
+  | "background_work";
 
 export interface SessionRuntime {
   ownership: SessionOwnership;
   activity?: AgentActivity;
   isBusy: boolean;
   hasResidentWorker: boolean;
+  /**
+   * The owned process is idle between prompts but still holds provider-side
+   * background work (e.g. an agy background command or timer) that will wake
+   * the agent. The session accepts new prompts, but archiving would kill it.
+   */
+  hasPendingBackgroundWork?: boolean;
   canArchive: boolean;
   archiveBlockCode?: SessionArchiveBlockCode;
   archiveBlockReason?: string;

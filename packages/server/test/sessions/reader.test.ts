@@ -324,6 +324,71 @@ describe("SessionReader", () => {
     });
   });
 
+  describe("last turn status", () => {
+    const write = async (sessionId: string, entries: object[]) => {
+      const now = new Date().toISOString();
+      let parentUuid: string | null = null;
+      const lines = entries.map((entry, index) => {
+        const uuid = `${sessionId}-${index}`;
+        const line = JSON.stringify({
+          ...entry,
+          uuid,
+          parentUuid,
+          timestamp: now,
+        });
+        parentUuid = uuid;
+        return line;
+      });
+      await writeFile(
+        join(testDir, `${sessionId}.jsonl`),
+        `${lines.join("\n")}\n`,
+      );
+      return reader.getSessionSummary(
+        sessionId,
+        "test-project" as UrlProjectId,
+      );
+    };
+    const prompt = { type: "user", message: { role: "user", content: "Hi" } };
+    const answer = (stop_reason?: string) => ({
+      type: "assistant",
+      message: {
+        id: "a",
+        role: "assistant",
+        content: [{ type: "text", text: "Hello" }],
+        ...(stop_reason ? { stop_reason } : {}),
+      },
+    });
+
+    it("reports a finished answer as completed", async () => {
+      const summary = await write("claude-done", [prompt, answer("end_turn")]);
+      expect(summary?.interrupted).toBe(false);
+      expect(summary?.lastTurnStatus).toBe("completed");
+    });
+
+    it("reports a history that stops mid-turn as incomplete", async () => {
+      expect((await write("claude-open", [prompt])).lastTurnStatus).toBe(
+        "incomplete",
+      );
+      expect(
+        (await write("claude-severed", [prompt, answer()])).lastTurnStatus,
+      ).toBe("incomplete");
+    });
+
+    it("reports a user stop as interrupted", async () => {
+      const summary = await write("claude-stopped", [
+        prompt,
+        {
+          type: "user",
+          message: {
+            role: "user",
+            content: [{ type: "text", text: "[Request interrupted by user]" }],
+          },
+        },
+      ]);
+      expect(summary?.lastTurnStatus).toBe("interrupted");
+    });
+  });
+
   describe("DAG handling", () => {
     it("returns only active branch messages, filtering dead branches", async () => {
       const sessionId = "dag-test-1";

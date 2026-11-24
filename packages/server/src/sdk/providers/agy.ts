@@ -1168,6 +1168,13 @@ export class AgyProvider implements AgentProvider {
     let thinkingDirty = false;
     let lastTailCheck = 0;
     let agentSettled = false;
+    // Calls this turn opened. Only a turn that ends normally leaves calls
+    // running in the background; after a cancel, refusal or failure they
+    // will never report back, so they must not count as background work.
+    const turnCalls = new Set<string>();
+    const dropTurnCalls = () => {
+      for (const id of turnCalls) state.openCalls.delete(id);
+    };
 
     const flushThinking = function* (): Generator<SDKMessage> {
       if (thinking && thinkingDirty) {
@@ -1268,6 +1275,7 @@ export class AgyProvider implements AgentProvider {
             state.openCalls.delete(update.toolCallId);
           } else if (!state.openCalls.has(update.toolCallId)) {
             state.openCalls.set(update.toolCallId, Date.now());
+            turnCalls.add(update.toolCallId);
           }
         }
         const converted = convertAgyUpdate(
@@ -1299,6 +1307,7 @@ export class AgyProvider implements AgentProvider {
       const agentTurn = state.agentTurn;
       if (!agentTurn || signal.aborted) return;
       if (!agentSettled && !agentTurn.cancelled) return;
+      if (agentTurn.cancelled) dropTurnCalls();
       yield {
         type: "result",
         session_id: sessionId,
@@ -1309,6 +1318,8 @@ export class AgyProvider implements AgentProvider {
 
     try {
       const result = await owner.promise;
+      if (result.stopReason === "cancelled" || result.stopReason === "refusal")
+        dropTurnCalls();
       if (result.stopReason === "refusal") {
         yield {
           type: "error",
@@ -1332,6 +1343,7 @@ export class AgyProvider implements AgentProvider {
         } as SDKMessage;
       }
     } catch (error) {
+      dropTurnCalls();
       if (signal.aborted) return;
       yield {
         type: "error",

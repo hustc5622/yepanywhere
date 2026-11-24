@@ -4,6 +4,7 @@ import type { AgentActivity, SessionArchiveBlockCode } from "./app-types.js";
 export function getSessionArchiveBlock(
   ownership: { owner: string },
   activity: AgentActivity | undefined,
+  options: { hasPendingBackgroundWork?: boolean } = {},
 ): {
   archiveBlockCode?: SessionArchiveBlockCode;
   archiveBlockReason?: string;
@@ -29,6 +30,14 @@ export function getSessionArchiveBlock(
       archiveBlockCode: "agent_in_turn",
       archiveBlockReason:
         "This session is currently running. Wait for it to finish or stop it before archiving.",
+    };
+  }
+
+  if (options.hasPendingBackgroundWork) {
+    return {
+      archiveBlockCode: "background_work",
+      archiveBlockReason:
+        "This session still has a background task running. Wait for it to finish or stop it before archiving.",
     };
   }
 

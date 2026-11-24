@@ -101,7 +101,15 @@ const PI_TERMINAL_STOP_REASONS = new Set([
  */
 export async function readPiSessionTailActivity(
   filePath: string,
+  options: {
+    /**
+     * `mcode`: MiniMax Code `messages.jsonl` rows, which carry the same Pi
+     * message under `message` without a `type: "message"` envelope.
+     */
+    rowFormat?: "pi" | "mcode";
+  } = {},
 ): Promise<PiSessionTailActivity> {
+  const rowFormat = options.rowFormat ?? "pi";
   try {
     const handle = await open(filePath, "r");
     try {
@@ -130,7 +138,10 @@ export async function readPiSessionTailActivity(
               ? combined.subarray(firstNewline + 1)
               : Buffer.alloc(0);
 
-        const activity = classifyPiTailLines(completeLines.toString("utf8"));
+        const activity = classifyPiTailLines(
+          completeLines.toString("utf8"),
+          rowFormat,
+        );
         if (activity) return activity;
 
         if (start === 0) return "unknown";
@@ -148,7 +159,10 @@ export async function readPiSessionTailActivity(
   return "unknown";
 }
 
-function classifyPiTailLines(tail: string): PiSessionTailActivity | null {
+function classifyPiTailLines(
+  tail: string,
+  rowFormat: "pi" | "mcode",
+): PiSessionTailActivity | null {
   const lines = tail.split("\n");
   for (let index = lines.length - 1; index >= 0; index -= 1) {
     const line = lines[index]?.trim();
@@ -159,16 +173,23 @@ function classifyPiTailLines(tail: string): PiSessionTailActivity | null {
     } catch {
       continue;
     }
-    const activity = classifyPiTailEntry(entry);
+    const activity = classifyPiTailEntry(entry, rowFormat);
     if (activity) return activity;
   }
   return null;
 }
 
-function classifyPiTailEntry(entry: unknown): PiSessionTailActivity | null {
+function classifyPiTailEntry(
+  entry: unknown,
+  rowFormat: "pi" | "mcode" = "pi",
+): PiSessionTailActivity | null {
   if (typeof entry !== "object" || entry === null) return null;
   const record = entry as Record<string, unknown>;
-  if (record.type !== "message") return null;
+  if (
+    record.type !== "message" &&
+    !(rowFormat === "mcode" && record.type === undefined)
+  )
+    return null;
   const message = record.message;
   if (typeof message !== "object" || message === null) return null;
   const role = (message as Record<string, unknown>).role;

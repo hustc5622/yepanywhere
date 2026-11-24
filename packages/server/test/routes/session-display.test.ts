@@ -225,6 +225,64 @@ describe("session display routes", () => {
       undefined,
     ]);
   });
+  it.each([
+    {
+      name: "an owned idle process with a mid-turn history",
+      runtime: { owner: "self", processState: "idle" },
+      expected: "incomplete",
+    },
+    {
+      name: "an owned idle process holding background work",
+      runtime: {
+        owner: "self",
+        processState: "idle",
+        hasPendingBackgroundWork: true,
+        toolsMayBeActive: true,
+      },
+      expected: "background",
+    },
+    {
+      name: "a just-finished owned turn whose transcript lags",
+      runtime: {
+        owner: "self",
+        processState: "idle",
+        lastTurnOutcome: { status: "completed", endedAt: Date.now() },
+      },
+      expected: "completed",
+    },
+    {
+      name: "a runtime that could not be inspected",
+      runtime: { owner: "none", runtimeUnavailable: true },
+      expected: "unknown",
+    },
+    {
+      name: "an unowned session",
+      runtime: { owner: "none" },
+      expected: "incomplete",
+    },
+  ] as const)("resolves $name as $expected", async ({ runtime, expected }) => {
+    const { getSession } = createRoutes(1);
+    const loaded = await getSession();
+    const midTurn = {
+      ...loaded,
+      summary: { ...loaded.summary, lastTurnStatus: "incomplete" as const },
+    };
+    const reader = {
+      getSessionSummary: vi.fn(async () => midTurn.summary),
+      getSession: vi.fn(async () => midTurn),
+    };
+    const source = createSessionDisplaySource({
+      scanner: { getOrCreateProject: vi.fn(async () => project()) },
+      providerResolution: { readerFactory: () => reader as never },
+      getRuntimeState: async () => ({ toolsMayBeActive: false, ...runtime }),
+    });
+    const page = await source.read({
+      projectId: PROJECT_ID,
+      sessionId: SESSION_ID,
+    });
+    expect(page.activity).toBe(expected);
+  });
+
   it.each<ProviderName>(["codex", "codex-oss", "gemini-acp"])(
     "loads an unpersisted %s session in a Pi project and picks up its history later",
     async (provider) => {
@@ -610,7 +668,8 @@ describe("session display routes", () => {
         await source.read({ projectId: PROJECT_ID, sessionId: SESSION_ID }),
       ).toMatchObject({
         provider: "cursor",
-        activity: toolsMayBeActive ? "running" : "unknown",
+        // Nothing runs an empty, inactive chat: it is settled, not unknown.
+        activity: toolsMayBeActive ? "running" : "completed",
         messages: [],
       });
       expect(reader.getSession).toHaveBeenCalledOnce();

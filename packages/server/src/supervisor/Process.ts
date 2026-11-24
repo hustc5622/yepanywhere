@@ -48,6 +48,7 @@ import type {
   ProcessInfo,
   ProcessOptions,
   ProcessState,
+  ProcessTurnOutcome,
   SessionRetryStatus,
 } from "./types.js";
 import { DEFAULT_IDLE_TIMEOUT_MS } from "./types.js";
@@ -86,6 +87,17 @@ export function shouldEmitMessage(_message: SDKMessage): boolean {
   // Always emit. DO NOT add filtering here!
   // See docstring above for why this is critical.
   return true;
+}
+
+/** Read a turn's ending off its closing `result` message. */
+export function turnOutcomeFromResult(
+  message: SDKMessage,
+): ProcessTurnOutcome["status"] {
+  const record = message as { turnStatus?: unknown; is_error?: unknown };
+  if (record.turnStatus === "interrupted") return "interrupted";
+  if (record.turnStatus === "failed" || record.is_error === true)
+    return "failed";
+  return "completed";
 }
 
 /** Structural comparison so an unchanged retry state does not re-broadcast. */
@@ -325,6 +337,7 @@ export class Process {
   /** Check if underlying CLI process is still alive (undefined = not available, fall back to time heuristic) */
   private _isProcessAlive: (() => boolean) | null;
   private _hasPendingBackgroundWork: (() => boolean) | null;
+  private _lastTurnOutcome: ProcessTurnOutcome | undefined;
 
   /** OS PID of the spawned agent child process (supports deferred resolution) */
   private _pidResolver: number | (() => number | undefined) | undefined;
@@ -505,6 +518,15 @@ export class Process {
   /** The agent has background work that will start a turn on its own. */
   get hasPendingBackgroundWork(): boolean {
     return this._hasPendingBackgroundWork?.() === true;
+  }
+
+  /**
+   * How the most recent turn ended, as this process observed it. Cleared when
+   * the next turn starts. Lets status arbitration trust a just-finished turn
+   * while the provider is still flushing its transcript.
+   */
+  get lastTurnOutcome(): ProcessTurnOutcome | undefined {
+    return this._lastTurnOutcome;
   }
 
   /** OS PID of the spawned agent child process */
@@ -1155,7 +1177,9 @@ export class Process {
     // Add idleSince if idle
     if (this._state.type === "idle") {
       info.idleSince = this._state.since.toISOString();
+      if (this.hasPendingBackgroundWork) info.hasPendingBackgroundWork = true;
     }
+    if (this._lastTurnOutcome) info.lastTurnOutcome = this._lastTurnOutcome;
 
     // Add holdSince if held
     if (this._state.type === "hold") {
@@ -2421,6 +2445,10 @@ export class Process {
               }
             }
           }
+          this._lastTurnOutcome = {
+            status: turnOutcomeFromResult(message),
+            endedAt: Date.now(),
+          };
           this.transitionToIdle({ continueQueuedTurn: true });
         }
       }
@@ -2677,6 +2705,9 @@ export class Process {
   }
 
   private setState(state: ProcessState): void {
+    // A new turn makes the previous turn's outcome stale.
+    if (state.type === "in-turn" && this._state.type !== "in-turn")
+      this._lastTurnOutcome = undefined;
     this._state = state;
     this.emit({ type: "state-change", state });
   }

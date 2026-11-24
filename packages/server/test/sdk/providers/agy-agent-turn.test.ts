@@ -56,7 +56,11 @@ process.stdin.on("data", (d) => {
     else if (msg.method === "session/new") send({ id: msg.id, result: { sessionId: sid } });
     else if (msg.method === "session/prompt") {
       const text = msg.params.prompt.map((b) => b.text ?? "").join("");
-      if (text.startsWith("start")) {
+      if (text === "cancel-me") {
+        // A cancelled turn leaves its call open; agy never reports on it.
+        update({ sessionUpdate: "tool_call", toolCallId: "call_cancel", status: "in_progress", title: "sleep", rawInput: { CommandLine: "sleep 60" } });
+        send({ id: msg.id, result: { stopReason: "cancelled" } });
+      } else if (text.startsWith("start")) {
         wakeHold = text === "start-slow" ? 2500 : 0;
         write("USER_INPUT", { source: "USER_EXPLICIT", content: "<USER_REQUEST>" + text + "</USER_REQUEST>" });
         update({ sessionUpdate: "tool_call", toolCallId: "call_bg", status: "in_progress", title: "sleep", rawInput: { CommandLine: "sleep 1 && echo BG_DONE_42" } });
@@ -173,6 +177,17 @@ describe("agy agent-initiated turns", () => {
       { timeout: 10_000 },
     );
     expect(session?.hasPendingBackgroundWork?.()).toBe(true);
+  }, 20_000);
+
+  it("does not keep a cancelled turn's open call as background work", async () => {
+    const seen = await start();
+    session?.queue.push({ text: "cancel-me", uuid: "client-1" });
+    await vi.waitFor(
+      () => expect(seen.filter((m) => m.type === "result")).toHaveLength(1),
+      { timeout: 10_000 },
+    );
+    expect(markers(seen).at(-1)).toBe("result:interrupted");
+    expect(session?.hasPendingBackgroundWork?.()).toBe(false);
   }, 20_000);
 
   it("lets a prompt join a turn agy started and end with it", async () => {

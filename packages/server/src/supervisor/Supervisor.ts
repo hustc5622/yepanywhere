@@ -1669,6 +1669,7 @@ export class Supervisor {
             event.state.type,
             pendingInputType,
             process.retryStatus,
+            event.state.type === "idle" && process.hasPendingBackgroundWork,
           );
         }
         // Emit worker activity on any state change (affects hasActiveWork)
@@ -1930,6 +1931,7 @@ export class Supervisor {
     activity: AgentActivity,
     pendingInputType?: PendingInputType,
     retryStatus?: SessionRetryStatus,
+    hasPendingBackgroundWork = false,
   ): void {
     if (!this.eventBus) return;
 
@@ -1940,6 +1942,7 @@ export class Supervisor {
       activity,
       pendingInputType,
       ...(retryStatus ? { retryStatus } : {}),
+      ...(hasPendingBackgroundWork ? { hasPendingBackgroundWork } : {}),
       timestamp: new Date().toISOString(),
     };
     this.eventBus.emit(event);

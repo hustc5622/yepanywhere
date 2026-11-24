@@ -15,6 +15,7 @@ type NotificationVariant =
   | "continue"
   | "failed"
   | "hold"
+  | "background"
   | "interrupted"
   | "incomplete";
 type PendingInputType = "tool-approval" | "user-question";
@@ -36,6 +37,8 @@ interface SessionStatusBadgeProps {
   lastErrorMessage?: string;
   /** Present while the provider is retrying a failed request. */
   retryStatus?: SessionRetryStatus;
+  /** The idle owned process still runs provider background work. */
+  hasPendingBackgroundWork?: boolean;
 }
 
 interface CountBadgeProps {
@@ -59,6 +62,7 @@ interface NotificationBadgeProps {
  * - "needs-input" (blue): Tool approval or user question pending
  * - "unread" (orange): New content since last viewed
  * - "continue" (amber): Retrying a failed request
+ * - "background" (teal): A background task will resume the agent
  * - "failed" (red): The last turn ended with a provider error
  * - "interrupted" (muted): The last turn was stopped
  * - "incomplete" (amber outline): The last turn never finished
@@ -107,6 +111,12 @@ export function useSessionStatusBadgeView(
       };
     case "hold":
       return { variant: "hold", label: t("statusBadgeHold") };
+    case "background":
+      return {
+        variant: "background",
+        label: t("statusBadgeBackground"),
+        title: t("statusBadgeBackgroundTitle"),
+      };
     case "failed":
       return {
         variant: "failed",
@@ -142,6 +152,7 @@ export function SessionStatusBadge({
   lastTurnStatus,
   lastErrorMessage,
   retryStatus,
+  hasPendingBackgroundWork,
 }: SessionStatusBadgeProps) {
   const state = resolveSessionStatusBadge({
     pendingInputType,
@@ -150,6 +161,7 @@ export function SessionStatusBadge({
     lastTurnStatus,
     lastErrorMessage,
     retryStatus,
+    hasPendingBackgroundWork,
   });
   const view = useSessionStatusBadgeView(state);
   if (state?.kind === "running") return <ThinkingIndicator variant="pill" />;

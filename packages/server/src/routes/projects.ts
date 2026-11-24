@@ -44,13 +44,18 @@ import {
   hydrateCodexSessionUsage,
   listSessionsAcrossProviders,
 } from "../sessions/provider-resolution.js";
-import { pendingInputTypeFromRequest } from "../sessions/session-runtime.js";
+import { resolveSessionLifecycle } from "../sessions/session-lifecycle.js";
+import {
+  isBusyActivity,
+  pendingInputTypeFromRequest,
+} from "../sessions/session-runtime.js";
 import type { ISessionReader } from "../sessions/types.js";
 import type { ExternalSessionTracker } from "../supervisor/ExternalSessionTracker.js";
 import type { Supervisor } from "../supervisor/Supervisor.js";
 import type {
   AgentActivity,
   PendingInputType,
+  ProcessTurnOutcome,
   Project,
   SessionSummary,
 } from "../supervisor/types.js";
@@ -156,6 +161,8 @@ interface OwnedProcessView {
   provider: SessionSummary["provider"];
   state: AgentActivity;
   pendingInputType?: PendingInputType;
+  hasPendingBackgroundWork?: boolean;
+  lastTurnOutcome?: ProcessTurnOutcome;
 }
 
 async function loadOwnedProcessViews(
@@ -175,6 +182,8 @@ async function loadOwnedProcessViews(
         provider: process.provider,
         state: process.state,
         pendingInputType: pendingInputTypeFromRequest(pendingRequest),
+        hasPendingBackgroundWork: process.hasPendingBackgroundWork,
+        lastTurnOutcome: process.lastTurnOutcome,
       };
     });
   }
@@ -191,6 +200,8 @@ async function loadOwnedProcessViews(
       provider: process.provider,
       state: process.state.type,
       pendingInputType: pendingInputTypeFromRequest(pendingRequest),
+      hasPendingBackgroundWork: process.hasPendingBackgroundWork,
+      lastTurnOutcome: process.lastTurnOutcome,
     };
   });
 }
@@ -428,34 +439,35 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
       const process = processBySessionId.get(session.id);
       const isExternal = deps.externalTracker?.isExternal(session.id) ?? false;
 
-      // Enrich with ownership
-      const ownership = process
-        ? {
-            owner: "self" as const,
-            processId: process.id,
-            permissionMode: process.permissionMode,
-            modeVersion: process.modeVersion,
-          }
-        : isExternal
-          ? { owner: "external" as const }
-          : session.ownership;
-
-      // Enrich with notification data and agent activity
-      let pendingInputType: PendingInputType | undefined;
-      let activity: AgentActivity | undefined;
-      if (process) {
-        pendingInputType = process.pendingInputType;
-        // Get the current agent activity (in-turn/waiting-input/idle)
-        const state = process.state;
-        if (state === "in-turn" || state === "waiting-input") {
-          activity = state;
-        }
-      } else {
-        pendingInputType = session.pendingInputType;
-        activity = isExternal
+      // Same arbitration as the global list and the session detail.
+      const lifecycle = resolveSessionLifecycle({
+        process: process
+          ? {
+              ...process,
+              pendingInputRequest: process.pendingInputType
+                ? { type: process.pendingInputType }
+                : null,
+            }
+          : null,
+        externalActive: isExternal,
+        externalActivity: isExternal
           ? deps.externalTracker?.getExternalActivity?.(session.id)
+          : undefined,
+        fallbackOwnership: session.ownership,
+        persistedLastTurnStatus: session.lastTurnStatus,
+        persistedInterrupted: session.interrupted,
+      });
+      const ownership = lifecycle.runtime.ownership;
+      const pendingInputType = process
+        ? process.pendingInputType
+        : session.pendingInputType;
+      const activity = process
+        ? isBusyActivity(lifecycle.runtime.activity)
+          ? lifecycle.runtime.activity
+          : undefined
+        : isExternal
+          ? lifecycle.runtime.activity
           : session.activity;
-      }
 
       // Get last seen and unread status
       const lastSeenEntry = deps.notificationService?.getLastSeen(session.id);
@@ -476,6 +488,10 @@ export function createProjectsRoutes(deps: ProjectsDeps): Hono {
         ownership,
         pendingInputType,
         activity,
+        runtime: lifecycle.runtime,
+        lastTurnStatus: lifecycle.visibleLastTurnStatus,
+        interrupted:
+          ownership.owner === "none" ? session.interrupted : undefined,
         lastSeenAt,
         hasUnread,
         customTitle,

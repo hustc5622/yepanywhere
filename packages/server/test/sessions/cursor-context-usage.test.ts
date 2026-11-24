@@ -222,7 +222,7 @@ describe("Cursor native context snapshot", () => {
           ?.contextUsage?.inputTokens,
       ).toBe(20_000);
       expect(reader.getIndexScopeKey("/sessions")).toBe(
-        "cursor::/sessions::*::context-v1",
+        "cursor::/sessions::*::turn-status-v1",
       );
     } finally {
       db.close();

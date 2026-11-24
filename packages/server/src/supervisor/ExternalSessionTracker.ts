@@ -26,10 +26,6 @@ import {
   findMcodeSessionRecord,
   mcodeSessionIdFromWatchPath,
 } from "../sessions/mcode-store.js";
-import {
-  type PiSessionTailActivity,
-  readPiSessionTailActivity,
-} from "../sessions/pi-files.js";
 import { presentLastTurnStatus } from "../sessions/session-runtime.js";
 import { readFirstLine } from "../utils/jsonl.js";
 import { BatchProcessor } from "../watcher/BatchProcessor.js";
@@ -47,6 +43,10 @@ import {
   type ExternalProcessProbe,
   hasActiveExternalProviderProcess,
 } from "./externalProcessProbe.js";
+import {
+  type SessionTailActivity,
+  probeSessionTailActivity,
+} from "./session-tail-probe.js";
 import type {
   ContextUsage,
   Project,
@@ -68,7 +68,7 @@ interface ExternalSessionInfo {
   /**
    * Session log path, kept for providers whose liveness can be read back out
    * of the log when the process table has nothing to show (see
-   * {@link ExternalSessionTracker.getPiTailActivity}).
+   * {@link ExternalSessionTracker.getTailActivity}).
    */
   sessionFilePath?: string;
   timeoutId: ReturnType<typeof setTimeout>;
@@ -204,9 +204,9 @@ export class ExternalSessionTracker {
         const now = new Date().toISOString();
 
         // Check if supervisor owns this session
+        const ownedProcess = this.supervisor.getProcessForSession(sessionId);
         const isOwned =
-          !!this.supervisor.getProcessForSession(sessionId) ||
-          this.runtimeOwnedSessions.has(sessionId);
+          !!ownedProcess || this.runtimeOwnedSessions.has(sessionId);
         const isExternal = this.externalSessions.has(sessionId);
 
         // Clean up external tracking if owned
@@ -214,9 +214,17 @@ export class ExternalSessionTracker {
           this.removeExternal(sessionId);
         }
         // A transcript read while its owner is still writing it stops
-        // mid-turn; that is not an outcome to publish.
+        // mid-turn; that is not an outcome to publish. An owned process
+        // that is idle has finished, so its history speaks for itself.
         summary.lastTurnStatus = presentLastTurnStatus(summary.lastTurnStatus, {
           owner: isOwned ? "self" : isExternal ? "external" : "none",
+          ...(ownedProcess && typeof ownedProcess.getInfo === "function"
+            ? {
+                activity: ownedProcess.getInfo().state,
+                hasPendingBackgroundWork: ownedProcess.hasPendingBackgroundWork,
+                lastTurnOutcome: ownedProcess.lastTurnOutcome,
+              }
+            : {}),
         });
 
         // For owned sessions, we only emit session-updated (supervisor handles session-created).
@@ -896,6 +904,7 @@ export class ExternalSessionTracker {
     await this.handleUnownedSessionActivity(sessionId, {
       provider: event.provider,
       projectId,
+      sessionFilePath: event.path,
     });
     await this.ensureCodexSessionCreated(
       sessionId,
@@ -986,21 +995,21 @@ export class ExternalSessionTracker {
     sessionId: string,
     info: ExternalSessionCandidate,
   ): Promise<void> {
-    const [activeExternalProcess, piTailActivity] = await Promise.all([
+    const [activeExternalProcess, tailActivity] = await Promise.all([
       this.checkExternalProcessForInfo(info),
-      this.getPiTailActivity(info),
+      this.getTailActivity(info),
     ]);
 
     // A Pi process can sit idle in the same cwd indefinitely, and the process
     // probe cannot identify which native session it has open. A terminal Pi
     // log tail is therefore the authoritative turn verdict for this session.
-    if (piTailActivity === "settled") {
+    if (tailActivity === "settled") {
       this.removeExternal(sessionId);
       this.enqueueSessionParse(sessionId, info);
       return;
     }
 
-    if (activeExternalProcess === false && piTailActivity !== "in-flight") {
+    if (activeExternalProcess === false && tailActivity !== "in-flight") {
       this.removeExternal(sessionId);
       this.enqueueSessionParse(sessionId, info);
       return;
@@ -1010,7 +1019,7 @@ export class ExternalSessionTracker {
     // recent external file activity as active until the decay timeout expires.
     this.markExternal(
       sessionId,
-      piTailActivity === "in-flight"
+      tailActivity === "in-flight"
         ? { ...info, activity: info.activity ?? "in-turn" }
         : info,
     );
@@ -1033,17 +1042,14 @@ export class ExternalSessionTracker {
    * Periodic validation bounds how long that evidence remains authoritative
    * without another file change, so a host that dies mid-turn is retired.
    */
-  private async getPiTailActivity(
+  private async getTailActivity(
     info: ExternalSessionCandidate,
-  ): Promise<PiSessionTailActivity> {
-    if (!info.sessionFilePath) return "unknown";
-    if (info.provider === "dsh") {
-      // Same contract as Pi: dsh Web runs agents in-process, so the log's
-      // open `turn/start` is the authoritative liveness evidence.
-      return (await readDshLogActivity(info.sessionFilePath)).turn;
-    }
-    if (info.provider !== "pi") return "unknown";
-    return readPiSessionTailActivity(info.sessionFilePath);
+  ): Promise<SessionTailActivity> {
+    // Each harness reads its own log (see session-tail-probe). Pi and dsh
+    // host agents in-process, so their open turn is the liveness evidence;
+    // agy, Codex and MiniMax Code settle a session whose CLI idles nearby.
+    return (await probeSessionTailActivity(info.provider, info.sessionFilePath))
+      .turn;
   }
 
   /**
@@ -1053,12 +1059,12 @@ export class ExternalSessionTracker {
    */
   private async hasRecentLiveTurnEvidence(
     info: ExternalSessionInfo,
-    activity?: PiSessionTailActivity,
+    activity?: SessionTailActivity,
   ): Promise<boolean> {
     if (Date.now() - info.lastActivity.getTime() >= this.piInFlightStaleMs) {
       return false;
     }
-    return (activity ?? (await this.getPiTailActivity(info))) === "in-flight";
+    return (activity ?? (await this.getTailActivity(info))) === "in-flight";
   }
 
   private enqueueSessionParse(
@@ -1161,11 +1167,11 @@ export class ExternalSessionTracker {
     const info = this.externalSessions.get(sessionId);
     if (!info) return;
 
-    const [activeExternalProcess, piTailActivity] = await Promise.all([
+    const [activeExternalProcess, tailActivity] = await Promise.all([
       this.checkExternalProcessForInfo(info),
-      this.getPiTailActivity(info),
+      this.getTailActivity(info),
     ]);
-    if (piTailActivity === "settled") {
+    if (tailActivity === "settled") {
       this.removeExternal(sessionId);
       return;
     }
@@ -1173,7 +1179,7 @@ export class ExternalSessionTracker {
     // whether the last recorded turn ever finished before retiring a session.
     if (
       activeExternalProcess === true ||
-      (await this.hasRecentLiveTurnEvidence(info, piTailActivity))
+      (await this.hasRecentLiveTurnEvidence(info, tailActivity))
     ) {
       info.timeoutId = this.createDecayTimeout(sessionId);
       return;
@@ -1196,17 +1202,17 @@ export class ExternalSessionTracker {
     const info = this.externalSessions.get(sessionId);
     if (!info) return;
 
-    const [activeExternalProcess, piTailActivity] = await Promise.all([
+    const [activeExternalProcess, tailActivity] = await Promise.all([
       this.checkExternalProcessForInfo(info),
-      this.getPiTailActivity(info),
+      this.getTailActivity(info),
     ]);
-    if (piTailActivity === "settled") {
+    if (tailActivity === "settled") {
       this.removeExternal(sessionId);
       return;
     }
     if (
       activeExternalProcess === false &&
-      !(await this.hasRecentLiveTurnEvidence(info, piTailActivity))
+      !(await this.hasRecentLiveTurnEvidence(info, tailActivity))
     ) {
       this.removeExternal(sessionId);
       return;

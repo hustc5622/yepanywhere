@@ -5,10 +5,13 @@ import {
   type AgentMapping,
   type ContextUsage,
   type CursorSessionContent,
+  type CursorTranscriptMessage,
   SESSION_TITLE_MAX_LENGTH,
+  type SessionLastTurnStatus,
   type UrlProjectId,
 } from "@yep-anywhere/shared";
 import { canonicalizeProjectPath } from "../projects/paths.js";
+import { cursorStreamError } from "../sdk/providers/cursor-errors.js";
 import type { SessionSummary } from "../supervisor/types.js";
 import {
   getCursorSessionFileStats,
@@ -156,8 +159,9 @@ export class CursorSessionReader implements ISessionReader {
   }
 
   getIndexScopeKey(sessionDir: string): string {
-    // Rebuild pre-usage summaries even for sessions whose database is unchanged.
-    return `cursor::${sessionDir}::${this.projectPath ?? "*"}::context-v1`;
+    // Rebuild older summaries (pre-usage, pre-turn-status) even for sessions
+    // whose database is unchanged.
+    return `cursor::${sessionDir}::${this.projectPath ?? "*"}::turn-status-v1`;
   }
 
   private async loadOne(sessionId: string) {
@@ -237,7 +241,41 @@ function toSummary(
     ownership: { owner: "none" },
     provider: "cursor",
     contextUsage: session.contextUsage,
+    lastTurnStatus: deriveCursorLastTurnStatus(session.messages),
   };
+}
+
+/**
+ * How the newest turn ended, read off the transcript's shape. Compaction
+ * markers and background-task notices are not part of a turn.
+ */
+export function deriveCursorLastTurnStatus(
+  messages: readonly CursorTranscriptMessage[],
+): SessionLastTurnStatus | undefined {
+  const turn: CursorTranscriptMessage[] = [];
+  for (let index = messages.length - 1; index >= 0; index--) {
+    const message = messages[index];
+    if (!message || message.role === "compaction" || message.role === "notice")
+      continue;
+    turn.unshift(message);
+    if (message.role === "user") break;
+  }
+  const last = turn.at(-1);
+  if (!last) return undefined;
+  // A prompt without a reply, or a tool result the agent never answered.
+  if (last.role !== "assistant") return "incomplete";
+  const results = new Set<string>();
+  for (const message of turn)
+    for (const block of message.blocks ?? [])
+      if (block.type === "tool_result") results.add(block.tool_use_id);
+  const openCall = turn.some((message) =>
+    (message.blocks ?? []).some(
+      (block) => block.type === "tool_use" && !results.has(block.id),
+    ),
+  );
+  if (openCall) return "incomplete";
+  if (cursorStreamError(last.text)) return "failed";
+  return "completed";
 }
 
 function truncateTitle(text: string | null): string | null {

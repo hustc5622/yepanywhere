@@ -183,16 +183,18 @@ export const SessionTranscript = memo(function SessionTranscript({
                     ? t("sessionDisplaySyncing")
                     : displayActivity.state === "finishing"
                       ? t("sessionDisplayFinishing")
-                      : displayActivity.state === "interrupted"
-                        ? t("sessionDisplayInterrupted")
-                        : displayActivity.state === "incomplete"
-                          ? t("sessionDisplayIncomplete")
-                          : displayActivity.state === "failed"
-                            ? t("sessionDisplayFailed")
-                            : displayActivity.state === "unknown" &&
-                                displayActivity.runningCount > 0
-                              ? t("sessionDisplayUnknown")
-                              : null}
+                      : displayActivity.state === "background"
+                        ? t("sessionDisplayBackground")
+                        : displayActivity.state === "interrupted"
+                          ? t("sessionDisplayInterrupted")
+                          : displayActivity.state === "incomplete"
+                            ? t("sessionDisplayIncomplete")
+                            : displayActivity.state === "failed"
+                              ? t("sessionDisplayFailed")
+                              : displayActivity.state === "unknown" &&
+                                  displayActivity.runningCount > 0
+                                ? t("sessionDisplayUnknown")
+                                : null}
                 </div>
               )}
               {displayActivity && displayActivity.tools.length > 0 && (
