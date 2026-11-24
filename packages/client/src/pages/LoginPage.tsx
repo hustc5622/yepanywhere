@@ -12,6 +12,7 @@ import { YepAnywhereLogo } from "../components/YepAnywhereLogo";
 import { useAuth } from "../contexts/AuthContext";
 import { useHideSplashOnReady } from "../hooks/useHideSplashOnReady";
 import { useI18n } from "../i18n";
+import { APP_BASE } from "../lib/apiPath";
 
 type Translate = ReturnType<typeof useI18n>["t"];
 
@@ -53,6 +54,49 @@ function sanitizeRedirectTarget(raw: string | undefined): string {
     return "/projects";
   }
   return raw;
+}
+
+export function sanitizeExternalRedirect(raw: string | null): string | null {
+  if (!raw) return null;
+  const trimmed = raw.trim();
+  if (
+    !trimmed.startsWith("/") ||
+    trimmed.startsWith("//") ||
+    trimmed.includes("\\") ||
+    /[\p{Cc}\x7f]/u.test(trimmed)
+  ) {
+    return null;
+  }
+  return trimmed;
+}
+
+export function resolvePostLoginRedirect(
+  externalRedirect: string | null,
+  appBase: string,
+  fallbackFrom: string,
+): { mode: "spa" | "full"; target: string } {
+  const safeExternal = sanitizeExternalRedirect(externalRedirect);
+  if (!safeExternal) {
+    return { mode: "spa", target: fallbackFrom };
+  }
+
+  const normalizedBase = appBase.replace(/\/+$/, "");
+  if (normalizedBase) {
+    if (
+      safeExternal === normalizedBase ||
+      safeExternal.startsWith(`${normalizedBase}/`)
+    ) {
+      const inner = safeExternal.slice(normalizedBase.length) || "/projects";
+      return {
+        mode: "spa",
+        target: inner === "/" ? "/projects" : inner,
+      };
+    }
+    // Target lives outside the SPA base path (e.g. `/` landing page protected by forward_auth)
+    return { mode: "full", target: safeExternal };
+  }
+
+  return { mode: "spa", target: safeExternal };
 }
 
 function extractPairingToken(): string | null {
@@ -143,6 +187,16 @@ export function LoginPage() {
   const from = sanitizeRedirectTarget(
     (location.state as { from?: string } | null)?.from,
   );
+  const redirectQuery = new URLSearchParams(location.search).get("redirect");
+
+  const redirectAfterAuth = useCallback(() => {
+    const resolved = resolvePostLoginRedirect(redirectQuery, APP_BASE, from);
+    if (resolved.mode === "full" && typeof window !== "undefined") {
+      window.location.replace(resolved.target);
+      return;
+    }
+    navigate(resolved.target, { replace: true });
+  }, [redirectQuery, from, navigate]);
 
   const remainingSec = lockout
     ? Math.max(0, Math.ceil((lockout.deadline - nowMs) / 1000))
@@ -223,15 +277,14 @@ export function LoginPage() {
   // If auth is not enabled, disabled by env, or already authenticated, redirect away
   useEffect(() => {
     if (!isLoading && (!authEnabled || authDisabledByEnv || isAuthenticated)) {
-      navigate(from, { replace: true });
+      redirectAfterAuth();
     }
   }, [
     isLoading,
     authEnabled,
     authDisabledByEnv,
     isAuthenticated,
-    from,
-    navigate,
+    redirectAfterAuth,
   ]);
 
   // Automatically redeem one-time `#pair=<token>` device pairing links
@@ -250,7 +303,7 @@ export function LoginPage() {
 
     void redeemPairing(token)
       .then(() => {
-        navigate(from, { replace: true });
+        redirectAfterAuth();
       })
       .catch((err) => {
         if (applyAuthError(err)) return;
@@ -272,8 +325,7 @@ export function LoginPage() {
     isAuthenticated,
     redeemPairing,
     applyAuthError,
-    from,
-    navigate,
+    redirectAfterAuth,
     t,
   ]);
 
@@ -307,7 +359,7 @@ export function LoginPage() {
       } else {
         await login(password);
       }
-      navigate(from, { replace: true });
+      redirectAfterAuth();
     } catch (err) {
       applyAuthError(err);
     } finally {

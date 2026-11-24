@@ -15,6 +15,13 @@ import { AuthRateLimiter, type RateLimitLockout } from "./RateLimiter.js";
 export const SESSION_COOKIE_NAME = "yep-anywhere-session";
 
 /**
+ * Root-scoped (`Path=/`) low-privilege gate cookie used by reverse-proxy
+ * `forward_auth` (e.g. protecting a landing page at `/`) without widening
+ * the main `yep-anywhere-session` cookie beyond `BASE_PATH`.
+ */
+export const GATE_COOKIE_NAME = "yep-gate-session";
+
+/**
  * Query parameter carrying the session token for requests that cannot set
  * headers: WebSocket upgrades and media/download URLs (`<img>`, `<video>`,
  * DownloadManager). Only honored on GET/HEAD so it never authorizes writes.
@@ -173,6 +180,62 @@ export function setSessionCookie(
   });
 }
 
+export function setGateCookie(
+  c: Context,
+  gateToken: string,
+  options: {
+    trustProxy?: boolean;
+    maxAgeSec: number;
+  },
+): void {
+  setCookie(c, GATE_COOKIE_NAME, gateToken, {
+    httpOnly: true,
+    secure: shouldUseSecureCookie(c, options.trustProxy),
+    sameSite: "Lax",
+    path: "/",
+    maxAge: options.maxAgeSec,
+  });
+}
+
+function clearGateCookie(c: Context): void {
+  deleteCookie(c, GATE_COOKIE_NAME, { path: "/" });
+}
+
+/**
+ * Validate a same-origin redirect path for reverse-proxy site-gate handoffs.
+ * Rejects protocol-relative URLs, backslashes, control characters, and
+ * self-referential auth gate/login routes so redirects can never loop or
+ * leave the current origin.
+ */
+export function sanitizeGateRedirect(
+  raw: string | undefined,
+  basePath?: string,
+): string {
+  if (!raw) return "/";
+  const trimmed = raw.trim();
+  if (
+    !trimmed.startsWith("/") ||
+    trimmed.startsWith("//") ||
+    trimmed.includes("\\") ||
+    /[\p{Cc}\x7f]/u.test(trimmed)
+  ) {
+    return "/";
+  }
+
+  const pathname = trimmed.split(/[?#]/, 1)[0] ?? "/";
+  const prefix = getSessionCookiePath(basePath).replace(/\/$/, "");
+  const blocked = [
+    `${prefix}/api/auth/gate-verify`,
+    `${prefix}/api/auth/gate-bridge`,
+    `${prefix}/login`,
+  ];
+  if (blocked.some((b) => pathname === b || pathname.startsWith(`${b}/`))) {
+    return "/";
+  }
+
+  return trimmed;
+}
+
 function clearSessionCookies(c: Context, basePath?: string): void {
   const scopedPath = getSessionCookiePath(basePath);
   deleteCookie(c, SESSION_COOKIE_NAME, { path: scopedPath });
@@ -180,6 +243,7 @@ function clearSessionCookies(c: Context, basePath?: string): void {
   if (scopedPath !== "/") {
     deleteCookie(c, SESSION_COOKIE_NAME, { path: "/" });
   }
+  clearGateCookie(c);
 }
 
 /**
@@ -223,6 +287,18 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
   } = deps;
   const rateLimiter = deps.rateLimiter ?? new AuthRateLimiter();
   const pairingService = deps.pairingService ?? new PairingService();
+
+  const issueGateCookie = async (
+    c: Context,
+    sessionId: string,
+  ): Promise<void> => {
+    const gateToken = await authService.createGateToken(sessionId);
+    if (!gateToken) return;
+    setGateCookie(c, gateToken, {
+      trustProxy,
+      maxAgeSec: authService.getGateCookieMaxAgeSec(sessionId),
+    });
+  };
 
   const requireSession = async (c: Context): Promise<string | null> => {
     const sessionId = getRequestSessionCredential(c)?.sessionId;
@@ -330,17 +406,25 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
     const validation = await authService.validateSessionWithRefresh(sessionId, {
       ip: getClientRateLimitKey(c, trustProxy),
     });
-    if (
-      validation.valid &&
-      credential?.source === "cookie" &&
-      validation.shouldRefreshCookie &&
-      validation.cookieMaxAgeSec
-    ) {
-      setSessionCookie(c, sessionId, {
-        basePath,
-        trustProxy,
-        maxAgeSec: validation.cookieMaxAgeSec,
-      });
+    if (validation.valid && credential?.source === "cookie") {
+      if (validation.shouldRefreshCookie && validation.cookieMaxAgeSec) {
+        setSessionCookie(c, sessionId, {
+          basePath,
+          trustProxy,
+          maxAgeSec: validation.cookieMaxAgeSec,
+        });
+      }
+      const existingGate = getCookie(c, GATE_COOKIE_NAME);
+      const expectedGate = await authService.createGateToken(sessionId);
+      if (
+        expectedGate &&
+        (validation.shouldRefreshCookie || existingGate !== expectedGate)
+      ) {
+        setGateCookie(c, expectedGate, {
+          trustProxy,
+          maxAgeSec: authService.getGateCookieMaxAgeSec(sessionId),
+        });
+      }
     }
 
     return c.json({
@@ -438,6 +522,7 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
       trustProxy,
       maxAgeSec: authService.getSessionCookieMaxAgeSec(),
     });
+    await issueGateCookie(c, sessionId);
 
     return c.json({
       success: true,
@@ -502,6 +587,7 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
       trustProxy,
       maxAgeSec: authService.getSessionCookieMaxAgeSec(),
     });
+    await issueGateCookie(c, sessionId);
 
     return c.json({
       success: true,
@@ -710,11 +796,88 @@ export function createAuthRoutes(deps: AuthRoutesDeps): Hono {
       trustProxy,
       maxAgeSec: authService.getSessionCookieMaxAgeSec(),
     });
+    await issueGateCookie(c, sessionId);
 
     return c.json({
       success: true,
       ...(wantsTokenTransport(body) ? { sessionToken: sessionId } : {}),
     });
+  });
+
+  /**
+   * GET /api/auth/gate-verify
+   * Reverse-proxy `forward_auth` verification endpoint (e.g. Caddy protecting `/`).
+   * Validates the root-scoped low-privilege `yep-gate-session` cookie against
+   * live sessions. Returns 200 on success, or 302 to `/api/auth/gate-bridge`
+   * so already-logged-in devices under `BASE_PATH` seamlessly mint a gate cookie
+   * without re-entering a password.
+   */
+  app.get("/gate-verify", async (c) => {
+    c.header("Cache-Control", "no-store");
+
+    if (authDisabled || !authService.isEnabled()) {
+      return c.body(null, 200);
+    }
+
+    const gateToken = getCookie(c, GATE_COOKIE_NAME);
+    if (gateToken) {
+      const valid = await authService.validateGateToken(gateToken, {
+        ip: getClientRateLimitKey(c, trustProxy),
+      });
+      if (valid) {
+        return c.body(null, 200);
+      }
+    }
+
+    const basePrefix = getSessionCookiePath(basePath).replace(/\/$/, "");
+    const target = sanitizeGateRedirect(
+      c.req.header("x-forwarded-uri"),
+      basePath,
+    );
+    const bridgeUrl = `${basePrefix}/api/auth/gate-bridge?redirect=${encodeURIComponent(target)}`;
+    return c.redirect(bridgeUrl, 302);
+  });
+
+  /**
+   * GET /api/auth/gate-bridge
+   * Browser-facing handoff under `BASE_PATH`. If the browser already holds a
+   * valid `yep-anywhere-session` cookie, mints `yep-gate-session` (`Path=/`)
+   * and redirects straight back to the requested page. Otherwise redirects to
+   * the Yep login page with `?redirect=...`.
+   */
+  app.get("/gate-bridge", async (c) => {
+    c.header("Cache-Control", "no-store");
+    const target = sanitizeGateRedirect(c.req.query("redirect"), basePath);
+
+    if (authDisabled || !authService.isEnabled()) {
+      return c.redirect(target, 302);
+    }
+
+    const sessionId = getCookie(c, SESSION_COOKIE_NAME);
+    if (sessionId) {
+      const validation = await authService.validateSessionWithRefresh(
+        sessionId,
+        {
+          ip: getClientRateLimitKey(c, trustProxy),
+        },
+      );
+      if (validation.valid) {
+        if (validation.shouldRefreshCookie && validation.cookieMaxAgeSec) {
+          setSessionCookie(c, sessionId, {
+            basePath,
+            trustProxy,
+            maxAgeSec: validation.cookieMaxAgeSec,
+          });
+        }
+        await issueGateCookie(c, sessionId);
+        return c.redirect(target, 302);
+      }
+    }
+
+    clearGateCookie(c);
+    const basePrefix = getSessionCookiePath(basePath).replace(/\/$/, "");
+    const loginUrl = `${basePrefix}/login?redirect=${encodeURIComponent(target)}`;
+    return c.redirect(loginUrl, 302);
   });
 
   /**

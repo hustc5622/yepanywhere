@@ -21,11 +21,14 @@ export {
 } from "./RateLimiter.js";
 export {
   createAuthRoutes,
+  GATE_COOKIE_NAME,
   getClientRateLimitKey,
   getRequestSessionCredential,
   getSessionCookiePath,
+  sanitizeGateRedirect,
   SESSION_COOKIE_NAME,
   SESSION_TOKEN_QUERY_PARAM,
+  setGateCookie,
   type SessionCredential,
   type SessionCredentialSource,
   setSessionCookie,

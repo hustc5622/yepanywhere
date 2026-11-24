@@ -2,7 +2,11 @@ import { act, fireEvent, render, screen } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { I18nProvider } from "../../i18n";
-import { LoginPage } from "../LoginPage";
+import {
+  LoginPage,
+  resolvePostLoginRedirect,
+  sanitizeExternalRedirect,
+} from "../LoginPage";
 
 const { loginMock } = vi.hoisted(() => ({ loginMock: vi.fn() }));
 
@@ -148,5 +152,36 @@ describe("LoginPage rate limit feedback", () => {
       "disabled",
       false,
     );
+  });
+});
+
+describe("LoginPage external redirect resolution", () => {
+  it("accepts safe same-origin paths and rejects protocol-relative or external URLs", () => {
+    expect(sanitizeExternalRedirect("/")).toBe("/");
+    expect(sanitizeExternalRedirect("/?from=gate")).toBe("/?from=gate");
+    expect(sanitizeExternalRedirect("//evil.example")).toBeNull();
+    expect(sanitizeExternalRedirect("https://evil.example")).toBeNull();
+    expect(sanitizeExternalRedirect("/\\evil.example")).toBeNull();
+  });
+
+  it("uses full navigation when redirect target is outside APP_BASE", () => {
+    expect(resolvePostLoginRedirect("/", "/yep", "/projects")).toEqual({
+      mode: "full",
+      target: "/",
+    });
+    expect(
+      resolvePostLoginRedirect("/yep/sessions", "/yep", "/projects"),
+    ).toEqual({
+      mode: "spa",
+      target: "/sessions",
+    });
+    expect(resolvePostLoginRedirect("/yep", "/yep", "/projects")).toEqual({
+      mode: "spa",
+      target: "/projects",
+    });
+    expect(resolvePostLoginRedirect(null, "/yep", "/sessions/123")).toEqual({
+      mode: "spa",
+      target: "/sessions/123",
+    });
   });
 });

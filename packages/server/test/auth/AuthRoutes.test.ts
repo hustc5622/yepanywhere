@@ -4,8 +4,10 @@ import * as path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { AuthService } from "../../src/auth/AuthService.js";
 import {
+  GATE_COOKIE_NAME,
   SESSION_COOKIE_NAME,
   createAuthRoutes,
+  sanitizeGateRedirect,
 } from "../../src/auth/routes.js";
 
 describe("Auth routes - POST /enable", () => {
@@ -543,5 +545,234 @@ describe("Auth routes - token transport for cross-site frames", () => {
     const body = (await redeemed.json()) as { sessionToken?: string };
     expect(body.sessionToken).toMatch(/^[0-9a-f]{64}$/);
     expect(body.sessionToken).not.toBe(sessionToken);
+  });
+});
+
+function extractCookiePair(res: Response, cookieName: string): string | null {
+  const raw = res.headers.get("set-cookie") ?? "";
+  const match = raw.match(new RegExp(`(?:^|,\\s*)(${cookieName}=[^;]+)`));
+  return match?.[1] ?? null;
+}
+
+describe("Auth routes - reverse-proxy site gate (forward_auth SSO)", () => {
+  let authService: AuthService;
+  let testDir: string;
+
+  beforeEach(async () => {
+    testDir = await fs.mkdtemp(path.join(os.tmpdir(), "auth-gate-test-"));
+    authService = new AuthService({
+      dataDir: testDir,
+      cookieSecret: "test-cookie-secret",
+    });
+    await authService.initialize();
+    await authService.enableAuth("strong-password-123");
+  });
+
+  afterEach(async () => {
+    await fs.rm(testDir, { recursive: true, force: true });
+  });
+
+  it("redirects unauthenticated gate-verify -> gate-bridge -> login and preserves redirect", async () => {
+    const routes = createAuthRoutes({
+      authService,
+      basePath: "/yep",
+      trustProxy: true,
+    });
+
+    const verifyRes = await routes.request("http://127.0.0.1/gate-verify", {
+      headers: {
+        "X-Forwarded-Proto": "https",
+        "X-Forwarded-Uri": "/",
+      },
+    });
+    expect(verifyRes.status).toBe(302);
+    expect(verifyRes.headers.get("location")).toBe(
+      "/yep/api/auth/gate-bridge?redirect=%2F",
+    );
+    expect(verifyRes.headers.get("cache-control")).toBe("no-store");
+
+    const bridgeRes = await routes.request(
+      "http://127.0.0.1/gate-bridge?redirect=%2F",
+      {
+        headers: { "X-Forwarded-Proto": "https" },
+      },
+    );
+    expect(bridgeRes.status).toBe(302);
+    expect(bridgeRes.headers.get("location")).toBe("/yep/login?redirect=%2F");
+  });
+
+  it("bridges existing Yep sessions seamlessly and verifies gate cookies across restarts", async () => {
+    const routes = createAuthRoutes({
+      authService,
+      basePath: "/yep",
+      trustProxy: true,
+    });
+
+    const loginRes = await routes.request("http://127.0.0.1/login", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Forwarded-Proto": "https",
+      },
+      body: JSON.stringify({ password: "strong-password-123" }),
+    });
+    expect(loginRes.status).toBe(200);
+    const sessionCookie = extractCookiePair(loginRes, SESSION_COOKIE_NAME);
+    const loginGateCookie = extractCookiePair(loginRes, GATE_COOKIE_NAME);
+    expect(sessionCookie).toBeTruthy();
+    expect(loginGateCookie).toBeTruthy();
+
+    // Existing browser with only Path=/yep session cookie hits gate-bridge
+    const bridgeRes = await routes.request(
+      "http://127.0.0.1/gate-bridge?redirect=%2F",
+      {
+        headers: {
+          "X-Forwarded-Proto": "https",
+          Cookie: sessionCookie ?? "",
+        },
+      },
+    );
+    expect(bridgeRes.status).toBe(302);
+    expect(bridgeRes.headers.get("location")).toBe("/");
+    const gateCookie = extractCookiePair(bridgeRes, GATE_COOKIE_NAME);
+    expect(gateCookie).toBeTruthy();
+    expect(bridgeRes.headers.get("set-cookie")).toContain("Path=/");
+    expect(bridgeRes.headers.get("set-cookie")).toContain("Secure");
+    expect(bridgeRes.headers.get("set-cookie")).toContain("HttpOnly");
+
+    // Gate cookie passes forward_auth verification
+    const verifyOk = await routes.request("http://127.0.0.1/gate-verify", {
+      headers: {
+        "X-Forwarded-Proto": "https",
+        Cookie: gateCookie ?? "",
+      },
+    });
+    expect(verifyOk.status).toBe(200);
+
+    // Privilege isolation: gate token cannot authenticate Yep API endpoints
+    const rawGateValue = (gateCookie ?? "").split("=")[1] ?? "";
+    const apiAttempt = await routes.request("http://127.0.0.1/sessions", {
+      headers: {
+        Authorization: `Bearer ${rawGateValue}`,
+        Cookie: `${SESSION_COOKIE_NAME}=${rawGateValue}`,
+      },
+    });
+    expect(apiAttempt.status).toBe(401);
+
+    // Persists across AuthService restart (reload gateSecret + sessions from disk)
+    const reloadedAuth = new AuthService({ dataDir: testDir });
+    await reloadedAuth.initialize();
+    const reloadedRoutes = createAuthRoutes({
+      authService: reloadedAuth,
+      basePath: "/yep",
+      trustProxy: true,
+    });
+    const verifyAfterRestart = await reloadedRoutes.request(
+      "http://127.0.0.1/gate-verify",
+      {
+        headers: {
+          "X-Forwarded-Proto": "https",
+          Cookie: gateCookie ?? "",
+        },
+      },
+    );
+    expect(verifyAfterRestart.status).toBe(200);
+
+    // Tampered gate token is rejected
+    const tampered = `${rawGateValue.slice(0, -1)}${rawGateValue.endsWith("0") ? "1" : "0"}`;
+    const verifyTampered = await reloadedRoutes.request(
+      "http://127.0.0.1/gate-verify",
+      {
+        headers: {
+          "X-Forwarded-Proto": "https",
+          Cookie: `${GATE_COOKIE_NAME}=${tampered}`,
+        },
+      },
+    );
+    expect(verifyTampered.status).toBe(302);
+  });
+
+  it("immediately invalidates gate cookies on logout, session revocation, and password change", async () => {
+    const routes = createAuthRoutes({
+      authService,
+      basePath: "/yep",
+      trustProxy: true,
+    });
+
+    const loginA = await routes.request("https://air.yueyuan.uk/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "strong-password-123" }),
+    });
+    const sessionA = extractCookiePair(loginA, SESSION_COOKIE_NAME) ?? "";
+    const gateA = extractCookiePair(loginA, GATE_COOKIE_NAME) ?? "";
+
+    const loginB = await routes.request("https://air.yueyuan.uk/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password: "strong-password-123" }),
+    });
+    const gateB = extractCookiePair(loginB, GATE_COOKIE_NAME) ?? "";
+
+    // Password change from A revokes B's gate cookie while keeping A valid
+    const changeRes = await routes.request(
+      "https://air.yueyuan.uk/change-password",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Cookie: sessionA,
+        },
+        body: JSON.stringify({ newPassword: "rotated-password-456" }),
+      },
+    );
+    expect(changeRes.status).toBe(200);
+
+    expect(
+      (
+        await routes.request("https://air.yueyuan.uk/gate-verify", {
+          headers: { Cookie: gateA },
+        })
+      ).status,
+    ).toBe(200);
+    expect(
+      (
+        await routes.request("https://air.yueyuan.uk/gate-verify", {
+          headers: { Cookie: gateB },
+        })
+      ).status,
+    ).toBe(302);
+
+    // Logout A revokes A's gate cookie and emits deletion Set-Cookie
+    const logoutRes = await routes.request("https://air.yueyuan.uk/logout", {
+      method: "POST",
+      headers: { Cookie: sessionA },
+    });
+    expect(logoutRes.status).toBe(200);
+    expect(logoutRes.headers.get("set-cookie")).toContain(
+      `${GATE_COOKIE_NAME}=`,
+    );
+    expect(
+      (
+        await routes.request("https://air.yueyuan.uk/gate-verify", {
+          headers: { Cookie: gateA },
+        })
+      ).status,
+    ).toBe(302);
+  });
+
+  it("allows gate-verify when auth is disabled and sanitizes redirect targets", async () => {
+    expect(sanitizeGateRedirect("/", "/yep")).toBe("/");
+    expect(sanitizeGateRedirect("/?tab=1", "/yep")).toBe("/?tab=1");
+    expect(sanitizeGateRedirect("//evil.example/", "/yep")).toBe("/");
+    expect(sanitizeGateRedirect("https://evil.example/", "/yep")).toBe("/");
+    expect(sanitizeGateRedirect("/\\evil.example", "/yep")).toBe("/");
+    expect(sanitizeGateRedirect("/yep/api/auth/gate-bridge", "/yep")).toBe("/");
+    expect(sanitizeGateRedirect("/yep/login", "/yep")).toBe("/");
+
+    await authService.disableAuth();
+    const routes = createAuthRoutes({ authService, basePath: "/yep" });
+    const res = await routes.request("https://air.yueyuan.uk/gate-verify");
+    expect(res.status).toBe(200);
   });
 });

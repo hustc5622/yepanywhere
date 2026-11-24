@@ -82,6 +82,8 @@ export interface AuthState {
   enabled?: boolean;
   /** Whether unauthenticated localhost access is allowed (bypasses desktop token floor) */
   localhostOpen?: boolean;
+  /** Persistent 256-bit HMAC secret for signing root-scoped site-gate cookies */
+  gateSecret?: string;
   /** Account credentials (undefined = setup mode) */
   account?: {
     /** bcrypt-hashed password */
@@ -185,6 +187,7 @@ export class AuthService {
           version: CURRENT_VERSION,
           enabled: parsed.enabled,
           localhostOpen: parsed.localhostOpen,
+          gateSecret: parsed.gateSecret,
           account: parsed.account,
           sessions: migratedSessions,
         };
@@ -251,6 +254,9 @@ export class AuthService {
     const previousHash = this.state.account?.passwordHash;
     this.state.enabled = parsed?.enabled;
     this.state.localhostOpen = parsed?.localhostOpen;
+    if (!this.state.gateSecret && typeof parsed?.gateSecret === "string") {
+      this.state.gateSecret = parsed.gateSecret;
+    }
     this.state.account = parsed?.account;
 
     return { reloaded: true, credentialChanged: previousHash !== nextHash };
@@ -297,6 +303,106 @@ export class AuthService {
    */
   getSessionCookieMaxAgeSec(): number {
     return Math.max(60, Math.floor(this.sessionTtlMs / 1000));
+  }
+
+  /**
+   * Remaining lifetime (up to the session's absolute max expiry) in seconds for
+   * a root-scoped site-gate cookie. Server-side validation still enforces the
+   * 30-day sliding inactivity window and instant revocation.
+   */
+  getGateCookieMaxAgeSec(sessionId: string): number {
+    const session = this.state.sessions[sessionId];
+    if (!session) {
+      return Math.max(60, Math.floor(this.maxSessionTtlMs / 1000));
+    }
+    const { maxExpiresAtMs } = this.resolveExpiryBounds(session);
+    return Math.max(60, Math.floor((maxExpiresAtMs - this.now()) / 1000));
+  }
+
+  /**
+   * Mint a root-scoped site-gate token bound to a live session's public ID.
+   * Contains no raw session ID, so leaking it to another path on the same
+   * origin cannot authenticate against Yep's API.
+   */
+  async createGateToken(sessionId: string): Promise<string | null> {
+    if (!this.state.sessions[sessionId]) {
+      return null;
+    }
+    const secret = await this.ensureGateSecret();
+    const pubId = publicSessionId(sessionId);
+    const sig = this.signGatePublicId(pubId, secret);
+    return `${pubId}.${sig}`;
+  }
+
+  /**
+   * Validate a site-gate token: checks HMAC signature, verifies the bound
+   * session is still active/unrevoked, and extends its sliding expiry window.
+   */
+  async validateGateToken(
+    gateToken: string,
+    meta?: { ip?: string },
+  ): Promise<boolean> {
+    const secret = this.state.gateSecret;
+    if (!secret) {
+      return false;
+    }
+
+    const parts = gateToken.split(".");
+    if (parts.length !== 2) {
+      return false;
+    }
+    const [pubId, sigHex] = parts;
+    if (
+      !pubId ||
+      !sigHex ||
+      !/^[0-9a-f]{16}$/.test(pubId) ||
+      !/^[0-9a-f]{64}$/.test(sigHex)
+    ) {
+      return false;
+    }
+
+    const expectedHex = this.signGatePublicId(pubId, secret);
+    const actualBuf = Buffer.from(sigHex, "hex");
+    const expectedBuf = Buffer.from(expectedHex, "hex");
+    if (
+      actualBuf.length !== expectedBuf.length ||
+      !crypto.timingSafeEqual(actualBuf, expectedBuf)
+    ) {
+      return false;
+    }
+
+    let matchedSessionId: string | null = null;
+    for (const sid of Object.keys(this.state.sessions)) {
+      if (publicSessionId(sid) === pubId) {
+        matchedSessionId = sid;
+        break;
+      }
+    }
+    if (!matchedSessionId) {
+      return false;
+    }
+
+    const validation = await this.validateSessionWithRefresh(
+      matchedSessionId,
+      meta,
+    );
+    return validation.valid;
+  }
+
+  private async ensureGateSecret(): Promise<string> {
+    if (this.state.gateSecret && this.state.gateSecret.length >= 32) {
+      return this.state.gateSecret;
+    }
+    this.state.gateSecret = crypto.randomBytes(32).toString("hex");
+    await this.save();
+    return this.state.gateSecret;
+  }
+
+  private signGatePublicId(publicId: string, secret: string): string {
+    return crypto
+      .createHmac("sha256", secret)
+      .update(`yep-site-gate:v1:${publicId}`)
+      .digest("hex");
   }
 
   /**
