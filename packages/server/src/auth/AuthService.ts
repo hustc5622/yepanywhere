@@ -627,17 +627,33 @@ export class AuthService {
    */
   private async save(): Promise<void> {
     if (this.savePromise) {
+      // Coalesce into the follow-up save and wait for it to land, so callers
+      // never resolve before their change is on disk.
       this.pendingSave = true;
+      await this.flush();
       return;
     }
 
     this.savePromise = this.doSave();
-    await this.savePromise;
-    this.savePromise = null;
+    try {
+      await this.savePromise;
+    } finally {
+      this.savePromise = null;
+    }
 
     if (this.pendingSave) {
       this.pendingSave = false;
       await this.save();
+    }
+  }
+
+  /**
+   * Resolve once no state write is in flight, including fire-and-forget
+   * saves from request validation. Save errors are already logged.
+   */
+  async flush(): Promise<void> {
+    while (this.savePromise) {
+      await this.savePromise.catch(() => undefined);
     }
   }
 

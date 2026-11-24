@@ -34,6 +34,7 @@ describe("Auth login rate limit feedback", () => {
   });
 
   afterEach(async () => {
+    await authService.flush();
     await fs.rm(testDir, { recursive: true, force: true });
   });
 

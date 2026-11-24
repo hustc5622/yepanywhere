@@ -94,6 +94,7 @@ describe("login rate limit behind an frp tunnel with PROXY protocol", () => {
 
   afterEach(async () => {
     await new Promise<void>((resolve) => server.close(() => resolve()));
+    await authService.flush();
     await fs.rm(testDir, { recursive: true, force: true });
   });
 

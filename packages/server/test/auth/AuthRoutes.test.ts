@@ -24,6 +24,8 @@ describe("Auth routes - POST /enable", () => {
   });
 
   afterEach(async () => {
+    // Request validation saves in the background; let it land first.
+    await authService.flush();
     await fs.rm(testDir, { recursive: true, force: true });
   });
 
@@ -123,6 +125,8 @@ describe("Auth routes - cookie secure flag", () => {
   });
 
   afterEach(async () => {
+    // Request validation saves in the background; let it land first.
+    await authService.flush();
     await fs.rm(testDir, { recursive: true, force: true });
   });
 
@@ -179,6 +183,8 @@ describe("Auth routes - hardening, sliding sessions, device management & pairing
   });
 
   afterEach(async () => {
+    // Request validation saves in the background; let it land first.
+    await authService.flush();
     await fs.rm(testDir, { recursive: true, force: true });
   });
 
@@ -437,6 +443,8 @@ describe("Auth routes - token transport for cross-site frames", () => {
   });
 
   afterEach(async () => {
+    // Request validation saves in the background; let it land first.
+    await authService.flush();
     await fs.rm(testDir, { recursive: true, force: true });
   });
 
