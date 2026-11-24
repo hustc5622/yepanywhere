@@ -569,6 +569,8 @@ describe("Auth routes - reverse-proxy site gate (forward_auth SSO)", () => {
   });
 
   afterEach(async () => {
+    // Request validation saves in the background; let it land first.
+    await authService.flush();
     await fs.rm(testDir, { recursive: true, force: true });
   });
 
@@ -659,9 +661,13 @@ describe("Auth routes - reverse-proxy site gate (forward_auth SSO)", () => {
     });
     expect(apiAttempt.status).toBe(401);
 
-    // Persists across AuthService restart (reload gateSecret + sessions from disk)
+    // Persists across AuthService restart (reload gateSecret + sessions from disk).
+    // Let background saves land first: a torn auth.json would reload as a
+    // fresh, auth-disabled state that lets every gate check pass.
+    await authService.flush();
     const reloadedAuth = new AuthService({ dataDir: testDir });
     await reloadedAuth.initialize();
+    expect(reloadedAuth.isEnabled()).toBe(true);
     const reloadedRoutes = createAuthRoutes({
       authService: reloadedAuth,
       basePath: "/yep",
