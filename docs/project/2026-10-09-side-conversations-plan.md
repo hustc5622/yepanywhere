@@ -276,3 +276,16 @@ agent 正在继续工作…                         上下文快照 14:32 · 只
 模型选择器、选中文字后提问、多旁路列表和跨运行时重启的永久保存仍属于第二阶段；首版固定继承模型/思考等级，仅允许切换新建旁路是否携带主对话快照。
 
 旁路隔离的是任务指令、消息、权限和生命周期；它仍会产生额外模型用量，并与主任务共享对应账户的速率限制和机器资源。首版以独立并发上限约束这部分开销，不承诺资源层面的零竞争。
+
+
+## 9. 2026-11-24 Antigravity（`agy`）旁路落地与「工具 / MCP 支持」核对
+
+`agy` 旁路已按 [antigravity.md](antigravity.md) 的「旁路对话」一节实现（独立 `agy acp` 进程 + 内嵌语言服务器 fork + 审批通道只读 + 临时会话注册表 + `DeleteCascadeTrajectory` 清理）。下面回答最初提出的问题：三个 provider 在「上游 CLI 原生 `/btw`」和「Yep 当前实现」两个层面，旁路里到底能不能用工具、能不能用 MCP。
+
+| | 上游 CLI 原生旁路 | Yep 当前实现 |
+| --- | --- | --- |
+| Codex | `/side`、`/btw` 由 TUI 解释：临时 fork 一个 `ephemeral` 线程，**沿用父会话的权限与工具**，只靠 developer instructions 和隐藏边界约束行为；官方文档也说明「旁路不等于只读」 | `thread/fork(ephemeral: true)` + `sandbox: read-only` + `approvalPolicy: never`；清空 MCP（clear profile + 空工具 allowlist），关闭 shell、agents、插件、hooks、浏览器、外部工具与 `web_search`。实测该版本模型侧工具只剩 `request_user_input` / `view_image`，因此首版实际是**快照问答**，不开放 shell 文件探索，也没有 MCP |
+| Pi（含 `pi-btw`） | `pi-btw` 0.7.1：默认 `contextual` / `tangent` 给 `read/bash/edit/write`，`/btw:ask` 为 `readonly`（`read/grep/find/ls`）；`contextual`/`readonly` 还会加载父会话的扩展工具（即 MCP 一类扩展工具可用） | 随包的 `pi-side-conversation.mjs` 用 `SessionManager.inMemory()` + `tools: ["read","grep","find","ls"]`、`noTools: "builtin"`、不加载任何扩展，所以**只有 4 个内置只读工具，没有 MCP、没有 shell** |
+| Antigravity（`agy`） | 原生 `/btw` 侧问可以调用工具（读文件、搜索），调用实时显示在卡片里；**任何需要审批的调用被自动拒绝**；不跑用户/工作区 hooks，不继承 `/goal`。CLI 模式的工具集只有 `read_file`、`run_command`、`write_file`、`edit_file`、`search_web`、`ask_question`、子 agent / 调度类等，没有独立的 `list_dir`/`grep_search`，所以「搜索」只能走 `run_command`，而它需要审批——原生 `/btw` 实际上基本只剩读文件 | 比原生更进一步：`read_file` 直接放行；`run_command` 在命令本身是纯只读命令时批准（`rg`/`grep`/`find` 无 `-exec -delete`/`ls`/`cat`/`head`/`tail`/`wc`/`sed -n`/`git status|log|show|diff|blame` 等，支持管道与 `&&`/`;`），因此**旁路里真的能检索代码**；写文件、其他命令、联网、MCP、子 agent、消息、调度、workflow 一律拒绝并在回答末尾说明。agy 的设置允许跳审批时直接不创建旁路 |
+
+结论：**MCP 在 Codex、Pi、agy 三个 provider 的 Yep 旁路里都不可用**（旁路刻意只保留本地只读能力）。如果以后要在旁路里放开 MCP，需要的不是适配器改动，而是先能给每个 MCP 工具判定「是否只读」——MCP 工具没有统一的只读标注，`readOnlyHint` 只是可选提示；Codex 侧可以用 MCP 的 `readOnlyHint` 做成 per-tool allowlist，Pi 侧需要扩展运行时只加载 `readonly` 工具集，agy 侧需要在 `call_mcp_tool` 的审批里按 `ServerName`/`ToolName` 白名单放行。在此之前，旁路保持「本地只读」这条线。

@@ -42,6 +42,8 @@ export type SideEvent =
 export interface SideTransport {
   model?: string;
   reasoningEffort?: string;
+  /** The provider's own id for the conversation, when it persists one. */
+  providerSessionId?: string;
   /** `images` are validated managed uploads, sent only when supported. */
   send(text: string, requestId: string, images: SideImage[]): Promise<void>;
   interrupt(): Promise<void>;
@@ -426,6 +428,8 @@ export class SideConversationSession implements SideConversationControl {
             this.transport = transport;
             this.snapshot.model = transport.model;
             this.snapshot.reasoningEffort = transport.reasoningEffort;
+            if (transport.providerSessionId)
+              this.snapshot.providerSessionId = transport.providerSessionId;
             this.snapshot.status = "idle";
             this.change();
             this.armTimeout(IDLE_MS);

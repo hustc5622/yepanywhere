@@ -99,6 +99,22 @@ agy 的后台命令和计时器结束时，agy 会在没有 prompt 的情况下�
 - agy 不记录分叉来源（`conversation_parents` 没有记录，`parent_conversation_id` 为空，新会话照常出现在会话目录里）。Yep 把 `forkParentSessionId` 和被替换提问的 id（`forkTargetMessageId`）写进自己的会话元数据，reader 据此用 copied-prefix 方式（同 Pi）构建分支：复制的历史要求 step 序号、角色、正文和时间戳都相同；被编辑提问与原提问显示为同级分支，会话列表把整个分支族合并成一项。
 - 消息 id 为 `agy-<会话 id>-step-<n>`。fork 保留 step 序号，不带会话 id 的话同一分支族里会出现重复 id。旧版本的 `agy-step-<n>` 仍能解析。
 
+## 旁路对话（`/side`、`/btw`）
+
+和 Codex、Pi 一样，可以在主任务运行中或空闲时开一个独立的只读旁路，问完用「带回主任务」把结论带回输入框。agy 没有 ACP 层面的 ephemeral 会话，所以实现方式与编辑分支类似，用独立进程加内嵌语言服务器：
+
+- 旁路另起一个 `agy acp --log-file <临时目录>/acp.log`（随机 `ANTIGRAVITY_SERVER_CSRF_TOKEN`），**不动主会话进程**，因此主任务那一轮继续运行。
+- 有主上下文时：先 `session/list` 启动内嵌语言服务器并兼做登录检查，再用 `GetCascadeTrajectorySteps` 读该进程看到的 step 列表，挑一个 agy 接受的 fork 点（`planAgySideFork`）：agy 只允许在「一轮结束时、下一条用户消息之前」分叉，所以对话已交还控制就在最后一步分叉；主任务还在跑就退到上一轮的结尾，最多试 3 个候选点（读列表和分叉之间主任务又走了一步时，报错原文是 `a fork must be taken at the end of a turn`，直接用下一个候选）。分叉后立即登记这个新会话，再在原进程里 `session/resume` 它。
+- 没有主上下文时直接 `session/new`。两种情况都给 agy 传 `_meta.antigravity.systemPrompt.append`，内容是旁路边界（`SIDE_BOUNDARY`）、只读工具策略，以及主任务正在处理的请求原文（第一轮还没结束时，fork 点不存在，旁路改用新会话，但会把这条请求作为参考附上，最多 6000 字符）。
+- 模型和思考等级继承主会话当前的 `model` / `thought_level`；agy 在 resume 后会把模式重置回默认，所以每次都重新 `session/set_mode default`。resume 失败时退回 `session/load`。
+- 只读靠 agy 的审批通道强制，思路与 agy 自带 `/btw` 一致（它同样允许读文件、自动拒绝需要审批的调用）：`read_file` 等只读工具不经审批，`run_command` 只在整条命令是纯只读命令时批准（`isAgySideReadOnlyCommand`：只允许 `rg`/`grep`/`find`（不带 `-exec`、`-delete`）/`ls`/`cat`/`head`/`tail`/`wc`/`sed -n` 行区间/`git status|log|show|diff|blame` 等，管道和 `&&`、`;` 可以，重定向只允许丢弃到 `/dev/null`，拒绝展开、子 shell 和后台执行），其余一律拒绝并在回答末尾说明拒绝了什么。子 agent、`send_message`、`schedule`、`manage_task`、workflow、swarm 这类不经审批就会执行、且会碰到旁路之外的调用，一出现就取消这一轮。
+  - 如果 agy 的 `toolPermission` 是 `always-proceed` 或 `proceed-in-sandbox`，或者 `settings.json` 的 `permissions.allow` 里有任何非只读动作（例如 `command(git)`），旁路根本不会被创建：那意味着 agy 会自动执行写操作，审批通道管不到。项目级 `.gemini` 规则不在这个预检能看到的范围内，所以还有第二道网：写类工具（`write_file`/`edit_file`/`run_command`/`call_mcp_tool` 等）如果在没有经过 Yep 批准的情况下直接完成，旁路立即关闭并提示是哪条调用穿过了规则。
+- agy 会把旁路会话落盘到 `~/.gemini/antigravity-cli`。为了不让它出现在 Yep 的会话列表、索引和外部活动里，Yep 在自己的数据目录写 `agy-side-sessions.json`（`register` / `markDeleted` / 孤儿 `pid` 回收，原子写入，按 mtime 缓存）：`listAgySessionRecords`、`findAgySessionRecord` 统一过滤掉这些 id，因此会话列表、会话详情、搜索、索引、外部活动追踪和文件监听都看不到它们。删除后仍保留 10 分钟，因为 agy 的 `conversation_summaries` 行是异步消失的。
+- 关闭旁路时：`session/cancel` → `session/close` → 用同一个语言服务器调 `DeleteCascadeTrajectory {cascadeId}` 删除临时会话 → 结束进程并删掉临时目录。删除失败时记录 `agy_side_conversation_deleted` 之外的告警，条目留在注册表里当孤儿，下次创建旁路时用新进程的语言服务器回收。Yep 从不直接删 agy 的文件。
+- 主会话进程结束时（`abort`、自然退出、runtime 重启）旁路一起结束；旁路自身也有 30 分钟空闲、10 分钟单轮上限。
+- 已知限制：不能真正恢复「运行中那一轮的前半段」——主任务还在推进时，旁路拿到的是上一轮结束时的快照加当前请求原文；用户 `/btw` 原生实现同样不继承未完成的轮次。agy 自己发起的唤醒轮次期间的旁路同理。
+- 实现：`packages/server/src/side-conversations/agy.ts`（fork 选点、只读判定、设置预检、事件映射）、`agy-registry.ts`（临时会话注册表）、`packages/server/src/sdk/providers/agy-acp-tools.ts`（与主 provider 共用的工具名、结果文本、模型切换）、`acp/client.ts`（`_meta`、`session/close`、进程退出回调）。测试：`packages/server/test/side-conversations/agy.test.ts`（模拟 agy 覆盖分叉选点与回退、只读审批、拒绝提示、空上下文、注册表隐藏与清理、设置冲突）。
+
 ## 数据来源（只读）
 
 - 会话目录：`~/.gemini/antigravity-cli/conversation_summaries.db` 的 `conversation_summaries` 表。只列出 `parent_conversation_id = ''`（排除子 agent 运行）且 `step_count > 0`（排除只建了会话、从未提问的）的记录。工作目录取自 `workspace_uris`：同一目录的真实路径和传入路径都出现时，取传入路径（即符号链接那种写法）。
@@ -127,4 +143,6 @@ agy 的后台命令和计时器结束时，agy 会在没有 prompt 的情况下�
 
 - 单元测试：`packages/server/test/sdk/providers/agy.test.ts`、`agy-agent-turn.test.ts`（用模拟 agy 覆盖后台任务唤醒、并入、中断和残余正文）、`agy-fork.test.ts`（用模拟 agy 覆盖语言服务器端口、CSRF 令牌和 fork 失败）、`packages/server/test/sessions/agy-branch.test.ts`（分支视图）、`agy-login.test.ts`（用模拟 agy 脚本覆盖登录流程）、`agy-usage.test.ts`（真实 `/usage`、`/credits` 输出作 fixture）、`agy.test.ts` 的 `agy spawn env`（`YEP_AGY_PROXY` 只作用于 agy）、`agy-network.test.ts`（分流代理：Google 域名走认证上游、其余直连、上游失败不回退）、`packages/server/test/sessions/agy-store.test.ts`、`packages/server/test/routes/providers.test.ts`、`packages/client/src/components/__tests__/AgyAccountCard.test.tsx`。
 - 真实联调：`npx tsx scripts/smoke-agy-provider.ts [cwd]`。依次覆盖新建、续接和工具审批，再做问卷测试，最后用 reader 读回历史。脚本会发起模型请求（默认 Gemini 3.8 Flash low），并在 agy 历史里留下测试会话，运行前需要用户授权。可用环境变量：`SMOKE_RESUME`、`SMOKE_PROMPT`、`SMOKE_DENY=1`、`SMOKE_MODEL`、`SMOKE_EFFORT`、`SMOKE_MODE`、`SMOKE_MODELS=1`、`SMOKE_QUESTION=0`。
+- 旁路对话真实联调：`npx tsx --conditions source scripts/smoke-agy-side-conversation.ts [cwd]`。先跑一轮主任务，再开一次带主上下文的旁路（要求读一个文件，检查只读工具能正常用）、一次不带上下文的旁路（要求写文件，检查被拒绝且旁路没被关掉），最后确认临时会话对注册表和会话目录都不可见。会发起模型请求并留下一个主会话，`SMOKE_SKIP_EMPTY=1`、`SMOKE_SKIP_EDIT=1` 可裁剪。
+  - 零模型验证（不发起对话，只建会话、分叉、删除）：起一个主会话后立刻 `create` / `close` 带上下文和不带上下文的旁路，确认 `brain/<id>` 和 `conversations/<id>.db` 被 `DeleteCascadeTrajectory` 清掉、注册表里留下带 `deletedAt` 的条目。
 - 升级 `agy` 后，重新运行 `references/antigravity/probe/step*.mjs`（需要登录，会发起少量请求），对比新旧 trace，再核对 `agy*.ts`。

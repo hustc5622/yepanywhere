@@ -464,7 +464,9 @@ function SessionPageContent({
   );
   const [sideVisible, setSideVisible] = useState(false);
   const hasSideConversation =
-    effectiveProvider === "codex" || effectiveProvider === "pi";
+    effectiveProvider === "codex" ||
+    effectiveProvider === "pi" ||
+    effectiveProvider === "agy";
   const side = useSideConversation(
     actualSessionId,
     hasSideConversation,

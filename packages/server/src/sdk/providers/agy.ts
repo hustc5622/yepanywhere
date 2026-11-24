@@ -48,11 +48,11 @@ import {
 } from "../../sessions/agy-store.js";
 import {
   canonicalizeAgyToolName,
-  cleanAgyToolOutput,
-  inferAgyNativeToolName,
   normalizeAgyToolArguments,
   readAgyToolTiming,
 } from "../../sessions/agy-tools.js";
+import { createAgySideConversation } from "../../side-conversations/agy.js";
+import { SideConversationSession } from "../../side-conversations/session.js";
 import { whichCommand } from "../cli-detection.js";
 import { MessageQueue, getUserPromptProjection } from "../messageQueue.js";
 import type {
@@ -63,6 +63,16 @@ import type {
   UserMessage,
 } from "../types.js";
 import { ACPClient } from "./acp/client.js";
+import {
+  AGY_AUTH_REQUIRED_MESSAGE,
+  agyNativeToolName,
+  agyToolRawInput,
+  agyToolResultText,
+  applyAgyModel,
+  isAgyAuthRequiredError as isAuthRequiredError,
+  recordAgyToolNames,
+  selectAgyConfigValues,
+} from "./agy-acp-tools.js";
 import { forkAgyConversation, planAgyEditFork } from "./agy-fork.js";
 import {
   AGY_FALLBACK_MODELS,
@@ -70,7 +80,6 @@ import {
   AGY_THOUGHT_CONFIG_ID,
   buildAgyModelCatalog,
   parseAgyModelsOutput,
-  resolveAgyModelChoice,
 } from "./agy-models.js";
 import { ensureAgySplitProxy, getAgyUpstreamFailure } from "./agy-network.js";
 import {
@@ -84,6 +93,12 @@ import type {
   ProviderName,
   StartSessionOptions,
 } from "./types.js";
+
+export {
+  AGY_AUTH_REQUIRED_MESSAGE,
+  agyToolResultText,
+  recordAgyToolNames,
+} from "./agy-acp-tools.js";
 
 const execFileAsync = promisify(execFile);
 const log = getLogger();
@@ -102,11 +117,6 @@ const MODEL_CATALOG_TTL_MS = 10 * 60_000;
 const AUTH_OK_TTL_MS = 5 * 60_000;
 const AUTH_MISSING_TTL_MS = 20_000;
 const MODELS_TIMEOUT_MS = 30_000;
-
-/** ACP error code agy returns before the user signed in. */
-const AUTH_REQUIRED_CODE = -32000;
-export const AGY_AUTH_REQUIRED_MESSAGE =
-  "Antigravity CLI is not signed in. Run `agy` once in a terminal on the Yep host (or `agy acp --login` over SSH) and complete the Google sign-in, then retry.";
 
 /**
  * agy answers "Authentication required" when it cannot refresh its token,
@@ -147,111 +157,6 @@ export function toAgyMode(
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function isAuthRequiredError(error: unknown): boolean {
-  if (isRecord(error)) {
-    if (error.code === AUTH_REQUIRED_CODE) return true;
-    if (
-      typeof error.message === "string" &&
-      /authentication required/i.test(error.message)
-    ) {
-      return true;
-    }
-  }
-  return (
-    error instanceof Error && /authentication required/i.test(error.message)
-  );
-}
-
-function textFromContentList(list: unknown): string {
-  if (!Array.isArray(list)) return "";
-  const parts: string[] = [];
-  for (const item of list) {
-    if (!isRecord(item)) continue;
-    const inner = item.type === "content" ? item.content : item;
-    if (
-      isRecord(inner) &&
-      inner.type === "text" &&
-      typeof inner.text === "string" &&
-      inner.text
-    ) {
-      parts.push(inner.text);
-    }
-  }
-  return parts.join("\n");
-}
-
-/** Live tool result text; the persisted transcript replaces it later. */
-export function agyToolResultText(update: {
-  content?: unknown;
-  rawOutput?: unknown;
-}): string {
-  const raw = update.rawOutput;
-  if (typeof raw === "string") return cleanAgyToolOutput(raw);
-  if (isRecord(raw)) {
-    if (typeof raw.output === "string" && raw.output) {
-      return cleanAgyToolOutput(raw.output);
-    }
-    if (typeof raw.error === "string") return raw.error;
-    if (isRecord(raw.error) && typeof raw.error.message === "string") {
-      return raw.error.message;
-    }
-  }
-  return textFromContentList(update.content);
-}
-
-/**
- * agy adds a non-standard `name` (native tool name) next to `title`. The ACP
- * SDK drops it while validating, so the provider records it from raw frames
- * (`names`); an argument-shape inference covers anything it missed.
- */
-function nativeToolName(
-  update: unknown,
-  names?: ReadonlyMap<string, string>,
-): string {
-  if (!isRecord(update)) return "tool";
-  const recorded =
-    typeof update.toolCallId === "string"
-      ? names?.get(update.toolCallId)
-      : undefined;
-  if (recorded) return recorded;
-  if (typeof update.name === "string" && update.name) return update.name;
-  return inferAgyNativeToolName(update);
-}
-
-/** Remember agy's vendor tool names from raw ACP frames (see ACPClient). */
-export function recordAgyToolNames(
-  frame: Record<string, unknown>,
-  names: Map<string, string>,
-): void {
-  const params = isRecord(frame.params) ? frame.params : undefined;
-  if (!params) return;
-  const candidate =
-    frame.method === "session/update"
-      ? params.update
-      : frame.method === "session/request_permission"
-        ? params.toolCall
-        : undefined;
-  if (
-    isRecord(candidate) &&
-    typeof candidate.toolCallId === "string" &&
-    typeof candidate.name === "string" &&
-    candidate.name
-  ) {
-    names.set(candidate.toolCallId, candidate.name);
-  }
-}
-
-function toolInput(update: { rawInput?: unknown; locations?: unknown }): {
-  raw: unknown;
-} {
-  const raw =
-    update.rawInput ??
-    (isRecord(update) && "args" in update
-      ? (update as { args?: unknown }).args
-      : undefined);
-  return { raw };
 }
 
 function toolUseMessage(
@@ -330,9 +235,9 @@ export function convertAgyUpdate(
       const previous = seen.get(update.toolCallId);
       const name =
         update.sessionUpdate === "tool_call" || !previous
-          ? nativeToolName(update, names)
+          ? agyNativeToolName(update, names)
           : previous.name;
-      const { raw } = toolInput(update);
+      const raw = agyToolRawInput(update);
       const messages: SDKMessage[] = [];
       const inputKey = raw === undefined ? "" : JSON.stringify(raw);
       if (!previous || (raw !== undefined && inputKey !== previous.input)) {
@@ -487,32 +392,6 @@ function trackPrompt(promise: Promise<PromptResponse>): PromptTracker {
     },
   );
   return tracker;
-}
-
-function selectValues(
-  configOptions: unknown,
-  id: string,
-): { current?: string; values: string[] } {
-  if (!Array.isArray(configOptions)) return { values: [] };
-  const option = configOptions.find(
-    (candidate) => isRecord(candidate) && candidate.id === id,
-  );
-  if (!isRecord(option)) return { values: [] };
-  const values: string[] = [];
-  const collect = (list: unknown) => {
-    if (!Array.isArray(list)) return;
-    for (const entry of list) {
-      if (!isRecord(entry)) continue;
-      if (Array.isArray(entry.options)) collect(entry.options);
-      else if (typeof entry.value === "string") values.push(entry.value);
-    }
-  };
-  collect(option.options);
-  return {
-    current:
-      typeof option.currentValue === "string" ? option.currentValue : undefined,
-    values,
-  };
 }
 
 export class AgyProvider implements AgentProvider {
@@ -692,7 +571,36 @@ export class AgyProvider implements AgentProvider {
 
     const client = new ACPClient();
     const commands = new AcpCommandTracker("agy", options.cwd);
-    const iterator = this.runSession(
+    // Side conversations run in an `agy acp` of their own (see
+    // side-conversations/agy.ts); this process is only read for the model.
+    const sideConversations = new SideConversationSession({
+      ready: () => Boolean(state.sessionId && client.isAlive()),
+      parentId: () => state.sessionId ?? "",
+      supportsImages: true,
+      create: async (context, emit) => {
+        const agyPath = await this.findAgyPath();
+        const parentSessionId = state.sessionId;
+        if (!agyPath || !parentSessionId) {
+          throw new Error("Antigravity is not ready");
+        }
+        const configOptions = client.getSessionConfigOptions(parentSessionId);
+        return createAgySideConversation({
+          agyPath,
+          cwd: options.cwd,
+          env: await agySpawnEnv(agyPath),
+          parentSessionId,
+          model:
+            state.model ??
+            selectAgyConfigValues(configOptions, AGY_MODEL_CONFIG_ID).current,
+          reasoningEffort:
+            state.reasoningEffort ??
+            selectAgyConfigValues(configOptions, AGY_THOUGHT_CONFIG_ID).current,
+          context,
+          emit,
+        });
+      },
+    });
+    const runSession = this.runSession(
       client,
       options,
       queue,
@@ -700,6 +608,14 @@ export class AgyProvider implements AgentProvider {
       abortController.signal,
       commands,
     );
+    // The side process outlives nothing: it ends with this session.
+    const iterator = (async function* () {
+      try {
+        yield* runSession;
+      } finally {
+        void sideConversations.dispose("The parent provider stopped.");
+      }
+    })();
 
     const requireSession = (): string => {
       if (!state.sessionId) {
@@ -711,7 +627,9 @@ export class AgyProvider implements AgentProvider {
     return {
       iterator,
       queue,
+      sideConversations,
       abort: () => {
+        void sideConversations.dispose("The parent provider stopped.");
         abortController.abort();
         queue.close();
         if (state.sessionId) {
@@ -726,7 +644,9 @@ export class AgyProvider implements AgentProvider {
         const cutoff = Date.now() - AGY_BACKGROUND_WORK_MAX_AGE_MS;
         for (const startedAt of state.openCalls.values())
           if (startedAt >= cutoff) return client.isAlive();
-        return false;
+        // A side conversation is a process of its own; reclaiming this one
+        // would throw away the context it is still asking about.
+        return sideConversations.isOpen;
       },
       get pid() {
         return client.pid;
@@ -766,7 +686,7 @@ export class AgyProvider implements AgentProvider {
         const sessionId = requireSession();
         const model =
           state.model ??
-          selectValues(
+          selectAgyConfigValues(
             client.getSessionConfigOptions(sessionId),
             AGY_MODEL_CONFIG_ID,
           ).current;
@@ -876,7 +796,7 @@ export class AgyProvider implements AgentProvider {
       await this.applyPermissionMode(client, sessionId, state.permissionMode);
       const model =
         options.model ??
-        selectValues(
+        selectAgyConfigValues(
           client.getSessionConfigOptions(sessionId),
           AGY_MODEL_CONFIG_ID,
         ).current;
@@ -896,10 +816,10 @@ export class AgyProvider implements AgentProvider {
         session_id: sessionId,
         cwd: options.cwd,
         model:
-          selectValues(configOptions, AGY_MODEL_CONFIG_ID).current ??
+          selectAgyConfigValues(configOptions, AGY_MODEL_CONFIG_ID).current ??
           options.model,
         reasoningEffort:
-          selectValues(configOptions, AGY_THOUGHT_CONFIG_ID).current ??
+          selectAgyConfigValues(configOptions, AGY_THOUGHT_CONFIG_ID).current ??
           options.reasoningEffort,
       } as SDKMessage;
 
@@ -1095,50 +1015,7 @@ export class AgyProvider implements AgentProvider {
     model: string,
     reasoningEffort: string | undefined,
   ): Promise<void> {
-    const models = selectValues(
-      client.getSessionConfigOptions(sessionId),
-      AGY_MODEL_CONFIG_ID,
-    );
-    const choice = resolveAgyModelChoice(models.values, model, reasoningEffort);
-    if (!choice) {
-      throw new Error(`Antigravity does not offer model "${model}"`);
-    }
-    if (models.current !== choice.family) {
-      const result = await client.setSessionConfigOption(
-        sessionId,
-        AGY_MODEL_CONFIG_ID,
-        choice.family,
-      );
-      const applied = selectValues(
-        result.configOptions,
-        AGY_MODEL_CONFIG_ID,
-      ).current;
-      if (applied !== choice.family) {
-        throw new Error(
-          `Antigravity did not apply model "${model}" (active: "${applied ?? "unknown"}")`,
-        );
-      }
-    }
-    if (!choice.tier) return;
-    const tiers = selectValues(
-      client.getSessionConfigOptions(sessionId),
-      AGY_THOUGHT_CONFIG_ID,
-    );
-    if (tiers.current === choice.tier) return;
-    if (!tiers.values.includes(choice.tier)) {
-      // Families differ in tiers (Flash has no `xhigh`); keep agy's default
-      // rather than failing the turn.
-      log.info(
-        { sessionId, model: choice.family, tier: choice.tier },
-        "Antigravity model does not offer the requested thinking level",
-      );
-      return;
-    }
-    await client.setSessionConfigOption(
-      sessionId,
-      AGY_THOUGHT_CONFIG_ID,
-      choice.tier,
-    );
+    await applyAgyModel(client, sessionId, model, reasoningEffort);
   }
 
   /**
@@ -1432,8 +1309,8 @@ export class AgyProvider implements AgentProvider {
   ): Promise<RequestPermissionResponse> {
     if (!options.onToolApproval) return { outcome: { outcome: "cancelled" } };
     const toolCall = request.toolCall;
-    const nativeName = nativeToolName(toolCall, state.toolNames);
-    const { raw } = toolInput(toolCall);
+    const nativeName = agyNativeToolName(toolCall, state.toolNames);
+    const raw = agyToolRawInput(toolCall);
     const toolName = canonicalizeAgyToolName(nativeName, raw);
     const input = {
       ...normalizeAgyToolArguments(nativeName, raw),

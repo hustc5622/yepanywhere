@@ -173,8 +173,8 @@ describe("side conversation parent restore", () => {
     );
   });
 
-  it("restores Codex parents too", async () => {
-    const { service, projectId, created, resumeSession } = setup("codex");
+  it.each(["codex", "agy"])("restores %s parents too", async (provider) => {
+    const { service, projectId, created, resumeSession } = setup(provider);
     await expect(
       service.sideConversation({
         sessionId: "main",

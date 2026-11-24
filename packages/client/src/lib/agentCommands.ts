@@ -421,6 +421,8 @@ export function buildAgentCommandCatalog({
       "model",
       (provider === "mcode" || provider === "agy") && ownsProcess,
     );
+    // Antigravity side conversations run in a separate `agy acp`.
+    sideCommands(provider === "agy" && hasSide);
     return [slashGroup(labels.slashCommands, mergeCommands(yepCommands, live))];
   }
 

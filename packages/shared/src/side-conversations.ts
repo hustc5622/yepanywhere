@@ -103,6 +103,11 @@ export interface SideConversationMessage {
 export interface SideConversationSnapshot {
   id: string;
   parentSessionId: string;
+  /**
+   * Provider-side id of the conversation or thread behind this side chat
+   * (Antigravity persists one). Diagnostics only; the panel never shows it.
+   */
+  providerSessionId?: string;
   context: "snapshot" | "empty";
   capturedAt: string;
   model?: string;

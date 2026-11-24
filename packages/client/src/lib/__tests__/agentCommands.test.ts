@@ -283,6 +283,46 @@ describe("agent command catalog", () => {
     expect(external?.commands).toEqual([]);
   });
 
+  it("adds Yep side chat to Antigravity's ACP commands", () => {
+    const providerCommands = [{ name: "goal", description: "Goal" }];
+    const [owned] = buildAgentCommandCatalog({
+      provider: "agy",
+      supportsSlashCommands: true,
+      providerCommands,
+      availability: OWNED,
+      descriptions: { side: "Side chat" },
+    });
+    expect(owned?.commands).toEqual(["model", "side", "btw", "goal"]);
+    expect(owned?.details?.btw?.source).toBe("yep");
+
+    const [idle] = buildAgentCommandCatalog({
+      provider: "agy",
+      providerCommands,
+      availability: IDLE,
+    });
+    expect(idle?.commands).toEqual(["side", "btw", "goal"]);
+
+    for (const availability of [
+      NEW_SESSION,
+      { ...OWNED, hasSideConversation: false },
+    ]) {
+      const [config] = buildAgentCommandCatalog({
+        provider: "agy",
+        providerCommands,
+        availability,
+      });
+      expect(config?.commands).not.toContain("side");
+      expect(config?.commands).not.toContain("btw");
+    }
+    // MiniMax Code has no side conversation.
+    const [mcode] = buildAgentCommandCatalog({
+      provider: "mcode",
+      providerCommands,
+      availability: OWNED,
+    });
+    expect(mcode?.commands).not.toContain("side");
+  });
+
   it("hides commands for providers without command support", () => {
     const [config] = buildAgentCommandCatalog({
       provider: "gemini",

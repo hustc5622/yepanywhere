@@ -169,11 +169,17 @@ function abortError(): Error {
   return new Error("Antigravity fork was aborted");
 }
 
-async function waitForPort(
+/**
+ * Poll an `agy acp --log-file` log until the embedded language server
+ * reports its HTTP port. `rpcFailed` surfaces the session request that boots
+ * it failing first (e.g. signed out).
+ */
+export async function waitForAgyLanguageServerPort(
   logPath: string,
   deadline: number,
   signal: AbortSignal | undefined,
   rpcFailed: () => Error | null,
+  unsupportedMessage = "agy did not report its language server port; this agy version may not support edit forks",
 ): Promise<number> {
   while (Date.now() < deadline) {
     if (signal?.aborted) throw abortError();
@@ -184,9 +190,54 @@ async function waitForPort(
     if (port) return port;
     await new Promise((resolve) => setTimeout(resolve, LOG_POLL_INTERVAL_MS));
   }
-  throw new Error(
-    "agy did not report its language server port; this agy version may not support edit forks",
+  throw new Error(unsupportedMessage);
+}
+
+/** The loopback Connect endpoint of one `agy acp` process. */
+export interface AgyLanguageServer {
+  port: number;
+  /** The `ANTIGRAVITY_SERVER_CSRF_TOKEN` the process was started with. */
+  token: string;
+}
+
+/**
+ * Call `LanguageServerService/<method>` with Connect HTTP+JSON. Rejects with
+ * agy's own error message for a non-2xx answer.
+ */
+export async function callAgyLanguageServer(
+  server: AgyLanguageServer,
+  method: string,
+  body: Record<string, unknown>,
+  signal?: AbortSignal,
+): Promise<unknown> {
+  const response = await fetch(
+    `http://127.0.0.1:${server.port}/${LS_SERVICE}/${method}`,
+    {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Connect-Protocol-Version": "1",
+        "x-antigravity-csrf-token": server.token,
+      },
+      body: JSON.stringify(body),
+      ...(signal ? { signal } : {}),
+    },
   );
+  const text = await response.text();
+  let parsed: unknown = null;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    // Reported below with the raw text.
+  }
+  if (!response.ok) {
+    const message =
+      isRecord(parsed) && typeof parsed.message === "string"
+        ? parsed.message
+        : text.trim() || `HTTP ${response.status}`;
+    throw Object.assign(new Error(message), { status: response.status });
+  }
+  return parsed;
 }
 
 /**
@@ -236,7 +287,7 @@ export async function forkAgyConversation(
       rpcFailure =
         error instanceof Error ? error : new Error(String(error ?? "unknown"));
     });
-    const port = await waitForPort(
+    const port = await waitForAgyLanguageServerPort(
       logPath,
       deadline,
       options.signal,
@@ -244,40 +295,25 @@ export async function forkAgyConversation(
     );
     await listed;
 
-    const response = await fetch(
-      `http://127.0.0.1:${port}/${LS_SERVICE}/ForkConversation`,
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "Connect-Protocol-Version": "1",
-          "x-antigravity-csrf-token": token,
-        },
-        body: JSON.stringify({
+    let body: unknown;
+    try {
+      body = await callAgyLanguageServer(
+        { port, token },
+        "ForkConversation",
+        {
           sourceCascadeId: options.sourceSessionId,
           forkAtStepIndex: options.forkAtStepIndex,
           targetForkWorkspace: "FORK_TARGET_CURRENT_WORKSPACE",
-        }),
-        signal: AbortSignal.any([
+        },
+        AbortSignal.any([
           AbortSignal.timeout(Math.max(1, deadline - Date.now())),
           ...(options.signal ? [options.signal] : []),
         ]),
-      },
-    );
-    const text = await response.text();
-    let body: unknown = null;
-    try {
-      body = JSON.parse(text);
-    } catch {
-      // Reported below with the raw text.
-    }
-    if (!response.ok) {
-      const message =
-        isRecord(body) && typeof body.message === "string"
-          ? body.message
-          : text.trim() || `HTTP ${response.status}`;
+      );
+    } catch (error) {
+      if (!(error instanceof Error) || !("status" in error)) throw error;
       throw new Error(
-        `Antigravity could not fork the conversation: ${message}`,
+        `Antigravity could not fork the conversation: ${error.message}`,
       );
     }
     const newSessionId =

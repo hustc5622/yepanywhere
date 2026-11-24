@@ -334,7 +334,7 @@ function commandFailure(
  */
 /** Providers whose resident process hosts side conversations. */
 function providerHasSideConversation(provider: string | undefined): boolean {
-  return provider === "pi" || provider === "codex";
+  return provider === "pi" || provider === "codex" || provider === "agy";
 }
 
 /** How long a freshly restored parent may take to accept side controls. */

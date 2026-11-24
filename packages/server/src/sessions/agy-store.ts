@@ -31,6 +31,10 @@ import type {
   PiUsage,
 } from "@yep-anywhere/shared";
 import { PI_THINKING_PREVIEW_MAX_LENGTH } from "@yep-anywhere/shared";
+import {
+  getAgySideSessionRegistry,
+  isHiddenAgySideSession,
+} from "../side-conversations/agy-registry.js";
 import { withSqliteDatabase } from "../sqlite/query.js";
 import type { Message } from "../supervisor/types.js";
 import {
@@ -63,6 +67,11 @@ export const AGY_CONVERSATIONS_DIR = join(AGY_DATA_DIR, "conversations");
 
 export interface AgyStoreOptions {
   dataDir?: string;
+  /**
+   * Conversations that only back a Yep side conversation stay out of every
+   * listing (default: the shared side-conversation registry).
+   */
+  isHidden?: (sessionId: string) => boolean;
 }
 
 export interface AgySessionRecord {
@@ -221,9 +230,13 @@ export async function listAgySessionRecords(
         .prepare(`${AGY_SESSION_SELECT} ORDER BY last_modified_time DESC`)
         .all(),
   );
+  const hidden = options.isHidden
+    ? null
+    : getAgySideSessionRegistry().hiddenIds();
+  const isHidden = options.isHidden ?? ((id: string) => !!hidden?.has(id));
   return rows.flatMap((row) => {
     const record = toRecord(row, dataDir);
-    return record ? [record] : [];
+    return record && !isHidden(record.sessionId) ? [record] : [];
   });
 }
 
@@ -232,6 +245,7 @@ export async function findAgySessionRecord(
   options: AgyStoreOptions = {},
 ): Promise<AgySessionRecord | null> {
   const dataDir = options.dataDir ?? AGY_DATA_DIR;
+  if ((options.isHidden ?? isHiddenAgySideSession)(sessionId)) return null;
   const row = await withSqliteDatabase<Record<string, unknown> | undefined>(
     paths(dataDir).summariesDb,
     undefined,

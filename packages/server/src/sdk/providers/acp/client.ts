@@ -51,6 +51,11 @@ export interface ACPClientConfig {
   env?: Record<string, string>;
 }
 
+/** Vendor `_meta` sent with session/new, session/load or session/resume. */
+export interface ACPSessionRequestOptions {
+  _meta?: Record<string, unknown>;
+}
+
 /**
  * Callback for session update notifications from the agent.
  */
@@ -126,6 +131,9 @@ export class ACPClient {
   private onElicitationRequest: ElicitationRequestCallback | null = null;
   private onRawMessage: ((message: Record<string, unknown>) => void) | null =
     null;
+  private onExit:
+    | ((code: number | null, signal: NodeJS.Signals | null) => void)
+    | null = null;
   private onExtensionRequest:
     | ((
         method: string,
@@ -152,6 +160,16 @@ export class ACPClient {
     observer: (message: Record<string, unknown>) => void,
   ): void {
     this.onRawMessage = observer;
+  }
+
+  /**
+   * Observe the agent process exiting (crash, kill, or close()). Must be set
+   * before connect().
+   */
+  setExitCallback(
+    callback: (code: number | null, signal: NodeJS.Signals | null) => void,
+  ): void {
+    this.onExit = callback;
   }
 
   /**
@@ -211,6 +229,8 @@ export class ACPClient {
 
     this.process.on("exit", (code, signal) => {
       this.log.debug({ code, signal }, "ACP agent process exited");
+      // Cleared by close(): an intentional shutdown is not reported.
+      this.onExit?.(code, signal);
     });
 
     if (!this.process.stdin || !this.process.stdout) {
@@ -386,7 +406,10 @@ export class ACPClient {
    * Create a new session with the agent.
    * Returns the session ID.
    */
-  async newSession(cwd: string): Promise<string> {
+  async newSession(
+    cwd: string,
+    options: ACPSessionRequestOptions = {},
+  ): Promise<string> {
     if (!this.connection) {
       throw new Error("ACPClient not connected. Call connect() first.");
     }
@@ -396,6 +419,7 @@ export class ACPClient {
     const result = await this.connection.newSession({
       cwd,
       mcpServers: [],
+      ...(options._meta ? { _meta: options._meta } : {}),
     });
 
     this.log.debug({ sessionId: result.sessionId }, "ACP session created");
@@ -410,7 +434,11 @@ export class ACPClient {
    * Load an existing session by ID.
    * Note: This uses session/load which may not be supported by all agents.
    */
-  async loadSession(sessionId: string, cwd: string): Promise<void> {
+  async loadSession(
+    sessionId: string,
+    cwd: string,
+    options: ACPSessionRequestOptions = {},
+  ): Promise<void> {
     if (!this.connection) {
       throw new Error("ACPClient not connected. Call connect() first.");
     }
@@ -421,6 +449,7 @@ export class ACPClient {
       sessionId,
       cwd,
       mcpServers: [],
+      ...(options._meta ? { _meta: options._meta } : {}),
     });
     if (result?.configOptions) {
       this.sessionConfigOptions.set(sessionId, result.configOptions);
@@ -447,7 +476,11 @@ export class ACPClient {
    * Resume an existing session by ID.
    * Uses session/resume, which may be supported even when session/load is not.
    */
-  async resumeSession(sessionId: string, cwd: string): Promise<string> {
+  async resumeSession(
+    sessionId: string,
+    cwd: string,
+    options: ACPSessionRequestOptions = {},
+  ): Promise<string> {
     if (!this.connection) {
       throw new Error("ACPClient not connected. Call connect() first.");
     }
@@ -458,6 +491,7 @@ export class ACPClient {
       sessionId,
       cwd,
       mcpServers: [],
+      ...(options._meta ? { _meta: options._meta } : {}),
     });
 
     this.log.debug({ result }, "ACP session resumed");
@@ -471,6 +505,29 @@ export class ACPClient {
       ?.modes;
     if (modes) this.sessionModes.set(sessionId, modes);
     return sessionId;
+  }
+
+  /**
+   * `session/list` (agents advertising `sessionCapabilities.list`). Also a
+   * cheap first session-level request: agy boots its backend on it.
+   */
+  async listSessions(): Promise<void> {
+    if (!this.connection) {
+      throw new Error("ACPClient not connected. Call connect() first.");
+    }
+    await this.connection.listSessions({});
+  }
+
+  /**
+   * End a session the agent advertised `sessionCapabilities.close` for. The
+   * agent stops its work and releases the session's resources.
+   */
+  async closeSession(sessionId: string): Promise<void> {
+    if (!this.connection) return;
+    this.log.debug({ sessionId }, "Closing ACP session");
+    await this.connection.closeSession({ sessionId });
+    this.sessionConfigOptions.delete(sessionId);
+    this.sessionModes.delete(sessionId);
   }
 
   /**
@@ -591,5 +648,6 @@ export class ACPClient {
     this.onElicitationRequest = null;
     this.onExtensionRequest = null;
     this.onRawMessage = null;
+    this.onExit = null;
   }
 }
